@@ -182,6 +182,26 @@ func (s *Service) emitAuthUpdate(ctx context.Context, update watcher.AuthUpdate)
 	s.handleAuthUpdate(ctx, update)
 }
 
+func (s *Service) bootstrapAuthSnapshot(ctx context.Context, watcherWrapper *WatcherWrapper) {
+	if s == nil || watcherWrapper == nil {
+		return
+	}
+	auths := watcherWrapper.SnapshotAuths()
+	if len(auths) == 0 {
+		return
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ctx = coreauth.WithSkipPersist(ctx)
+	for _, auth := range auths {
+		if auth == nil || auth.ID == "" {
+			continue
+		}
+		s.applyCoreAuthAddOrUpdate(ctx, auth)
+	}
+}
+
 func (s *Service) handleAuthUpdate(ctx context.Context, update watcher.AuthUpdate) {
 	if s == nil {
 		return
@@ -637,6 +657,7 @@ func (s *Service) Run(ctx context.Context) error {
 		watcherWrapper.SetAuthUpdateQueue(s.authUpdates)
 	}
 	watcherWrapper.SetConfig(s.cfg)
+	s.bootstrapAuthSnapshot(ctx, watcherWrapper)
 
 	// 方案 A: 连接 Kiro 后台刷新器回调到 Watcher
 	// 当后台刷新器成功刷新 token 后，立即通知 Watcher 更新内存中的 Auth 对象
@@ -870,7 +891,7 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 		models = applyExcludedModels(models, excluded)
 	case "kimi":
 		models = registry.GetKimiModels()
-    models = applyExcludedModels(models, excluded)
+		models = applyExcludedModels(models, excluded)
 	case "github-copilot":
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
