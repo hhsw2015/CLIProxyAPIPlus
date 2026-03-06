@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"io/fs"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -1374,11 +1376,15 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 
 	if archiveAuth {
 		entry := logEntryWithRequestID(ctx)
-		movedTo, err := m.archiveAuthFile(archivePath, archiveKind)
+		targetPath, err := m.archiveAuthFile(archivePath, archiveKind)
 		if err != nil {
-			entry.WithError(err).Warnf("failed to archive auth %s after %s failure", result.AuthID, archiveKind)
+			entry.WithError(err).Warnf("failed to handle auth %s after %s failure", result.AuthID, archiveKind)
 		} else {
-			entry.Infof("archived auth %s to %s after %s failure", result.AuthID, movedTo, archiveKind)
+			if archiveKind == util.FailedAuthArchiveInvalid {
+				entry.Infof("deleted auth %s after %s failure", result.AuthID, archiveKind)
+			} else {
+				entry.Infof("archived auth %s to %s after %s failure", result.AuthID, targetPath, archiveKind)
+			}
 		}
 		m.hook.OnResult(ctx, result)
 		return
@@ -1553,6 +1559,16 @@ func (m *Manager) archiveAuthFile(sourcePath string, kind util.FailedAuthArchive
 	authDir, err := util.ResolveAuthDir(cfg.AuthDir)
 	if err != nil {
 		return "", err
+	}
+	if kind == util.FailedAuthArchiveInvalid {
+		if !filepath.IsAbs(sourcePath) {
+			sourcePath = filepath.Join(authDir, sourcePath)
+		}
+		sourcePath = filepath.Clean(sourcePath)
+		if err := os.Remove(sourcePath); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return "", err
+		}
+		return sourcePath, nil
 	}
 	return util.MoveAuthToArchive(authDir, sourcePath, kind)
 }
