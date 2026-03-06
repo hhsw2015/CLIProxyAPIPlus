@@ -1245,6 +1245,10 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	suspendReason := ""
 	clearModelQuota := false
 	setModelQuota := false
+	archiveAuth := false
+	archiveKind := util.FailedAuthArchiveKind("")
+	archivePath := ""
+	archiveIDs := make([]string, 0, 1)
 
 	m.mu.Lock()
 	if auth, ok := m.auths[result.AuthID]; ok && auth != nil {
@@ -1335,11 +1339,50 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 			} else {
 				applyAuthFailureState(auth, result.Error, result.RetryAfter, now)
 			}
+
+			if kind, sourcePath, ids, okArchive := m.failedAuthArchiveDecisionLocked(auth, result); okArchive {
+				archiveAuth = true
+				archiveKind = kind
+				archivePath = sourcePath
+				archiveIDs = append(archiveIDs[:0], ids...)
+				shouldResumeModel = false
+				shouldSuspendModel = false
+				clearModelQuota = false
+				setModelQuota = false
+				suspendReason = ""
+				for _, id := range archiveIDs {
+					delete(m.auths, id)
+				}
+			}
 		}
 
-		_ = m.persist(ctx, auth)
+		if archiveAuth {
+			reg := registry.GetGlobalRegistry()
+			for _, id := range archiveIDs {
+				reg.UnregisterClient(id)
+				if result.Model != "" {
+					reg.ClearModelQuotaExceeded(id, result.Model)
+				}
+			}
+		}
+
+		if !archiveAuth {
+			_ = m.persist(ctx, auth)
+		}
 	}
 	m.mu.Unlock()
+
+	if archiveAuth {
+		entry := logEntryWithRequestID(ctx)
+		movedTo, err := m.archiveAuthFile(archivePath, archiveKind)
+		if err != nil {
+			entry.WithError(err).Warnf("failed to archive auth %s after %s failure", result.AuthID, archiveKind)
+		} else {
+			entry.Infof("archived auth %s to %s after %s failure", result.AuthID, movedTo, archiveKind)
+		}
+		m.hook.OnResult(ctx, result)
+		return
+	}
 
 	if clearModelQuota && result.Model != "" {
 		registry.GetGlobalRegistry().ClearModelQuotaExceeded(result.AuthID, result.Model)
@@ -1354,6 +1397,164 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	}
 
 	m.hook.OnResult(ctx, result)
+}
+
+func (m *Manager) failedAuthArchiveDecisionLocked(auth *Auth, result Result) (util.FailedAuthArchiveKind, string, []string, bool) {
+	if m == nil || auth == nil || result.Success {
+		return "", "", nil, false
+	}
+	cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
+	if cfg == nil || !cfg.ArchiveFailedAuth {
+		return "", "", nil, false
+	}
+	if auth.Attributes == nil {
+		return "", "", nil, false
+	}
+	sourcePath := strings.TrimSpace(auth.Attributes["path"])
+	if sourcePath == "" {
+		return "", "", nil, false
+	}
+	authDir, err := util.ResolveAuthDir(cfg.AuthDir)
+	if err != nil || authDir == "" || util.IsArchivedAuthPath(authDir, sourcePath) {
+		return "", "", nil, false
+	}
+	kind, ok := classifyFailedAuthArchive(result.Error)
+	if !ok {
+		return "", "", nil, false
+	}
+	ids := m.authIDsForSourcePathLocked(sourcePath)
+	if len(ids) == 0 {
+		ids = []string{auth.ID}
+	}
+	return kind, sourcePath, ids, true
+}
+
+func classifyFailedAuthArchive(resultErr *Error) (util.FailedAuthArchiveKind, bool) {
+	status := statusCodeFromResult(resultErr)
+	message := strings.ToLower(strings.TrimSpace(failedAuthArchiveText(resultErr)))
+	if isQuotaArchiveFailure(status, message) {
+		return util.FailedAuthArchiveLimit, true
+	}
+	if isInvalidArchiveFailure(status, message) {
+		return util.FailedAuthArchiveInvalid, true
+	}
+	return "", false
+}
+
+func failedAuthArchiveText(resultErr *Error) string {
+	if resultErr == nil {
+		return ""
+	}
+	parts := make([]string, 0, 2)
+	if code := strings.TrimSpace(resultErr.Code); code != "" {
+		parts = append(parts, code)
+	}
+	if msg := strings.TrimSpace(resultErr.Message); msg != "" {
+		parts = append(parts, msg)
+	}
+	return strings.Join(parts, " ")
+}
+
+func isQuotaArchiveFailure(status int, message string) bool {
+	if containsAnyFold(message,
+		"insufficient_quota",
+		"quota_exceeded",
+		"quota exceeded",
+		"quota exhausted",
+		"free allocated quota exceeded",
+		"out of credits",
+		"credit balance",
+		"payment_required",
+		"payment required",
+	) {
+		return true
+	}
+	switch status {
+	case http.StatusPaymentRequired, http.StatusTooManyRequests:
+		return true
+	default:
+		return false
+	}
+}
+
+func isInvalidArchiveFailure(status int, message string) bool {
+	if containsAnyFold(message,
+		"token_invalid",
+		"invalid_grant",
+		"refresh_token_reused",
+		"authentication is invalid",
+		"authentication invalid",
+		"invalid api key",
+		"invalid_api_key",
+		"api key is invalid",
+		"session expired",
+		"token expired",
+		"token revoked",
+		"unauthorized",
+	) {
+		return true
+	}
+	switch status {
+	case http.StatusUnauthorized, http.StatusForbidden:
+		return true
+	default:
+		return false
+	}
+}
+
+func containsAnyFold(value string, targets ...string) bool {
+	if value == "" {
+		return false
+	}
+	for _, target := range targets {
+		if target == "" {
+			continue
+		}
+		if strings.Contains(value, strings.ToLower(target)) {
+			return true
+		}
+	}
+	return false
+}
+
+func (m *Manager) authIDsForSourcePathLocked(sourcePath string) []string {
+	if m == nil || sourcePath == "" {
+		return nil
+	}
+	ids := make([]string, 0, 1)
+	for id, auth := range m.auths {
+		if auth == nil || auth.Attributes == nil {
+			continue
+		}
+		if sameAuthSourcePath(auth.Attributes["path"], sourcePath) {
+			ids = append(ids, id)
+		}
+	}
+	return ids
+}
+
+func sameAuthSourcePath(left, right string) bool {
+	left = strings.TrimSpace(left)
+	right = strings.TrimSpace(right)
+	if left == "" || right == "" {
+		return false
+	}
+	return strings.EqualFold(filepath.Clean(left), filepath.Clean(right))
+}
+
+func (m *Manager) archiveAuthFile(sourcePath string, kind util.FailedAuthArchiveKind) (string, error) {
+	if m == nil {
+		return "", nil
+	}
+	cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
+	if cfg == nil {
+		return "", nil
+	}
+	authDir, err := util.ResolveAuthDir(cfg.AuthDir)
+	if err != nil {
+		return "", err
+	}
+	return util.MoveAuthToArchive(authDir, sourcePath, kind)
 }
 
 func ensureModelState(auth *Auth, model string) *ModelState {

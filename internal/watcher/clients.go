@@ -82,6 +82,12 @@ func (w *Watcher) reloadClients(rescanAuth bool, affectedOAuthProviders []string
 				if err != nil {
 					return nil
 				}
+				if info.IsDir() {
+					if util.IsFailedAuthArchiveDirName(info.Name()) {
+						return filepath.SkipDir
+					}
+					return nil
+				}
 				if !info.IsDir() && strings.HasSuffix(strings.ToLower(info.Name()), ".json") {
 					if data, errReadFile := os.ReadFile(path); errReadFile == nil && len(data) > 0 {
 						sum := sha256.Sum256(data)
@@ -224,6 +230,12 @@ func (w *Watcher) loadFileClients(cfg *config.Config) int {
 		if err != nil {
 			log.Debugf("error accessing path %s: %v", path, err)
 			return err
+		}
+		if info.IsDir() {
+			if util.IsFailedAuthArchiveDirName(info.Name()) {
+				return filepath.SkipDir
+			}
+			return nil
 		}
 		if !info.IsDir() && strings.HasSuffix(strings.ToLower(info.Name()), ".json") {
 			authFileCount++

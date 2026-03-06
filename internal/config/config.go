@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"syscall"
 
@@ -77,6 +78,10 @@ type Config struct {
 
 	// QuotaExceeded defines the behavior when a quota is exceeded.
 	QuotaExceeded QuotaExceeded `yaml:"quota-exceeded" json:"quota-exceeded"`
+
+	// ArchiveFailedAuth moves file-based credentials that fail permanently out of auth-dir.
+	// Invalid credentials are moved to auth-dir/invalid and quota-exhausted credentials to auth-dir/limit.
+	ArchiveFailedAuth bool `yaml:"archive-failed-auth" json:"archive-failed-auth"`
 
 	// Routing controls credential selection behavior.
 	Routing RoutingConfig `yaml:"routing" json:"routing"`
@@ -668,6 +673,10 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 
 	if cfg.MaxRetryCredentials < 0 {
 		cfg.MaxRetryCredentials = 0
+	}
+
+	if cfg.AuthDir != "" {
+		cfg.AuthDir = filepath.Clean(strings.TrimSpace(cfg.AuthDir))
 	}
 
 	// Sanitize Gemini API key configuration and migrate legacy entries.
