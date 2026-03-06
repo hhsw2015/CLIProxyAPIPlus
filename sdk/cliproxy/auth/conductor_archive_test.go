@@ -9,7 +9,7 @@ import (
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 )
 
-func TestMarkResultArchivesInvalidAuthFile(t *testing.T) {
+func TestMarkResultDeletesInvalidAuthFile(t *testing.T) {
 	t.Parallel()
 
 	tmpDir := t.TempDir()
@@ -41,8 +41,8 @@ func TestMarkResultArchivesInvalidAuthFile(t *testing.T) {
 	if _, ok := m.GetByID("claude.json"); ok {
 		t.Fatal("expected invalid auth to be removed from manager")
 	}
-	if _, err := os.Stat(filepath.Join(tmpDir, "invalid", "claude.json")); err != nil {
-		t.Fatalf("expected archived invalid auth file: %v", err)
+	if _, err := os.Stat(filepath.Join(tmpDir, "invalid", "claude.json")); !os.IsNotExist(err) {
+		t.Fatalf("expected no invalid archive file, got err=%v", err)
 	}
 	if _, err := os.Stat(sourcePath); !os.IsNotExist(err) {
 		t.Fatalf("expected source auth file removed, got err=%v", err)
