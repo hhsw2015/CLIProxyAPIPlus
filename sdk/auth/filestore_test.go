@@ -1,6 +1,11 @@
 package auth
 
-import "testing"
+import (
+	"context"
+	"os"
+	"path/filepath"
+	"testing"
+)
 
 func TestExtractAccessToken(t *testing.T) {
 	t.Parallel()
@@ -76,5 +81,38 @@ func TestExtractAccessToken(t *testing.T) {
 				t.Errorf("extractAccessToken() = %q, want %q", got, tt.expected)
 			}
 		})
+	}
+}
+
+func TestFileTokenStoreListSkipsArchivedDirectories(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	store := NewFileTokenStore()
+	store.SetBaseDir(tmpDir)
+
+	files := map[string]string{
+		filepath.Join(tmpDir, "active.json"):         `{"type":"claude"}`,
+		filepath.Join(tmpDir, "invalid", "bad.json"): `{"type":"claude"}`,
+		filepath.Join(tmpDir, "limit", "cap.json"):   `{"type":"gemini"}`,
+	}
+	for path, content := range files {
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", filepath.Dir(path), err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			t.Fatalf("write %s: %v", path, err)
+		}
+	}
+
+	auths, err := store.List(context.Background())
+	if err != nil {
+		t.Fatalf("list auths: %v", err)
+	}
+	if len(auths) != 1 {
+		t.Fatalf("expected only active auth file, got %d", len(auths))
+	}
+	if auths[0].ID != "active.json" {
+		t.Fatalf("expected active.json, got %s", auths[0].ID)
 	}
 }
