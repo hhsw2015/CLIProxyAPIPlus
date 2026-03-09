@@ -94,6 +94,9 @@ type Service struct {
 
 	// poolManager maintains the active/reserve/limit auth pool when enabled.
 	poolManager *PoolManager
+
+	// publishedActive tracks auth IDs currently exposed to runtime routing in pool mode.
+	publishedActive map[string]time.Time
 }
 
 // RegisterUsagePlugin registers a usage plugin on the global usage manager.
@@ -271,6 +274,7 @@ func (s *Service) bootstrapPoolSnapshot(ctx context.Context, watcherWrapper *Wat
 		pm.SetLimit(PoolMember{AuthID: auth.ID, Provider: auth.Provider})
 	}
 	s.poolManager = pm
+	s.syncPoolActiveToRuntime(ctx, rootAuths)
 	log.Infof(
 		"pool-manager: startup active target=%d selected=%d reserve=%d limit=%d",
 		pm.TargetSize(),
@@ -278,6 +282,56 @@ func (s *Service) bootstrapPoolSnapshot(ctx context.Context, watcherWrapper *Wat
 		pm.Snapshot().ReserveCount,
 		pm.Snapshot().LimitCount,
 	)
+}
+
+func (s *Service) syncPoolActiveToRuntime(ctx context.Context, candidates []*coreauth.Auth) {
+	if s == nil || s.poolManager == nil {
+		return
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ctx = coreauth.WithSkipPersist(ctx)
+
+	candidateMap := make(map[string]*coreauth.Auth, len(candidates))
+	for _, auth := range candidates {
+		if auth == nil || strings.TrimSpace(auth.ID) == "" {
+			continue
+		}
+		candidateMap[auth.ID] = auth.Clone()
+	}
+
+	added, modified, removed := s.poolManager.ActiveDiff(s.publishedActive)
+	for _, id := range added {
+		if auth := candidateMap[id]; auth != nil {
+			s.emitAuthUpdate(ctx, watcher.AuthUpdate{
+				Action: watcher.AuthUpdateActionAdd,
+				ID:     id,
+				Auth:   auth,
+			})
+		}
+	}
+	for _, id := range modified {
+		if auth := candidateMap[id]; auth != nil {
+			s.emitAuthUpdate(ctx, watcher.AuthUpdate{
+				Action: watcher.AuthUpdateActionModify,
+				ID:     id,
+				Auth:   auth,
+			})
+		}
+	}
+	for _, id := range removed {
+		s.emitAuthUpdate(ctx, watcher.AuthUpdate{
+			Action: watcher.AuthUpdateActionDelete,
+			ID:     id,
+		})
+	}
+
+	published := make(map[string]time.Time, len(s.poolManager.ActiveIDs()))
+	for _, id := range s.poolManager.ActiveIDs() {
+		published[id] = time.Now()
+	}
+	s.publishedActive = published
 }
 
 func (s *Service) handleAuthUpdate(ctx context.Context, update watcher.AuthUpdate) {
