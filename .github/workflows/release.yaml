@@ -5,6 +5,7 @@ on:
     # run only against tags
     tags:
       - '*'
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -31,9 +32,15 @@ jobs:
         with:
           distribution: goreleaser
           version: latest
-          args: release --clean
+          args: ${{ github.event_name == 'workflow_dispatch' && 'build --snapshot --clean' || 'release --clean' }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VERSION: ${{ env.VERSION }}
           COMMIT: ${{ env.COMMIT }}
           BUILD_DATE: ${{ env.BUILD_DATE }}
+      - name: Upload Build Artifacts
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: cli-proxy-api-plus-dist
+          path: dist/**

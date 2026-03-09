@@ -7,7 +7,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -16,13 +18,13 @@ import (
 	kiroauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/kiro"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor"
-	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
+	internalusage "github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/watcher"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/wsrelay"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v6/sdk/access"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v6/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
-	"github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
+	coreusage "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
 	log "github.com/sirupsen/logrus"
 )
@@ -76,11 +78,20 @@ type Service struct {
 	// authQueueStop cancels the auth update queue processing.
 	authQueueStop context.CancelFunc
 
+	// poolProbeStop cancels background pool probe loops.
+	poolProbeStop context.CancelFunc
+
+	// poolRebalanceStop cancels the async rebalance worker.
+	poolRebalanceStop context.CancelFunc
+
 	// authManager handles legacy authentication operations.
 	authManager *sdkAuth.Manager
 
 	// accessManager handles request authentication providers.
 	accessManager *sdkaccess.Manager
+
+	// usageStats allows tests and future integrations to provide a dedicated usage statistics source.
+	usageStats *internalusage.RequestStatistics
 
 	// coreManager handles core authentication and execution.
 	coreManager *coreauth.Manager
@@ -90,15 +101,55 @@ type Service struct {
 
 	// wsGateway manages websocket Gemini providers.
 	wsGateway *wsrelay.Manager
+
+	// poolManager maintains the active/reserve/limit auth pool when enabled.
+	poolManager *PoolManager
+
+	// publishedActive tracks auth IDs currently exposed to runtime routing in pool mode.
+	publishedActive map[string]time.Time
+
+	// poolCandidates stores auth snapshots known to the pool manager for promotion publishing.
+	poolCandidates map[string]*coreauth.Auth
+
+	// poolMetrics stores pool observability counters.
+	poolMetrics *PoolMetrics
+
+	poolRebalanceMu    sync.Mutex
+	poolRebalanceQueue chan struct{}
+	poolEvalMu          sync.Mutex
+	poolEvalLast        *poolEvalWindowSnapshot
+	poolUnderfilledMu   sync.Mutex
+	poolUnderfilledSince time.Time
+	poolLowSuccessMu     sync.Mutex
+	poolLowSuccessStreak int
+	poolLowSuccessWarned bool
 }
+
+type poolEvalWindowSnapshot struct {
+	At                 time.Time
+	TotalRequests      int64
+	SuccessCount       int64
+	FailureCount       int64
+	PromotionsTotal    int64
+	ActiveRemovedTotal int64
+	RefreshedTotal     int64
+	MovedToLimitTotal  int64
+	DeletedTotal       int64
+	RestoredTotal      int64
+}
+
+const poolEvalLogInterval = 5 * time.Minute
+const poolEvalLowSuccessThreshold = 80.0
+const poolEvalLowSuccessConsecutiveWindows = 3
+const poolSelectedAuthLeaseDuration = 30 * time.Second
 
 // RegisterUsagePlugin registers a usage plugin on the global usage manager.
 // This allows external code to monitor API usage and token consumption.
 //
 // Parameters:
 //   - plugin: The usage plugin to register
-func (s *Service) RegisterUsagePlugin(plugin usage.Plugin) {
-	usage.RegisterPlugin(plugin)
+func (s *Service) RegisterUsagePlugin(plugin coreusage.Plugin) {
+	coreusage.RegisterPlugin(plugin)
 }
 
 // GetWatcher returns the underlying WatcherWrapper instance.
@@ -120,6 +171,25 @@ func newDefaultAuthManager() *sdkAuth.Manager {
 		sdkAuth.NewClaudeAuthenticator(),
 		sdkAuth.NewQwenAuthenticator(),
 	)
+}
+
+type serviceAuthHook struct {
+	coreauth.NoopHook
+	service *Service
+}
+
+func (h *serviceAuthHook) OnAuthDisposition(ctx context.Context, disposition coreauth.AuthDisposition) {
+	if h == nil || h.service == nil {
+		return
+	}
+	h.service.handleAuthDisposition(ctx, disposition)
+}
+
+func (h *serviceAuthHook) OnResult(ctx context.Context, result coreauth.Result) {
+	if h == nil || h.service == nil {
+		return
+	}
+	h.service.handlePoolResult(ctx, result)
 }
 
 func (s *Service) ensureAuthUpdateQueue(ctx context.Context) {
@@ -180,6 +250,929 @@ func (s *Service) emitAuthUpdate(ctx context.Context, update watcher.AuthUpdate)
 		}
 	}
 	s.handleAuthUpdate(ctx, update)
+}
+
+func (s *Service) bootstrapAuthSnapshot(ctx context.Context, watcherWrapper *WatcherWrapper) {
+	if s == nil || watcherWrapper == nil {
+		return
+	}
+	if s.cfg != nil && s.cfg.PoolManager.Size > 0 {
+		s.bootstrapPoolSnapshot(ctx, watcherWrapper)
+		return
+	}
+	auths := watcherWrapper.SnapshotAuths()
+	if len(auths) == 0 {
+		return
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ctx = coreauth.WithSkipPersist(ctx)
+	for _, auth := range auths {
+		if auth == nil || auth.ID == "" {
+			continue
+		}
+		s.applyCoreAuthAddOrUpdate(ctx, auth)
+	}
+}
+
+func (s *Service) bootstrapPoolSnapshot(ctx context.Context, watcherWrapper *WatcherWrapper) {
+	if s == nil || watcherWrapper == nil || s.cfg == nil {
+		return
+	}
+	pm := NewPoolManager(s.cfg.PoolManager)
+	if !pm.Enabled() {
+		return
+	}
+	s.poolManager = pm
+	s.poolMetrics = NewPoolMetrics(s.cfg.PoolManager)
+	log.Infof("pool-manager: enabled size=%d provider=%s", pm.TargetSize(), pm.Provider())
+
+	rootAuths := watcherWrapper.SnapshotRootFileAuths()
+	limitAuths := watcherWrapper.SnapshotLimitAuths()
+	if len(rootAuths) == 0 && len(limitAuths) == 0 {
+		return
+	}
+	log.Infof("pool-manager: startup discovered root=%d limit=%d", len(rootAuths), len(limitAuths))
+
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ctx = coreauth.WithSkipPersist(ctx)
+	s.poolCandidates = make(map[string]*coreauth.Auth, len(rootAuths)+len(limitAuths))
+	for _, auth := range rootAuths {
+		if auth == nil || strings.TrimSpace(auth.ID) == "" {
+			continue
+		}
+		s.poolCandidates[auth.ID] = auth.Clone()
+	}
+	for _, auth := range limitAuths {
+		if auth == nil || strings.TrimSpace(auth.ID) == "" {
+			continue
+		}
+		s.poolCandidates[auth.ID] = auth.Clone()
+	}
+
+	activeCount := 0
+	for _, auth := range rootAuths {
+		if auth == nil || strings.TrimSpace(auth.ID) == "" {
+			continue
+		}
+		if activeCount < pm.TargetSize() {
+			beforeProbe := auth.Clone()
+			probedAuth, result := poolProbeAuthFunc(ctx, s.cfg, auth.Clone())
+			if probedAuth != nil {
+				s.poolCandidates[probedAuth.ID] = probedAuth.Clone()
+			}
+			s.recordPoolProbe(PoolStateReserve, beforeProbe, probedAuth, result, "")
+			if result.Success && probedAuth != nil {
+				if authIsLowQuota(probedAuth, pm.LowQuotaThresholdPercent()) {
+					pm.SetLowQuota(PoolMember{AuthID: probedAuth.ID, Provider: probedAuth.Provider})
+					log.Infof("pool-manager: low quota auth=%s remaining_percent=%d threshold=%d", probedAuth.ID, mustWeeklyRemainingPercent(probedAuth), pm.LowQuotaThresholdPercent())
+					continue
+				}
+				pm.SetActive(PoolMember{AuthID: probedAuth.ID, Provider: probedAuth.Provider})
+				s.applyCoreAuthAddOrUpdate(ctx, probedAuth)
+				activeCount++
+				continue
+			}
+			s.handlePoolProbeResult(auth.ID, auth.Provider, result)
+			continue
+		}
+		pm.SetReserve(PoolMember{AuthID: auth.ID, Provider: auth.Provider})
+	}
+	for _, auth := range limitAuths {
+		if auth == nil || strings.TrimSpace(auth.ID) == "" {
+			continue
+		}
+		pm.SetLimit(PoolMember{AuthID: auth.ID, Provider: auth.Provider})
+	}
+	s.syncPoolActiveToRuntime(ctx)
+	log.Infof(
+		"pool-manager: startup active target=%d selected=%d reserve=%d low_quota=%d limit=%d",
+		pm.TargetSize(),
+		pm.Snapshot().ActiveCount,
+		pm.Snapshot().ReserveCount,
+		pm.Snapshot().LowQuotaCount,
+		pm.Snapshot().LimitCount,
+	)
+	s.logPoolEvaluation()
+}
+
+func (s *Service) handlePoolProbeResult(authID, provider string, result coreauth.Result) {
+	if s == nil || s.poolManager == nil {
+		return
+	}
+	authID = strings.TrimSpace(authID)
+	if authID == "" {
+		return
+	}
+	member, ok := s.poolManager.LastSeenMember(authID)
+	if !ok {
+		member = PoolMember{AuthID: authID, Provider: provider}
+	}
+	member.Provider = provider
+	if result.Success {
+		s.poolManager.SetReserve(member)
+		return
+	}
+	if result.Error != nil {
+		switch result.Error.HTTPStatus {
+		case http.StatusTooManyRequests, http.StatusPaymentRequired:
+			if s.poolMetrics != nil {
+				s.poolMetrics.RecordMovedToLimit()
+			}
+			s.poolManager.SetLimit(member)
+			return
+		}
+	}
+	s.poolManager.SetReserve(member)
+}
+
+func (s *Service) syncPoolActiveToRuntime(ctx context.Context) {
+	if s == nil || s.poolManager == nil {
+		return
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ctx = coreauth.WithSkipPersist(ctx)
+
+	added, modified, removed := s.poolManager.ActiveDiff(s.publishedActive)
+	for _, id := range added {
+		if auth := s.poolCandidates[id]; auth != nil {
+			log.Infof("pool-publish: add auth=%s provider=%s", id, auth.Provider)
+			s.emitAuthUpdate(ctx, watcher.AuthUpdate{
+				Action: watcher.AuthUpdateActionAdd,
+				ID:     id,
+				Auth:   auth.Clone(),
+			})
+		}
+	}
+	for _, id := range modified {
+		if auth := s.poolCandidates[id]; auth != nil {
+			log.Infof("pool-publish: modify auth=%s provider=%s", id, auth.Provider)
+			s.emitAuthUpdate(ctx, watcher.AuthUpdate{
+				Action: watcher.AuthUpdateActionModify,
+				ID:     id,
+				Auth:   auth.Clone(),
+			})
+		}
+	}
+	for _, id := range removed {
+		provider := ""
+		if member, ok := s.poolManager.LastSeenMember(id); ok {
+			provider = member.Provider
+		}
+		log.Infof("pool-publish: delete auth=%s provider=%s", id, provider)
+		s.emitAuthUpdate(ctx, watcher.AuthUpdate{
+			Action: watcher.AuthUpdateActionDelete,
+			ID:     id,
+		})
+	}
+	if s.poolMetrics != nil {
+		s.poolMetrics.RecordPublish(len(added), len(modified), len(removed))
+	}
+
+	published := make(map[string]time.Time, len(s.poolManager.ActiveIDs()))
+	for _, id := range s.poolManager.ActiveIDs() {
+		published[id] = time.Now()
+	}
+	s.publishedActive = published
+	if len(added) > 0 || len(modified) > 0 || len(removed) > 0 {
+		log.Infof(
+			"pool-publish: completed add=%d modify=%d delete=%d active_size=%d",
+			len(added),
+			len(modified),
+			len(removed),
+			len(published),
+		)
+		s.logPoolEvaluation()
+	}
+}
+
+func (s *Service) handleAuthDisposition(ctx context.Context, disposition coreauth.AuthDisposition) {
+	if s == nil || s.poolManager == nil {
+		return
+	}
+	authID := strings.TrimSpace(disposition.AuthID)
+	if authID == "" {
+		return
+	}
+	log.Infof(
+		"auth-disposition: auth=%s provider=%s source=%s healthy=%t pool_eligible=%t deleted=%t moved_to_limit=%t refreshed=%t quota=%t",
+		authID,
+		disposition.Provider,
+		disposition.Source,
+		disposition.Healthy,
+		disposition.PoolEligible,
+		disposition.Deleted,
+		disposition.MovedToLimit,
+		disposition.Refreshed,
+		disposition.QuotaExceeded,
+	)
+	if !s.poolManager.IsActive(authID) && !disposition.Deleted && !disposition.MovedToLimit && disposition.PoolEligible {
+		return
+	}
+
+	wasActive := s.poolManager.IsActive(authID)
+	if disposition.Deleted {
+		if wasActive {
+			log.Infof("pool-manager: active removed auth=%s reason=deleted source=%s", authID, disposition.Source)
+			if s.poolMetrics != nil {
+				s.poolMetrics.RecordActiveRemoval()
+			}
+		}
+		if s.poolMetrics != nil {
+			s.poolMetrics.RecordDeleted()
+		}
+		s.poolManager.Remove(authID)
+		delete(s.poolCandidates, authID)
+	} else if disposition.MovedToLimit || !disposition.PoolEligible {
+		if wasActive {
+			reason := "ineligible"
+			if disposition.MovedToLimit {
+				reason = "limit"
+			}
+			log.Infof("pool-manager: active removed auth=%s reason=%s source=%s", authID, reason, disposition.Source)
+			if s.poolMetrics != nil {
+				s.poolMetrics.RecordActiveRemoval()
+			}
+		}
+		if disposition.MovedToLimit && s.poolMetrics != nil {
+			s.poolMetrics.RecordMovedToLimit()
+		}
+		if member, ok := s.poolManager.LastSeenMember(authID); ok {
+			member.Provider = disposition.Provider
+			s.poolManager.SetLimit(member)
+		} else {
+			s.poolManager.Remove(authID)
+		}
+	} else {
+		if member, ok := s.poolManager.LastSeenMember(authID); ok {
+			member.Provider = disposition.Provider
+			s.poolManager.SetActive(member)
+		}
+	}
+	if disposition.Refreshed && s.poolMetrics != nil {
+		s.poolMetrics.RecordRefreshed()
+	}
+
+	s.syncPoolActiveToRuntime(ctx)
+	if wasActive || s.poolManager.Snapshot().Underfilled {
+		s.schedulePoolRebalance()
+	}
+}
+
+func (s *Service) fillActiveFromReserve(ctx context.Context) {
+	if s == nil || s.poolManager == nil {
+		return
+	}
+	for s.poolManager.Snapshot().ActiveCount < s.poolManager.TargetSize() {
+		promoted := false
+		for _, authID := range s.poolManager.ReserveIDs() {
+			auth := s.poolCandidates[authID]
+			if auth == nil {
+				s.poolManager.Remove(authID)
+				continue
+			}
+			beforeProbe := auth.Clone()
+			probedAuth, result := poolProbeAuthFunc(ctx, s.cfg, auth.Clone())
+			if probedAuth != nil {
+				s.poolCandidates[probedAuth.ID] = probedAuth.Clone()
+			}
+			s.recordPoolProbe(PoolStateReserve, beforeProbe, probedAuth, result, "")
+			if result.Success && probedAuth != nil {
+				if authIsLowQuota(probedAuth, s.poolManager.LowQuotaThresholdPercent()) {
+					s.poolManager.SetLowQuota(PoolMember{AuthID: probedAuth.ID, Provider: probedAuth.Provider})
+					log.Infof("pool-manager: low quota auth=%s remaining_percent=%d threshold=%d", probedAuth.ID, mustWeeklyRemainingPercent(probedAuth), s.poolManager.LowQuotaThresholdPercent())
+					continue
+				}
+				s.poolManager.SetActive(PoolMember{AuthID: probedAuth.ID, Provider: probedAuth.Provider})
+				if s.poolMetrics != nil {
+					s.poolMetrics.RecordPromotion()
+				}
+				log.Infof("pool-manager: promoted auth=%s from=reserve to=active", probedAuth.ID)
+				promoted = true
+				break
+			}
+			s.handlePoolProbeResult(authID, auth.Provider, result)
+		}
+		if !promoted {
+			snapshot := s.poolManager.Snapshot()
+			s.logPoolUnderfilled(time.Now(), snapshot.ReserveCount == 0)
+			break
+		}
+	}
+	s.clearPoolUnderfilled(time.Now())
+}
+
+func (s *Service) handleSelectedAuth(ctx context.Context, authID string) {
+	if s == nil || s.poolManager == nil {
+		return
+	}
+	s.poolManager.BeginUse(authID, time.Now(), poolSelectedAuthLeaseDuration)
+}
+
+func (s *Service) handlePoolResult(ctx context.Context, result coreauth.Result) {
+	if s == nil || s.poolManager == nil {
+		return
+	}
+	if coreauth.DispositionSource(ctx) != "request" {
+		return
+	}
+	if strings.TrimSpace(result.AuthID) == "" {
+		return
+	}
+	s.poolManager.RecordRequest(result.AuthID, result.Success, time.Now())
+}
+
+func (s *Service) startPoolRebalanceWorker(parent context.Context) {
+	if s == nil || s.poolManager == nil || !s.poolManager.Enabled() {
+		return
+	}
+	if s.poolRebalanceStop != nil {
+		return
+	}
+	if s.poolRebalanceQueue == nil {
+		s.poolRebalanceQueue = make(chan struct{}, 1)
+	}
+	ctx, cancel := context.WithCancel(parent)
+	s.poolRebalanceStop = cancel
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-s.poolRebalanceQueue:
+				s.runPoolRebalanceNow(ctx)
+			}
+		}
+	}()
+}
+
+func (s *Service) schedulePoolRebalance() {
+	if s == nil || s.poolManager == nil || !s.poolManager.Enabled() {
+		return
+	}
+	if s.poolRebalanceQueue == nil {
+		s.runPoolRebalanceNow(context.Background())
+		return
+	}
+	select {
+	case s.poolRebalanceQueue <- struct{}{}:
+	default:
+	}
+}
+
+func (s *Service) runPoolRebalanceNow(ctx context.Context) {
+	if s == nil || s.poolManager == nil {
+		return
+	}
+	s.poolRebalanceMu.Lock()
+	defer s.poolRebalanceMu.Unlock()
+	s.fillActiveFromReserve(ctx)
+	s.syncPoolActiveToRuntime(ctx)
+}
+
+func (s *Service) startPoolProbeLoops(parent context.Context) {
+	if s == nil || s.poolManager == nil || s.cfg == nil || !s.poolManager.Enabled() {
+		return
+	}
+	if s.poolProbeStop != nil {
+		return
+	}
+	ctx, cancel := context.WithCancel(parent)
+	s.poolProbeStop = cancel
+	s.startPoolRebalanceWorker(parent)
+
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		s.runActiveProbeCycle(ctx, time.Now())
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case now := <-ticker.C:
+				s.runActiveProbeCycle(ctx, now)
+			}
+		}
+	}()
+
+	if interval := time.Duration(s.cfg.PoolManager.ReserveScanIntervalSeconds) * time.Second; interval > 0 {
+		go func() {
+			ticker := time.NewTicker(interval)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case now := <-ticker.C:
+					s.runReserveProbeCycle(ctx, now)
+				}
+			}
+		}()
+	}
+
+	if interval := time.Duration(s.cfg.PoolManager.LimitScanIntervalSeconds) * time.Second; interval > 0 {
+		go func() {
+			ticker := time.NewTicker(interval)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case now := <-ticker.C:
+					s.runLimitProbeCycle(ctx, now)
+				}
+			}
+		}()
+	}
+
+	go func() {
+		ticker := time.NewTicker(poolEvalLogInterval)
+		defer ticker.Stop()
+		s.runPoolEvalCycle(time.Now())
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case now := <-ticker.C:
+				s.runPoolEvalCycle(now)
+			}
+		}
+	}()
+}
+
+func (s *Service) runActiveProbeCycle(ctx context.Context, now time.Time) {
+	if s == nil || s.poolManager == nil || s.cfg == nil || !s.poolManager.Enabled() {
+		return
+	}
+	interval := time.Duration(s.cfg.PoolManager.ActiveIdleScanIntervalSeconds) * time.Second
+	if interval <= 0 {
+		return
+	}
+	sampled := 0
+	healthy := 0
+	unhealthy := 0
+	for _, authID := range s.poolManager.DueActiveProbeIDs(now, interval) {
+		sampled++
+		auth, ok := s.coreManager.GetByID(authID)
+		if !ok || auth == nil {
+			s.poolManager.Remove(authID)
+			continue
+		}
+		probeCtx := coreauth.WithDispositionSource(ctx, "pool_probe")
+		beforeProbe := auth.Clone()
+		probedAuth, result := poolProbeAuthFunc(probeCtx, s.cfg, auth)
+		if probedAuth != nil {
+			s.poolCandidates[probedAuth.ID] = probedAuth.Clone()
+			if result.Success {
+				s.applyCoreAuthAddOrUpdate(coreauth.WithSkipPersist(probeCtx), probedAuth)
+			}
+		}
+		s.recordPoolProbe(PoolStateActive, beforeProbe, probedAuth, result, "")
+		next := now.Add(interval)
+		reason := ""
+		if result.Error != nil {
+			reason = result.Error.Code
+		}
+		s.poolManager.MarkProbe(authID, now, next, result.Success, reason)
+		if s.coreManager != nil {
+			s.coreManager.MarkResult(coreauth.WithSkipPersist(probeCtx), result)
+		}
+		if result.Success && probedAuth != nil && authIsLowQuota(probedAuth, s.poolManager.LowQuotaThresholdPercent()) {
+			if s.poolMetrics != nil {
+				s.poolMetrics.RecordActiveRemoval()
+			}
+			s.poolManager.SetLowQuota(PoolMember{AuthID: probedAuth.ID, Provider: probedAuth.Provider})
+			log.Infof("pool-manager: active demoted auth=%s reason=low_quota remaining_percent=%d threshold=%d", probedAuth.ID, mustWeeklyRemainingPercent(probedAuth), s.poolManager.LowQuotaThresholdPercent())
+			s.syncPoolActiveToRuntime(ctx)
+			s.schedulePoolRebalance()
+		}
+		if result.Success {
+			healthy++
+		} else {
+			unhealthy++
+		}
+	}
+	if sampled > 0 {
+		log.Infof("pool-manager: active probe sampled=%d healthy=%d unhealthy=%d", sampled, healthy, unhealthy)
+	}
+}
+
+func (s *Service) runReserveProbeCycle(ctx context.Context, now time.Time) {
+	if s == nil || s.poolManager == nil || s.cfg == nil || !s.poolManager.Enabled() {
+		return
+	}
+	interval := time.Duration(s.cfg.PoolManager.ReserveScanIntervalSeconds) * time.Second
+	if interval <= 0 {
+		return
+	}
+	sampleSize := s.cfg.PoolManager.ReserveSampleSize
+	if sampleSize <= 0 {
+		return
+	}
+	sampled := 0
+	healthy := 0
+	unhealthy := 0
+	skipped := 0
+	for _, authID := range s.poolManager.DueReserveProbeIDs(now, interval, sampleSize) {
+		sampled++
+		auth := s.poolCandidates[authID]
+		if auth == nil {
+			s.poolManager.Remove(authID)
+			skipped++
+			continue
+		}
+		beforeProbe := auth.Clone()
+		probedAuth, result := poolProbeAuthFunc(coreauth.WithDispositionSource(ctx, "pool_probe"), s.cfg, auth.Clone())
+		if probedAuth != nil {
+			s.poolCandidates[probedAuth.ID] = probedAuth.Clone()
+		}
+		s.recordPoolProbe(PoolStateReserve, beforeProbe, probedAuth, result, "")
+		reason := ""
+		if result.Error != nil {
+			reason = result.Error.Code
+		}
+		s.poolManager.MarkProbe(authID, now, now.Add(interval), result.Success, reason)
+		if result.Success {
+			if probedAuth != nil && authIsLowQuota(probedAuth, s.poolManager.LowQuotaThresholdPercent()) {
+				s.poolManager.SetLowQuota(PoolMember{AuthID: probedAuth.ID, Provider: probedAuth.Provider})
+				log.Infof("pool-manager: low quota auth=%s remaining_percent=%d threshold=%d", probedAuth.ID, mustWeeklyRemainingPercent(probedAuth), s.poolManager.LowQuotaThresholdPercent())
+				healthy++
+				continue
+			}
+			healthy++
+			continue
+		}
+		unhealthy++
+		s.handlePoolProbeResult(authID, auth.Provider, result)
+	}
+	if sampled > 0 {
+		log.Infof("pool-manager: reserve probe sampled=%d healthy=%d unhealthy=%d skipped=%d", sampled, healthy, unhealthy, skipped)
+	}
+}
+
+func (s *Service) runLimitProbeCycle(ctx context.Context, now time.Time) {
+	if s == nil || s.poolManager == nil || s.cfg == nil || !s.poolManager.Enabled() {
+		return
+	}
+	interval := time.Duration(s.cfg.PoolManager.LimitScanIntervalSeconds) * time.Second
+	if interval <= 0 {
+		return
+	}
+	sampled := 0
+	restored := 0
+	stillLimited := 0
+	skipped := 0
+	for _, authID := range s.poolManager.DueLimitProbeIDs(now, interval) {
+		sampled++
+		auth := s.poolCandidates[authID]
+		if auth == nil {
+			s.poolManager.Remove(authID)
+			skipped++
+			continue
+		}
+		beforeProbe := auth.Clone()
+		probedAuth, result := poolProbeAuthFunc(coreauth.WithDispositionSource(ctx, "pool_probe"), s.cfg, auth.Clone())
+		if probedAuth != nil {
+			s.poolCandidates[probedAuth.ID] = probedAuth.Clone()
+		}
+		disposition := ""
+		if result.Success {
+			disposition = "restore_to_reserve"
+		}
+		s.recordPoolProbe(PoolStateLimit, beforeProbe, probedAuth, result, disposition)
+		reason := ""
+		if result.Error != nil {
+			reason = result.Error.Code
+		}
+		s.poolManager.MarkProbe(authID, now, now.Add(interval), result.Success, reason)
+		if result.Success && probedAuth != nil {
+			if authIsLowQuota(probedAuth, s.poolManager.LowQuotaThresholdPercent()) {
+				s.poolManager.SetLowQuota(PoolMember{AuthID: probedAuth.ID, Provider: probedAuth.Provider})
+				log.Infof("pool-manager: low quota auth=%s remaining_percent=%d threshold=%d", probedAuth.ID, mustWeeklyRemainingPercent(probedAuth), s.poolManager.LowQuotaThresholdPercent())
+				restored++
+				continue
+			}
+			s.poolManager.SetReserve(PoolMember{AuthID: probedAuth.ID, Provider: probedAuth.Provider})
+			if s.poolMetrics != nil {
+				s.poolMetrics.RecordRestoredFromLimit()
+			}
+			restored++
+			continue
+		}
+		stillLimited++
+		s.handlePoolProbeResult(authID, auth.Provider, result)
+	}
+	if sampled > 0 {
+		log.Infof("pool-manager: limit probe sampled=%d restored=%d still_limited=%d skipped=%d", sampled, restored, stillLimited, skipped)
+	}
+	s.fillActiveFromReserve(ctx)
+	s.syncPoolActiveToRuntime(ctx)
+}
+
+func (s *Service) poolMetricsSnapshot() any {
+	if s == nil || s.poolManager == nil || s.poolMetrics == nil {
+		return nil
+	}
+	return s.poolMetrics.Snapshot(s.poolManager.Snapshot(), len(s.publishedActive))
+}
+
+func (s *Service) recordPoolProbe(bucket PoolState, original, probed *coreauth.Auth, result coreauth.Result, successDisposition string) {
+	if s == nil {
+		return
+	}
+	if s.poolMetrics != nil {
+		s.poolMetrics.RecordProbe(bucket, result.Success)
+	}
+	authID := result.AuthID
+	if authID == "" && original != nil {
+		authID = original.ID
+	}
+	if authID == "" && probed != nil {
+		authID = probed.ID
+	}
+	refreshed := false
+	if original != nil && probed != nil {
+		beforeToken := codexProbeToken(original)
+		afterToken := codexProbeToken(probed)
+		refreshed = beforeToken != "" && afterToken != "" && beforeToken != afterToken
+	}
+	if refreshed && s.poolMetrics != nil {
+		s.poolMetrics.RecordRefreshed()
+	}
+
+	resultLabel := "ok"
+	if refreshed && result.Success {
+		resultLabel = "401"
+	} else if !result.Success {
+		resultLabel = poolResultLabel(result)
+	}
+
+	var fields []string
+	fields = append(fields, "pool-probe: auth="+authID)
+	fields = append(fields, "bucket="+string(bucket))
+	fields = append(fields, "result="+resultLabel)
+	if refreshed && result.Success {
+		fields = append(fields, "refresh=success")
+		fields = append(fields, "verify=ok")
+	}
+	disposition := successDisposition
+	if disposition == "" && !result.Success {
+		disposition = poolProbeDisposition(result)
+	}
+	if disposition != "" {
+		fields = append(fields, "disposition="+disposition)
+	}
+	log.Info(strings.Join(fields, " "))
+}
+
+func poolResultLabel(result coreauth.Result) string {
+	if result.Error == nil {
+		if result.Success {
+			return "ok"
+		}
+		return "error"
+	}
+	if status := result.Error.HTTPStatus; status > 0 {
+		return strconv.Itoa(status)
+	}
+	if code := strings.TrimSpace(result.Error.Code); code != "" {
+		return code
+	}
+	return "error"
+}
+
+func poolProbeDisposition(result coreauth.Result) string {
+	if result.Error == nil {
+		return ""
+	}
+	switch result.Error.HTTPStatus {
+	case http.StatusTooManyRequests, http.StatusPaymentRequired:
+		return "limit"
+	}
+	return ""
+}
+
+func (s *Service) logPoolEvaluation() {
+	if s == nil || s.poolManager == nil || s.poolMetrics == nil {
+		return
+	}
+	poolSnapshot := s.poolMetrics.Snapshot(s.poolManager.Snapshot(), len(s.publishedActive))
+	usageSnapshot := s.usageStatistics().Snapshot()
+	successRate := 0.0
+	if usageSnapshot.TotalRequests > 0 {
+		successRate = float64(usageSnapshot.SuccessCount) * 100 / float64(usageSnapshot.TotalRequests)
+	}
+	log.Infof(
+		"pool-eval: total_requests=%d success=%d failure=%d success_rate=%.2f%% active_size=%d reserve_size=%d low_quota_size=%d limit_size=%d promoted=%d active_removed=%d moved_to_limit=%d deleted=%d",
+		usageSnapshot.TotalRequests,
+		usageSnapshot.SuccessCount,
+		usageSnapshot.FailureCount,
+		successRate,
+		poolSnapshot.ActiveCount,
+		poolSnapshot.ReserveCount,
+		poolSnapshot.LowQuotaCount,
+		poolSnapshot.LimitCount,
+		poolSnapshot.PromotionsTotal,
+		poolSnapshot.ActiveRemovedTotal,
+		poolSnapshot.MovedToLimitTotal,
+		poolSnapshot.DeletedTotal,
+	)
+}
+
+func (s *Service) usageStatistics() *internalusage.RequestStatistics {
+	if s != nil && s.usageStats != nil {
+		return s.usageStats
+	}
+	return internalusage.GetRequestStatistics()
+}
+
+func (s *Service) runPoolEvalCycle(now time.Time) {
+	if s == nil || s.poolManager == nil || s.poolMetrics == nil || !s.poolManager.Enabled() {
+		return
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+
+	poolSnapshot := s.poolMetrics.Snapshot(s.poolManager.Snapshot(), len(s.publishedActive))
+	usageSnapshot := s.usageStatistics().Snapshot()
+	current := &poolEvalWindowSnapshot{
+		At:                 now,
+		TotalRequests:      usageSnapshot.TotalRequests,
+		SuccessCount:       usageSnapshot.SuccessCount,
+		FailureCount:       usageSnapshot.FailureCount,
+		PromotionsTotal:    poolSnapshot.PromotionsTotal,
+		ActiveRemovedTotal: poolSnapshot.ActiveRemovedTotal,
+		RefreshedTotal:     poolSnapshot.RefreshedTotal,
+		MovedToLimitTotal:  poolSnapshot.MovedToLimitTotal,
+		DeletedTotal:       poolSnapshot.DeletedTotal,
+		RestoredTotal:      poolSnapshot.RestoredFromLimit,
+	}
+
+	s.poolEvalMu.Lock()
+	previous := s.poolEvalLast
+	s.poolEvalLast = current
+	s.poolEvalMu.Unlock()
+	if previous == nil {
+		successRate := 0.0
+		if current.TotalRequests > 0 {
+			successRate = float64(current.SuccessCount) * 100 / float64(current.TotalRequests)
+		}
+		log.Infof(
+			"pool-eval: baseline interval=%s total_requests=%d success=%d failure=%d success_rate=%.2f%% active_size=%d reserve_size=%d low_quota_size=%d limit_size=%d",
+			poolEvalLogInterval,
+			current.TotalRequests,
+			current.SuccessCount,
+			current.FailureCount,
+			successRate,
+			poolSnapshot.ActiveCount,
+			poolSnapshot.ReserveCount,
+			poolSnapshot.LowQuotaCount,
+			poolSnapshot.LimitCount,
+		)
+		return
+	}
+	if !now.After(previous.At) {
+		return
+	}
+
+	window := now.Sub(previous.At)
+	totalRequests := current.TotalRequests - previous.TotalRequests
+	successCount := current.SuccessCount - previous.SuccessCount
+	failureCount := current.FailureCount - previous.FailureCount
+	successRate := 0.0
+	if totalRequests > 0 {
+		successRate = float64(successCount) * 100 / float64(totalRequests)
+	}
+
+	log.Infof(
+		"pool-eval: window=%s total_requests=%d success=%d failure=%d success_rate=%.2f%% active_size=%d reserve_size=%d low_quota_size=%d limit_size=%d",
+		window,
+		totalRequests,
+		successCount,
+		failureCount,
+		successRate,
+		poolSnapshot.ActiveCount,
+		poolSnapshot.ReserveCount,
+		poolSnapshot.LowQuotaCount,
+		poolSnapshot.LimitCount,
+	)
+	log.Infof(
+		"pool-eval: window=%s active_removed=%d promoted=%d refreshed=%d moved_to_limit=%d deleted=%d restored=%d",
+		window,
+		current.ActiveRemovedTotal-previous.ActiveRemovedTotal,
+		current.PromotionsTotal-previous.PromotionsTotal,
+		current.RefreshedTotal-previous.RefreshedTotal,
+		current.MovedToLimitTotal-previous.MovedToLimitTotal,
+		current.DeletedTotal-previous.DeletedTotal,
+		current.RestoredTotal-previous.RestoredTotal,
+	)
+	s.logPoolLowSuccess(window, totalRequests, successCount, failureCount, successRate)
+}
+
+func (s *Service) logPoolLowSuccess(window time.Duration, totalRequests, successCount, failureCount int64, successRate float64) {
+	if s == nil {
+		return
+	}
+	if totalRequests <= 0 {
+		return
+	}
+
+	s.poolLowSuccessMu.Lock()
+	defer s.poolLowSuccessMu.Unlock()
+
+	if successRate < poolEvalLowSuccessThreshold {
+		s.poolLowSuccessStreak++
+		if s.poolLowSuccessStreak >= poolEvalLowSuccessConsecutiveWindows && !s.poolLowSuccessWarned {
+			s.poolLowSuccessWarned = true
+			log.Warnf(
+				"pool-eval: low_success_rate warning threshold=%.2f%% consecutive_windows=%d current_rate=%.2f%% total_requests=%d failure=%d window=%s",
+				poolEvalLowSuccessThreshold,
+				s.poolLowSuccessStreak,
+				successRate,
+				totalRequests,
+				failureCount,
+				window,
+			)
+		}
+		return
+	}
+
+	if s.poolLowSuccessWarned {
+		log.Infof(
+			"pool-eval: success_rate recovered threshold=%.2f%% previous_streak=%d current_rate=%.2f%% total_requests=%d success=%d failure=%d window=%s",
+			poolEvalLowSuccessThreshold,
+			s.poolLowSuccessStreak,
+			successRate,
+			totalRequests,
+			successCount,
+			failureCount,
+			window,
+		)
+	}
+	s.poolLowSuccessStreak = 0
+	s.poolLowSuccessWarned = false
+}
+
+func (s *Service) logPoolUnderfilled(now time.Time, reserveExhausted bool) {
+	if s == nil || s.poolManager == nil {
+		return
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+	snapshot := s.poolManager.Snapshot()
+	if !snapshot.Underfilled {
+		return
+	}
+
+	s.poolUnderfilledMu.Lock()
+	if s.poolUnderfilledSince.IsZero() {
+		s.poolUnderfilledSince = now
+	}
+	underfilledFor := now.Sub(s.poolUnderfilledSince)
+	s.poolUnderfilledMu.Unlock()
+
+	log.Warnf(
+		"pool-manager: underfilled active target=%d actual=%d reserve_exhausted=%t underfilled_for=%s",
+		snapshot.TargetSize,
+		snapshot.ActiveCount,
+		reserveExhausted,
+		underfilledFor.Round(time.Second),
+	)
+}
+
+func (s *Service) clearPoolUnderfilled(now time.Time) {
+	if s == nil || s.poolManager == nil {
+		return
+	}
+	snapshot := s.poolManager.Snapshot()
+	if snapshot.Underfilled {
+		return
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+
+	s.poolUnderfilledMu.Lock()
+	startedAt := s.poolUnderfilledSince
+	s.poolUnderfilledSince = time.Time{}
+	s.poolUnderfilledMu.Unlock()
+
+	if startedAt.IsZero() {
+		return
+	}
+	log.Infof(
+		"pool-manager: active recovered target=%d actual=%d underfilled_for=%s",
+		snapshot.TargetSize,
+		snapshot.ActiveCount,
+		now.Sub(startedAt).Round(time.Second),
+	)
 }
 
 func (s *Service) handleAuthUpdate(ctx context.Context, update watcher.AuthUpdate) {
@@ -488,7 +1481,7 @@ func (s *Service) Run(ctx context.Context) error {
 		ctx = context.Background()
 	}
 
-	usage.StartDefault(ctx)
+	coreusage.StartDefault(ctx)
 
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer shutdownCancel()
@@ -505,6 +1498,9 @@ func (s *Service) Run(ctx context.Context) error {
 	s.applyRetryConfig(s.cfg)
 
 	if s.coreManager != nil {
+		if s.cfg != nil && s.cfg.PoolManager.Size > 0 {
+			s.coreManager.SetHook(&serviceAuthHook{service: s})
+		}
 		if errLoad := s.coreManager.Load(ctx); errLoad != nil {
 			log.Warnf("failed to load auth store: %v", errLoad)
 		}
@@ -530,6 +1526,10 @@ func (s *Service) Run(ctx context.Context) error {
 
 	// handlers no longer depend on legacy clients; pass nil slice initially
 	s.server = api.NewServer(s.cfg, s.coreManager, s.accessManager, s.configPath, s.serverOptions...)
+	if s.server != nil {
+		s.server.SetPoolStatisticsProvider(s.poolMetricsSnapshot)
+		s.server.SetSelectedAuthObserver(s.handleSelectedAuth)
+	}
 
 	if s.authManager == nil {
 		s.authManager = newDefaultAuthManager()
@@ -643,6 +1643,7 @@ func (s *Service) Run(ctx context.Context) error {
 		watcherWrapper.SetAuthUpdateQueue(s.authUpdates)
 	}
 	watcherWrapper.SetConfig(s.cfg)
+	s.bootstrapAuthSnapshot(ctx, watcherWrapper)
 
 	// 方案 A: 连接 Kiro 后台刷新器回调到 Watcher
 	// 当后台刷新器成功刷新 token 后，立即通知 Watcher 更新内存中的 Auth 对象
@@ -669,6 +1670,7 @@ func (s *Service) Run(ctx context.Context) error {
 		s.coreManager.StartAutoRefresh(context.Background(), interval)
 		log.Infof("core auth auto-refresh started (interval=%s)", interval)
 	}
+	s.startPoolProbeLoops(ctx)
 
 	select {
 	case <-ctx.Done():
@@ -724,6 +1726,14 @@ func (s *Service) Shutdown(ctx context.Context) error {
 			s.authQueueStop()
 			s.authQueueStop = nil
 		}
+		if s.poolProbeStop != nil {
+			s.poolProbeStop()
+			s.poolProbeStop = nil
+		}
+		if s.poolRebalanceStop != nil {
+			s.poolRebalanceStop()
+			s.poolRebalanceStop = nil
+		}
 
 		if errShutdownPprof := s.shutdownPprof(ctx); errShutdownPprof != nil {
 			log.Errorf("failed to stop pprof server: %v", errShutdownPprof)
@@ -745,7 +1755,7 @@ func (s *Service) Shutdown(ctx context.Context) error {
 			}
 		}
 
-		usage.StopDefault()
+		coreusage.StopDefault()
 	})
 	return shutdownErr
 }
@@ -876,7 +1886,7 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 		models = applyExcludedModels(models, excluded)
 	case "kimi":
 		models = registry.GetKimiModels()
-    models = applyExcludedModels(models, excluded)
+		models = applyExcludedModels(models, excluded)
 	case "github-copilot":
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
