@@ -729,7 +729,7 @@ func (s *Service) runActiveProbeCycle(ctx context.Context, now time.Time) {
 		if probedAuth != nil {
 			s.poolCandidates[probedAuth.ID] = probedAuth.Clone()
 			if result.Success {
-				s.applyCoreAuthAddOrUpdate(probeCtx, probedAuth)
+				s.applyCoreAuthAddOrUpdate(coreauth.WithSkipPersist(probeCtx), probedAuth)
 			}
 		}
 		s.recordPoolProbe(PoolStateActive, beforeProbe, probedAuth, result, "")
@@ -740,9 +740,12 @@ func (s *Service) runActiveProbeCycle(ctx context.Context, now time.Time) {
 		}
 		s.poolManager.MarkProbe(authID, now, next, result.Success, reason)
 		if s.coreManager != nil {
-			s.coreManager.MarkResult(probeCtx, result)
+			s.coreManager.MarkResult(coreauth.WithSkipPersist(probeCtx), result)
 		}
 		if result.Success && probedAuth != nil && authIsLowQuota(probedAuth, s.poolManager.LowQuotaThresholdPercent()) {
+			if s.poolMetrics != nil {
+				s.poolMetrics.RecordActiveRemoval()
+			}
 			s.poolManager.SetLowQuota(PoolMember{AuthID: probedAuth.ID, Provider: probedAuth.Provider})
 			log.Infof("pool-manager: active demoted auth=%s reason=low_quota remaining_percent=%d threshold=%d", probedAuth.ID, mustWeeklyRemainingPercent(probedAuth), s.poolManager.LowQuotaThresholdPercent())
 			s.syncPoolActiveToRuntime(ctx)
