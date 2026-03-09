@@ -691,6 +691,109 @@ func TestServiceRunBootstrapsPoolStartupSkipsLowQuotaRootCandidate(t *testing.T)
 	}
 }
 
+func TestServiceRunBootstrapsPoolStartupAllowsLowQuotaFallbackActiveWhenNoHealthyFound(t *testing.T) {
+	lowQuotaAuthID := "pool-low-quota-fallback-root"
+
+	originalProbe := poolProbeAuthFunc
+	poolProbeAuthFunc = func(ctx context.Context, cfg *config.Config, auth *coreauth.Auth) (*coreauth.Auth, coreauth.Result) {
+		if auth == nil {
+			return nil, coreauth.Result{Provider: "codex", Success: false}
+		}
+		auth = auth.Clone()
+		if auth.Metadata == nil {
+			auth.Metadata = make(map[string]any)
+		}
+		auth.Metadata[poolQuotaWeeklyRemainingPercentKey] = 0
+		return auth, coreauth.Result{
+			AuthID:   auth.ID,
+			Provider: "codex",
+			Model:    "gpt-5",
+			Success:  true,
+		}
+	}
+	t.Cleanup(func() { poolProbeAuthFunc = originalProbe })
+
+	cfg := &config.Config{
+		Host:    "127.0.0.1",
+		Port:    0,
+		AuthDir: filepath.Join(t.TempDir(), "auth"),
+		SDKConfig: config.SDKConfig{
+			APIKeys: []string{"test-key"},
+		},
+		PoolManager: config.PoolManagerConfig{
+			Size:                     1,
+			Provider:                 "codex",
+			LowQuotaThresholdPercent: 20,
+		},
+	}
+
+	lowQuotaAuth := &coreauth.Auth{
+		ID:       lowQuotaAuthID,
+		Provider: "codex",
+		Status:   coreauth.StatusActive,
+		Attributes: map[string]string{
+			"api_key":  "low-key",
+			"base_url": "https://example.com/v1",
+		},
+	}
+
+	tempDir := t.TempDir()
+	configPath := filepath.Join(tempDir, "config.yaml")
+	if err := os.WriteFile(configPath, []byte("port: 0\n"), 0o600); err != nil {
+		t.Fatalf("write temp config: %v", err)
+	}
+
+	service, err := NewBuilder().
+		WithConfig(cfg).
+		WithConfigPath(configPath).
+		WithWatcherFactory(func(configPath, authDir string, reload func(*config.Config)) (*WatcherWrapper, error) {
+			return &WatcherWrapper{
+				start:         func(ctx context.Context) error { return nil },
+				stop:          func() error { return nil },
+				setConfig:     func(cfg *config.Config) { _ = cfg },
+				snapshotAuths: func() []*coreauth.Auth { return nil },
+				snapshotRootFileAuths: func() []*coreauth.Auth {
+					return []*coreauth.Auth{lowQuotaAuth.Clone()}
+				},
+				snapshotLimitAuths: func() []*coreauth.Auth { return nil },
+				setUpdateQueue:     func(queue chan<- watcher.AuthUpdate) { _ = queue },
+			}, nil
+		}).
+		Build()
+	if err != nil {
+		t.Fatalf("build service: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- service.Run(ctx) }()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if service.poolManager != nil && service.poolManager.Snapshot().ActiveCount == 1 {
+			break
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+
+	snapshot := service.poolManager.Snapshot()
+	if snapshot.ActiveCount != 1 || snapshot.ActiveIDs[0] != lowQuotaAuthID {
+		cancel()
+		<-done
+		t.Fatalf("expected low quota auth to serve as active fallback, got %+v", snapshot)
+	}
+
+	cancel()
+	select {
+	case errRun := <-done:
+		if errRun != nil && errRun != context.Canceled {
+			t.Fatalf("service run returned error: %v", errRun)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("service did not stop after cancel")
+	}
+}
+
 func TestHandleAuthDisposition_RemovesActiveAndPromotesHealthyReserve(t *testing.T) {
 	activeAuthID := "pool-active-auth-disposition"
 	firstReserveAuthID := "pool-reserve-auth-disposition-bad"
@@ -1126,8 +1229,8 @@ func TestRunReserveProbeCycle_MovesLowQuotaReserveToLowQuotaState(t *testing.T) 
 	if snapshot.ReserveCount != 0 {
 		t.Fatalf("expected reserve to be emptied, got %+v", snapshot)
 	}
-	if snapshot.LowQuotaCount != 1 || snapshot.LowQuotaIDs[0] != reserveAuthID {
-		t.Fatalf("expected reserve auth to move to low_quota, got %+v", snapshot)
+	if snapshot.ActiveCount != 1 || snapshot.ActiveIDs[0] != reserveAuthID {
+		t.Fatalf("expected low quota reserve auth to serve as active fallback while underfilled, got %+v", snapshot)
 	}
 }
 
@@ -1261,6 +1364,127 @@ func TestRunActiveProbeCycle_DemotesLowQuotaActive(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 	t.Fatalf("expected low quota active to be demoted and reserve promoted, got %+v", service.poolManager.Snapshot())
+}
+
+func TestRunActiveProbeCycle_KeepsLowQuotaFallbackWhenNoReserveAvailable(t *testing.T) {
+	activeAuthID := "pool-active-low-quota-keep"
+
+	originalProbe := poolProbeAuthFunc
+	poolProbeAuthFunc = func(ctx context.Context, cfg *config.Config, auth *coreauth.Auth) (*coreauth.Auth, coreauth.Result) {
+		auth = auth.Clone()
+		if auth.Metadata == nil {
+			auth.Metadata = make(map[string]any)
+		}
+		auth.Metadata[poolQuotaWeeklyRemainingPercentKey] = 10
+		return auth, coreauth.Result{AuthID: auth.ID, Provider: "codex", Model: "gpt-5", Success: true}
+	}
+	t.Cleanup(func() { poolProbeAuthFunc = originalProbe })
+
+	service := &Service{
+		cfg: &config.Config{
+			PoolManager: config.PoolManagerConfig{
+				Size:                          1,
+				Provider:                      "codex",
+				ActiveIdleScanIntervalSeconds: 1800,
+				LowQuotaThresholdPercent:      20,
+			},
+		},
+		poolManager: NewPoolManager(config.PoolManagerConfig{
+			Size:                          1,
+			Provider:                      "codex",
+			ActiveIdleScanIntervalSeconds: 1800,
+			LowQuotaThresholdPercent:      20,
+		}),
+		poolMetrics: NewPoolMetrics(config.PoolManagerConfig{Size: 1, Provider: "codex"}),
+		poolCandidates: map[string]*coreauth.Auth{
+			activeAuthID: {ID: activeAuthID, Provider: "codex", Status: coreauth.StatusActive, Attributes: map[string]string{"api_key": "active-key", "base_url": "https://example.com/v1"}},
+		},
+		coreManager: coreauth.NewManager(nil, nil, &serviceAuthHook{}),
+	}
+	service.coreManager.SetHook(&serviceAuthHook{service: service})
+	service.poolManager.SetActive(PoolMember{AuthID: activeAuthID, Provider: "codex"})
+	service.syncPoolActiveToRuntime(context.Background())
+
+	service.runActiveProbeCycle(context.Background(), time.Now().Add(2*time.Hour))
+
+	snapshot := service.poolManager.Snapshot()
+	if snapshot.ActiveCount != 1 || snapshot.ActiveIDs[0] != activeAuthID {
+		t.Fatalf("expected low quota fallback active to be kept when no reserve exists, got %+v", snapshot)
+	}
+	if snapshot.LowQuotaCount != 0 {
+		t.Fatalf("expected no low_quota demotion without replacement, got %+v", snapshot)
+	}
+}
+
+func TestRunPoolRebalanceNow_ReplacesFallbackActiveAndCapsWarmReserve(t *testing.T) {
+	fallbackActiveID := "pool-fallback-active"
+	healthyActiveID := "pool-healthy-upgrade"
+	healthyReserveID := "pool-healthy-reserve"
+	extraHealthyID := "pool-extra-healthy"
+
+	originalProbe := poolProbeAuthFunc
+	poolProbeAuthFunc = func(ctx context.Context, cfg *config.Config, auth *coreauth.Auth) (*coreauth.Auth, coreauth.Result) {
+		auth = auth.Clone()
+		if auth.Metadata == nil {
+			auth.Metadata = make(map[string]any)
+		}
+		switch auth.ID {
+		case fallbackActiveID:
+			auth.Metadata[poolQuotaWeeklyRemainingPercentKey] = 5
+		case healthyActiveID:
+			auth.Metadata[poolQuotaWeeklyRemainingPercentKey] = 90
+		case healthyReserveID:
+			auth.Metadata[poolQuotaWeeklyRemainingPercentKey] = 80
+		case extraHealthyID:
+			auth.Metadata[poolQuotaWeeklyRemainingPercentKey] = 70
+		}
+		return auth, coreauth.Result{AuthID: auth.ID, Provider: "codex", Model: "gpt-5", Success: true}
+	}
+	t.Cleanup(func() { poolProbeAuthFunc = originalProbe })
+
+	service := &Service{
+		cfg: &config.Config{
+			PoolManager: config.PoolManagerConfig{
+				Size:                     1,
+				Provider:                 "codex",
+				ReserveSampleSize:        2,
+				LowQuotaThresholdPercent: 20,
+			},
+		},
+		poolManager: NewPoolManager(config.PoolManagerConfig{
+			Size:                     1,
+			Provider:                 "codex",
+			ReserveSampleSize:        2,
+			LowQuotaThresholdPercent: 20,
+		}),
+		poolMetrics: NewPoolMetrics(config.PoolManagerConfig{Size: 1, Provider: "codex"}),
+		poolCandidates: map[string]*coreauth.Auth{
+			fallbackActiveID: {ID: fallbackActiveID, Provider: "codex", Status: coreauth.StatusActive, Attributes: map[string]string{"api_key": "a", "base_url": "https://example.com/v1"}},
+			healthyActiveID:  {ID: healthyActiveID, Provider: "codex", Status: coreauth.StatusActive, Attributes: map[string]string{"api_key": "b", "base_url": "https://example.com/v1"}},
+			healthyReserveID: {ID: healthyReserveID, Provider: "codex", Status: coreauth.StatusActive, Attributes: map[string]string{"api_key": "c", "base_url": "https://example.com/v1"}},
+			extraHealthyID:   {ID: extraHealthyID, Provider: "codex", Status: coreauth.StatusActive, Attributes: map[string]string{"api_key": "d", "base_url": "https://example.com/v1"}},
+		},
+		coreManager: coreauth.NewManager(nil, nil, &serviceAuthHook{}),
+	}
+	service.coreManager.SetHook(&serviceAuthHook{service: service})
+	service.poolCandidateOrder = []string{fallbackActiveID, healthyActiveID, healthyReserveID, extraHealthyID}
+	service.poolManager.SetActive(PoolMember{AuthID: fallbackActiveID, Provider: "codex", RemainingPercent: 5})
+
+	service.runPoolRebalanceNow(context.Background())
+
+	snapshot := service.poolManager.Snapshot()
+	if snapshot.ActiveCount != 1 || snapshot.ActiveIDs[0] != healthyActiveID {
+		t.Fatalf("expected healthy candidate to replace fallback active, got %+v", snapshot)
+	}
+	if snapshot.ReserveCount != 1 || snapshot.ReserveIDs[0] != healthyReserveID {
+		t.Fatalf("expected warm reserve to keep a single healthy buffer, got %+v", snapshot)
+	}
+	if snapshot.LowQuotaCount != 1 || snapshot.LowQuotaIDs[0] != fallbackActiveID {
+		t.Fatalf("expected fallback active to be demoted to low_quota, got %+v", snapshot)
+	}
+	if snapshot.ReserveCount > snapshot.TargetSize {
+		t.Fatalf("expected reserve to be capped to target size, got %+v", snapshot)
+	}
 }
 
 func TestRunActiveProbeCycle_DoesNotPersistPoolQuotaMetadata(t *testing.T) {

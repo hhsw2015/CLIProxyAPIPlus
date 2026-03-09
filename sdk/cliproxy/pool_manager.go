@@ -13,15 +13,15 @@ import (
 // PoolManager maintains the runtime active/reserve/limit auth partitioning.
 // V1 stores this state in memory only.
 type PoolManager struct {
-	mu                        sync.RWMutex
-	size                      int
-	provider                  string
-	lowQuotaThresholdPercent  int
-	active                    map[string]*PoolMember
-	reserve                   map[string]*PoolMember
-	lowQuota                  map[string]*PoolMember
-	limit                     map[string]*PoolMember
-	lastSeen                  map[string]*PoolMember
+	mu                       sync.RWMutex
+	size                     int
+	provider                 string
+	lowQuotaThresholdPercent int
+	active                   map[string]*PoolMember
+	reserve                  map[string]*PoolMember
+	lowQuota                 map[string]*PoolMember
+	limit                    map[string]*PoolMember
+	lastSeen                 map[string]*PoolMember
 }
 
 var poolShuffleStringsFunc = func(values []string) {
@@ -62,6 +62,14 @@ func (p *PoolManager) Enabled() bool {
 
 // TargetSize returns the configured active pool size.
 func (p *PoolManager) TargetSize() int {
+	if p == nil {
+		return 0
+	}
+	return p.size
+}
+
+// ReserveTargetSize returns the configured warm-reserve target size.
+func (p *PoolManager) ReserveTargetSize() int {
 	if p == nil {
 		return 0
 	}
@@ -212,17 +220,17 @@ func (p *PoolManager) Snapshot() PoolSnapshot {
 	limit := p.LimitIDs()
 	target := p.TargetSize()
 	return PoolSnapshot{
-		TargetSize:   target,
-		Provider:     p.Provider(),
-		ActiveIDs:    active,
-		ReserveIDs:   reserve,
-		LowQuotaIDs:  lowQuota,
-		LimitIDs:     limit,
-		Underfilled:  target > 0 && len(active) < target,
-		ActiveCount:  len(active),
-		ReserveCount: len(reserve),
+		TargetSize:    target,
+		Provider:      p.Provider(),
+		ActiveIDs:     active,
+		ReserveIDs:    reserve,
+		LowQuotaIDs:   lowQuota,
+		LimitIDs:      limit,
+		Underfilled:   target > 0 && len(active) < target,
+		ActiveCount:   len(active),
+		ReserveCount:  len(reserve),
 		LowQuotaCount: len(lowQuota),
-		LimitCount:   len(limit),
+		LimitCount:    len(limit),
 	}
 }
 
@@ -266,6 +274,71 @@ func (p *PoolManager) IsActive(authID string) bool {
 	defer p.mu.RUnlock()
 	_, ok := p.active[authID]
 	return ok
+}
+
+// HasTrackedState reports whether the auth is currently assigned to any explicit pool bucket.
+func (p *PoolManager) HasTrackedState(authID string) bool {
+	if p == nil {
+		return false
+	}
+	authID = strings.TrimSpace(authID)
+	if authID == "" {
+		return false
+	}
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if _, ok := p.active[authID]; ok {
+		return true
+	}
+	if _, ok := p.reserve[authID]; ok {
+		return true
+	}
+	if _, ok := p.lowQuota[authID]; ok {
+		return true
+	}
+	if _, ok := p.limit[authID]; ok {
+		return true
+	}
+	return false
+}
+
+// ActiveFallbackIDs returns active auth IDs that are at or below the low-quota threshold,
+// ordered from lowest remaining percent to highest.
+func (p *PoolManager) ActiveFallbackIDs(thresholdPercent int) []string {
+	if p == nil || thresholdPercent < 0 {
+		return nil
+	}
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
+	type candidate struct {
+		id               string
+		remainingPercent int
+	}
+	candidates := make([]candidate, 0, len(p.active))
+	for id, member := range p.active {
+		if member == nil {
+			continue
+		}
+		if member.RemainingPercent < 0 {
+			continue
+		}
+		if member.RemainingPercent > thresholdPercent {
+			continue
+		}
+		candidates = append(candidates, candidate{id: id, remainingPercent: member.RemainingPercent})
+	}
+	sort.Slice(candidates, func(i, j int) bool {
+		if candidates[i].remainingPercent == candidates[j].remainingPercent {
+			return candidates[i].id < candidates[j].id
+		}
+		return candidates[i].remainingPercent < candidates[j].remainingPercent
+	})
+	ids := make([]string, 0, len(candidates))
+	for _, item := range candidates {
+		ids = append(ids, item.id)
+	}
+	return ids
 }
 
 // ActiveDiff reports the add/modify/delete delta between the previous published active set
