@@ -43,6 +43,9 @@ pool-manager:
 	if cfg.PoolManager.ReserveSampleSize != 20 {
 		t.Fatalf("PoolManager.ReserveSampleSize = %d, want 20", cfg.PoolManager.ReserveSampleSize)
 	}
+	if cfg.PoolManager.LowQuotaThresholdPercent != 20 {
+		t.Fatalf("PoolManager.LowQuotaThresholdPercent = %d, want 20", cfg.PoolManager.LowQuotaThresholdPercent)
+	}
 }
 
 func TestLoadConfigOptional_PoolManagerSanitizesInvalidValues(t *testing.T) {
@@ -59,6 +62,7 @@ pool-manager:
   reserve-scan-interval-seconds: -2
   limit-scan-interval-seconds: -3
   reserve-sample-size: -4
+  low-quota-threshold-percent: 120
 `
 	if err := os.WriteFile(configPath, []byte(content), 0o600); err != nil {
 		t.Fatalf("write config: %v", err)
@@ -86,5 +90,8 @@ pool-manager:
 	}
 	if cfg.PoolManager.ReserveSampleSize != 0 {
 		t.Fatalf("PoolManager.ReserveSampleSize = %d, want 0", cfg.PoolManager.ReserveSampleSize)
+	}
+	if cfg.PoolManager.LowQuotaThresholdPercent != 100 {
+		t.Fatalf("PoolManager.LowQuotaThresholdPercent = %d, want 100", cfg.PoolManager.LowQuotaThresholdPercent)
 	}
 }

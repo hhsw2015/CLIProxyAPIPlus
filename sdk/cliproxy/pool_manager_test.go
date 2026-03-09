@@ -19,6 +19,9 @@ func TestNewPoolManager_DefaultsProvider(t *testing.T) {
 	if pm.Provider() != "codex" {
 		t.Fatalf("Provider() = %q, want %q", pm.Provider(), "codex")
 	}
+	if pm.LowQuotaThresholdPercent() != 20 {
+		t.Fatalf("LowQuotaThresholdPercent() = %d, want 20", pm.LowQuotaThresholdPercent())
+	}
 }
 
 func TestPoolManager_SetActiveAndRemove(t *testing.T) {

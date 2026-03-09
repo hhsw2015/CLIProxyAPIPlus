@@ -100,6 +100,7 @@ archive-failed-auth: false
 #   reserve-scan-interval-seconds: 300
 #   limit-scan-interval-seconds: 21600
 #   reserve-sample-size: 20
+#   low-quota-threshold-percent: 20
 
 # Quota exceeded behavior
 quota-exceeded:

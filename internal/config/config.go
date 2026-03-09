@@ -220,6 +220,8 @@ type PoolManagerConfig struct {
 	LimitScanIntervalSeconds int `yaml:"limit-scan-interval-seconds,omitempty" json:"limit-scan-interval-seconds,omitempty"`
 	// ReserveSampleSize controls how many reserve auths are sampled per probe cycle.
 	ReserveSampleSize int `yaml:"reserve-sample-size,omitempty" json:"reserve-sample-size,omitempty"`
+	// LowQuotaThresholdPercent marks auths as low-quota when weekly remaining percent is <= this threshold.
+	LowQuotaThresholdPercent int `yaml:"low-quota-threshold-percent,omitempty" json:"low-quota-threshold-percent,omitempty"`
 }
 
 // OAuthModelAlias defines a model ID alias for a specific channel.
@@ -773,6 +775,12 @@ func (cfg *Config) SanitizePoolManager() {
 	if pm.ReserveSampleSize < 0 {
 		pm.ReserveSampleSize = 0
 	}
+	if pm.LowQuotaThresholdPercent < 0 {
+		pm.LowQuotaThresholdPercent = 0
+	}
+	if pm.LowQuotaThresholdPercent > 100 {
+		pm.LowQuotaThresholdPercent = 100
+	}
 
 	if pm.Size <= 0 {
 		return
@@ -788,6 +796,9 @@ func (cfg *Config) SanitizePoolManager() {
 	}
 	if pm.ReserveSampleSize == 0 {
 		pm.ReserveSampleSize = 20
+	}
+	if pm.LowQuotaThresholdPercent == 0 {
+		pm.LowQuotaThresholdPercent = 20
 	}
 }
 
