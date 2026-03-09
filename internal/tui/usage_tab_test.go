@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-func TestUsageTabRenderContent_IncludesPoolMetrics(t *testing.T) {
+func TestUsageTabRenderContent_DoesNotShowPoolMetrics(t *testing.T) {
 	m := newUsageTabModel(nil)
 	m.width = 120
 	m.height = 40
@@ -32,13 +32,13 @@ func TestUsageTabRenderContent_IncludesPoolMetrics(t *testing.T) {
 	}
 
 	content := m.renderContent()
-	if !strings.Contains(content, "Pool Manager") {
-		t.Fatalf("expected pool section title, got %q", content)
+	if strings.Contains(content, "Pool Manager") {
+		t.Fatalf("did not expect pool section title, got %q", content)
 	}
-	if !strings.Contains(content, "97/100") {
-		t.Fatalf("expected active pool ratio in content, got %q", content)
+	if strings.Contains(content, "97/100") {
+		t.Fatalf("did not expect active pool ratio in content, got %q", content)
 	}
-	if !strings.Contains(content, "4096") {
-		t.Fatalf("expected reserve count in content, got %q", content)
+	if strings.Contains(content, "4096") {
+		t.Fatalf("did not expect reserve count in content, got %q", content)
 	}
 }
