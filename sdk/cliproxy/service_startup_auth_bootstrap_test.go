@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -16,6 +17,27 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
 	log "github.com/sirupsen/logrus"
 )
+
+type captureAuthStore struct {
+	mu       sync.Mutex
+	lastAuth *coreauth.Auth
+	saveCnt  int
+}
+
+func (s *captureAuthStore) List(context.Context) ([]*coreauth.Auth, error) { return nil, nil }
+
+func (s *captureAuthStore) Save(_ context.Context, auth *coreauth.Auth) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.saveCnt++
+	if auth != nil {
+		s.lastAuth = auth.Clone()
+		return auth.ID, nil
+	}
+	return "", nil
+}
+
+func (s *captureAuthStore) Delete(context.Context, string) error { return nil }
 
 func TestServiceRunBootstrapsSnapshotAuthsWithoutWatcherQueue(t *testing.T) {
 	authID := "skywork-startup-bootstrap"
@@ -1088,12 +1110,79 @@ func TestRunActiveProbeCycle_DemotesLowQuotaActive(t *testing.T) {
 		snapshot := service.poolManager.Snapshot()
 		if snapshot.ActiveCount == 1 && snapshot.ActiveIDs[0] == reserveAuthID {
 			if snapshot.LowQuotaCount == 1 && snapshot.LowQuotaIDs[0] == activeAuthID {
+				metrics := service.poolMetrics.Snapshot(snapshot, len(service.publishedActive))
+				if metrics.ActiveRemovedTotal != 1 {
+					t.Fatalf("expected active removal metric to increment, got %+v", metrics)
+				}
 				return
 			}
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
 	t.Fatalf("expected low quota active to be demoted and reserve promoted, got %+v", service.poolManager.Snapshot())
+}
+
+func TestRunActiveProbeCycle_DoesNotPersistPoolQuotaMetadata(t *testing.T) {
+	activeAuthID := "pool-active-persist-clean"
+	store := &captureAuthStore{}
+
+	originalProbe := poolProbeAuthFunc
+	poolProbeAuthFunc = func(ctx context.Context, cfg *config.Config, auth *coreauth.Auth) (*coreauth.Auth, coreauth.Result) {
+		auth = auth.Clone()
+		if auth.Metadata == nil {
+			auth.Metadata = make(map[string]any)
+		}
+		auth.Metadata[poolQuotaWeeklyRemainingPercentKey] = 60
+		auth.Metadata[poolQuotaWeeklyUsedPercentKey] = 40
+		auth.Metadata[poolQuotaPlanTypeKey] = "Free"
+		auth.Metadata[poolQuotaWeeklyResetAtKey] = time.Now().Add(24 * time.Hour).UTC().Format(time.RFC3339)
+		return auth, coreauth.Result{AuthID: auth.ID, Provider: "codex", Model: "gpt-5", Success: true}
+	}
+	t.Cleanup(func() { poolProbeAuthFunc = originalProbe })
+
+	manager := coreauth.NewManager(store, nil, &serviceAuthHook{})
+	auth := &coreauth.Auth{
+		ID:       activeAuthID,
+		Provider: "codex",
+		Status:   coreauth.StatusActive,
+		Metadata: map[string]any{"type": "codex", "email": "demo@example.com"},
+		Attributes: map[string]string{
+			"api_key":  "active-key",
+			"base_url": "https://example.com/v1",
+		},
+	}
+	if _, err := manager.Register(coreauth.WithSkipPersist(context.Background()), auth); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+
+	service := &Service{
+		cfg: &config.Config{
+			PoolManager: config.PoolManagerConfig{
+				Size:                          1,
+				Provider:                      "codex",
+				ActiveIdleScanIntervalSeconds: 1800,
+				LowQuotaThresholdPercent:      20,
+			},
+		},
+		poolManager: NewPoolManager(config.PoolManagerConfig{
+			Size:                          1,
+			Provider:                      "codex",
+			ActiveIdleScanIntervalSeconds: 1800,
+			LowQuotaThresholdPercent:      20,
+		}),
+		poolMetrics:    NewPoolMetrics(config.PoolManagerConfig{Size: 1, Provider: "codex"}),
+		poolCandidates: map[string]*coreauth.Auth{activeAuthID: auth.Clone()},
+		coreManager:    manager,
+	}
+	service.coreManager.SetHook(&serviceAuthHook{service: service})
+	service.poolManager.SetActive(PoolMember{AuthID: activeAuthID, Provider: "codex"})
+	service.syncPoolActiveToRuntime(context.Background())
+
+	service.runActiveProbeCycle(context.Background(), time.Now().Add(2*time.Hour))
+
+	if store.saveCnt != 0 {
+		t.Fatalf("expected active probe update to skip persistence, got saveCnt=%d lastAuth=%+v", store.saveCnt, store.lastAuth)
+	}
 }
 
 func TestSyncPoolActiveToRuntime_LogsPoolPublish(t *testing.T) {
