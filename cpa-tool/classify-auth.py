@@ -4,25 +4,35 @@
 from __future__ import annotations
 
 import argparse
+import base64
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import json
 import os
+import random
+import re
 import shutil
 import sys
+import threading
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Callable, Iterable
 from urllib import error, parse, request
 
+try:
+    from curl_cffi import requests as curl_requests
+except ImportError:  # pragma: no cover - optional dependency
+    curl_requests = None
 
 DEFAULT_CODEX_BASE_URL = "https://chatgpt.com/backend-api/codex"
 DEFAULT_REFRESH_URL = "https://auth.openai.com/oauth/token"
+DEFAULT_MODELS_URL = "https://api.openai.com/v1/models"
 DEFAULT_AUTH_DIR = "~/.cli-proxy-api"
 DEFAULT_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
 DEFAULT_VERSION = "0.98.0"
 DEFAULT_USER_AGENT = "codex_cli_rs/0.98.0 (python-port)"
 DEFAULT_WORKERS = min(32, max(4, (os.cpu_count() or 1) * 4))
+DEFAULT_401_CONCURRENCY = 8
 DEFAULT_RETRY_ATTEMPTS = 3
 DEFAULT_RETRY_BACKOFF = 0.6
 DEFAULT_EXCEEDED_DIR_NAME = "limit"
@@ -34,6 +44,37 @@ ANSI_GREEN = "\033[32m"
 ANSI_YELLOW = "\033[33m"
 ANSI_CYAN = "\033[36m"
 ANSI_MAGENTA = "\033[35m"
+DELETED_KEYWORDS = (
+    "user_not_found",
+    "account_deactivated",
+    "account_deleted",
+    "user_deactivated",
+    "account not found",
+    "deleted",
+    "deactivated",
+    "banned",
+    "disabled",
+    "suspended",
+)
+BROWSER_USER_AGENTS = (
+    (
+        "chrome",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36",
+    ),
+    (
+        "safari",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 "
+        "(KHTML, like Gecko) Version/17.6 Safari/605.1.15",
+    ),
+    (
+        "edge",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36 Edg/134.0.0.0",
+    ),
+)
+BROWSER_IMPERSONATE = ("chrome", "safari", "edge")
+_RECOVERY_SEMAPHORE = threading.BoundedSemaphore(DEFAULT_401_CONCURRENCY)
 
 
 @dataclass
@@ -49,12 +90,35 @@ class CheckResult:
     quota_resets_at: int | None
     error: str
     response_preview: str
+    delete_invalid: bool = False
+    duplicate_deleted: bool = False
 
 
 @dataclass
 class FileOpError:
     file: str
     error: str
+
+
+@dataclass
+class AuthCandidate:
+    path: Path
+    payload: dict[str, Any] | None
+    identity: str
+    bucket: str
+    freshness: tuple[int, int]
+    scanable: bool
+    parse_error: str = ""
+
+
+@dataclass
+class RefreshedTokenData:
+    access_token: str
+    refresh_token: str
+    id_token: str = ""
+    email: str = ""
+    account_id: str = ""
+    expired: str = ""
 
 
 def _is_tty_stdout() -> bool:
@@ -130,6 +194,60 @@ def _dot_get(data: Any, dotted_key: str) -> Any:
 def _pick(data: dict[str, Any], candidates: list[str]) -> str:
     values = [_dot_get(data, key) for key in candidates]
     return _first_non_empty_str(values)
+
+
+def _contains_deleted_keyword(text: str) -> bool:
+    lowered = (text or "").lower()
+    return any(keyword in lowered for keyword in DELETED_KEYWORDS)
+
+
+def _random_browser_user_agent() -> str:
+    return random.choice(BROWSER_USER_AGENTS)[1]
+
+
+def _extract_timestamp(path: Path) -> int:
+    match = re.search(r"_(\d{10,})\.json$", path.name)
+    if match:
+        return int(match.group(1))
+    return 0
+
+
+def _file_freshness(path: Path) -> tuple[int, int]:
+    try:
+        stat = path.stat()
+        mtime_ns = int(stat.st_mtime_ns)
+    except OSError:
+        mtime_ns = 0
+    return (_extract_timestamp(path), mtime_ns)
+
+
+def _utc_now_rfc3339() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def _future_rfc3339(expires_in: int | float | None) -> str:
+    if not expires_in:
+        return ""
+    try:
+        seconds = max(int(expires_in), 0)
+    except (TypeError, ValueError):
+        return ""
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() + seconds))
+
+
+def _jwt_claims_no_verify(id_token: str) -> dict[str, Any]:
+    if not id_token or id_token.count(".") < 2:
+        return {}
+    payload_b64 = id_token.split(".")[1]
+    pad = "=" * ((4 - (len(payload_b64) % 4)) % 4)
+    try:
+        payload = base64.urlsafe_b64decode((payload_b64 + pad).encode("ascii"))
+        parsed = json.loads(payload.decode("utf-8"))
+        if isinstance(parsed, dict):
+            return parsed
+    except Exception:  # noqa: BLE001
+        return {}
+    return {}
 
 
 def _looks_like_codex(path: Path, payload: dict[str, Any]) -> bool:
@@ -225,6 +343,91 @@ def _extract_auth_fields(payload: dict[str, Any]) -> dict[str, str]:
     }
 
 
+def _candidate_identity(path: Path, payload: dict[str, Any] | None) -> str:
+    if isinstance(payload, dict):
+        email = _pick(payload, ["email", "metadata.email", "attributes.email"]).lower()
+        if email:
+            return f"email:{email}"
+    return f"path:{path.resolve()}"
+
+
+def _load_candidate(path: Path, bucket: str) -> AuthCandidate:
+    try:
+        payload = _load_json(path)
+    except Exception as exc:  # noqa: BLE001
+        return AuthCandidate(
+            path=path,
+            payload=None,
+            identity=f"path:{path.resolve()}",
+            bucket=bucket,
+            freshness=_file_freshness(path),
+            scanable=True,
+            parse_error=f"parse error: {exc}",
+        )
+
+    return AuthCandidate(
+        path=path,
+        payload=payload,
+        identity=_candidate_identity(path, payload),
+        bucket=bucket,
+        freshness=_file_freshness(path),
+        scanable=_looks_like_codex(path, payload),
+    )
+
+
+def _choose_primary_candidate(items: list[AuthCandidate]) -> AuthCandidate:
+    return max(
+        items,
+        key=lambda item: (
+            1 if item.bucket == "active" else 0,
+            item.freshness[0],
+            item.freshness[1],
+            item.path.name,
+        ),
+    )
+
+
+def _build_scan_plan_with_duplicates(
+    auth_dir: Path, limit_dir: Path
+) -> tuple[list[Path], list[Path], list[Path]]:
+    grouped: dict[str, list[AuthCandidate]] = {}
+
+    for path in sorted(auth_dir.glob("*.json")):
+        candidate = _load_candidate(path, "active")
+        grouped.setdefault(candidate.identity, []).append(candidate)
+
+    if limit_dir.exists() and limit_dir.is_dir():
+        for path in sorted(limit_dir.glob("*.json")):
+            candidate = _load_candidate(path, "limit")
+            grouped.setdefault(candidate.identity, []).append(candidate)
+
+    active_targets: list[Path] = []
+    limit_targets: list[Path] = []
+    duplicates: list[Path] = []
+
+    for items in grouped.values():
+        primary = _choose_primary_candidate(items)
+        if primary.bucket == "active":
+            active_targets.append(primary.path)
+        else:
+            limit_targets.append(primary.path)
+
+        for item in items:
+            if item.path == primary.path:
+                continue
+            duplicates.append(item.path)
+
+    active_targets.sort()
+    limit_targets.sort()
+    duplicates.sort()
+    return active_targets, limit_targets, duplicates
+
+
+def _build_scan_plan(auth_dir: Path, limit_dir: Path) -> tuple[list[Path], list[Path]]:
+    active_targets, limit_targets, _ = _build_scan_plan_with_duplicates(auth_dir, limit_dir)
+    return active_targets, limit_targets
+
+
 def _http_request(
     *,
     url: str,
@@ -233,6 +436,17 @@ def _http_request(
     body: bytes | None,
     timeout: float,
 ) -> tuple[int, bytes]:
+    if curl_requests is not None:
+        response = curl_requests.request(
+            method=method.upper(),
+            url=url,
+            data=body,
+            headers=headers,
+            timeout=timeout,
+            impersonate=random.choice(BROWSER_IMPERSONATE),
+        )
+        return int(response.status_code), bytes(response.content or b"")
+
     req = request.Request(url=url, data=body, method=method.upper())
     for key, value in headers.items():
         req.add_header(key, value)
@@ -242,6 +456,30 @@ def _http_request(
             return int(resp.status), resp.read()
     except error.HTTPError as exc:
         return int(exc.code), exc.read()
+
+
+def _probe_once(
+    *,
+    url: str,
+    headers: dict[str, str],
+    body: bytes,
+    timeout: float,
+    retry_attempts: int,
+    retry_backoff: float,
+) -> tuple[int | None, str, str]:
+    try:
+        status, resp_body = _http_request_with_retry(
+            url=url,
+            method="POST",
+            headers=headers,
+            body=body,
+            timeout=timeout,
+            retry_attempts=retry_attempts,
+            retry_backoff=retry_backoff,
+        )
+        return status, resp_body.decode("utf-8", errors="replace"), ""
+    except error.URLError as exc:
+        return None, "", f"network error: {exc}"
 
 
 def _http_request_with_retry(
@@ -416,6 +654,138 @@ def _refresh_access_token(refresh_url: str, refresh_token: str, timeout: float) 
     return new_token, new_refresh
 
 
+def _try_refresh_token(
+    refresh_token: str,
+    refresh_url: str,
+    timeout: float,
+    retry_attempts: int,
+    retry_backoff: float,
+) -> tuple[str, RefreshedTokenData | None, str]:
+    if not refresh_token:
+        return "token_invalid", None, "refresh_token is empty"
+
+    last_error = ""
+    for attempt in range(1, retry_attempts + 1):
+        try:
+            with _RECOVERY_SEMAPHORE:
+                body = parse.urlencode(
+                    {
+                        "grant_type": "refresh_token",
+                        "client_id": DEFAULT_CLIENT_ID,
+                        "refresh_token": refresh_token,
+                        "scope": "openid profile email",
+                    }
+                ).encode("utf-8")
+                status, resp_body = _http_request(
+                    url=refresh_url,
+                    method="POST",
+                    headers={
+                        "Content-Type": "application/x-www-form-urlencoded",
+                        "Accept": "application/json",
+                        "User-Agent": _random_browser_user_agent(),
+                    },
+                    body=body,
+                    timeout=timeout,
+                )
+
+            text = resp_body.decode("utf-8", errors="replace")
+            parsed: dict[str, Any] = {}
+            try:
+                parsed = json.loads(text) if text else {}
+            except json.JSONDecodeError:
+                parsed = {}
+
+            if status == 200:
+                access_token = _first_non_empty_str([parsed.get("access_token")])
+                new_refresh = _first_non_empty_str([parsed.get("refresh_token"), refresh_token])
+                if not access_token:
+                    return "error", None, "refresh succeeded but access_token missing"
+                id_token = _first_non_empty_str([parsed.get("id_token")])
+                claims = _jwt_claims_no_verify(id_token)
+                auth_claims = claims.get("https://api.openai.com/auth") if isinstance(claims, dict) else {}
+                account_id = ""
+                if isinstance(auth_claims, dict):
+                    account_id = _first_non_empty_str([auth_claims.get("chatgpt_account_id")])
+                email = _first_non_empty_str([claims.get("email")]) if isinstance(claims, dict) else ""
+                refreshed = RefreshedTokenData(
+                    access_token=access_token,
+                    refresh_token=new_refresh,
+                    id_token=id_token,
+                    email=email,
+                    account_id=account_id,
+                    expired=_future_rfc3339(parsed.get("expires_in")),
+                )
+                return "alive", refreshed, ""
+
+            error_code = str(parsed.get("error", ""))
+            error_desc = str(parsed.get("error_description", ""))
+            full_error = f"{error_code}: {error_desc} (HTTP {status})".strip()
+            if _contains_deleted_keyword(text) or _contains_deleted_keyword(full_error):
+                return "deleted", None, full_error or text[:200]
+            if error_code == "invalid_grant":
+                return "token_invalid", None, full_error or "invalid_grant"
+            last_error = full_error or text[:200] or f"HTTP {status}"
+        except Exception as exc:  # noqa: BLE001
+            last_error = str(exc)
+
+        if attempt < retry_attempts:
+            time.sleep(retry_backoff * (2 ** (attempt - 1)))
+
+    return "error", None, last_error or "refresh failed"
+
+
+def _check_access_token(
+    access_token: str,
+    timeout: float,
+    retry_attempts: int,
+    retry_backoff: float,
+) -> tuple[str, str]:
+    if not access_token:
+        return "expired", "access_token is empty"
+
+    last_error = ""
+    for attempt in range(1, retry_attempts + 1):
+        try:
+            with _RECOVERY_SEMAPHORE:
+                status, resp_body = _http_request(
+                    url=DEFAULT_MODELS_URL,
+                    method="GET",
+                    headers={
+                        "Authorization": f"Bearer {access_token}",
+                        "Accept": "application/json",
+                        "User-Agent": _random_browser_user_agent(),
+                    },
+                    body=None,
+                    timeout=timeout,
+                )
+            text = resp_body.decode("utf-8", errors="replace")
+
+            if status == 200:
+                return "alive", ""
+            if status == 401:
+                if _contains_deleted_keyword(text):
+                    return "deleted", f"HTTP 401: {text[:200]}"
+                return "expired", "HTTP 401: token expired or invalid"
+            if status == 403:
+                lowered = text.lower()
+                if _contains_deleted_keyword(text):
+                    return "deleted", f"HTTP 403: {text[:200]}"
+                if "insufficient permissions" in lowered or "missing scopes" in lowered:
+                    return "alive", ""
+                if "country" in lowered or "unsupported" in lowered:
+                    return "geo_blocked", "HTTP 403: geo blocked"
+                return "expired", f"HTTP 403: {text[:200]}"
+
+            last_error = f"HTTP {status}: {text[:200]}"
+        except Exception as exc:  # noqa: BLE001
+            last_error = str(exc)
+
+        if attempt < retry_attempts:
+            time.sleep(retry_backoff * (2 ** (attempt - 1)))
+
+    return "error", last_error or "access token check failed"
+
+
 def _build_probe_headers(access_token: str, account_id: str) -> dict[str, str]:
     headers = {
         "Authorization": f"Bearer {access_token}",
@@ -455,6 +825,42 @@ def _load_json(path: Path) -> dict[str, Any]:
     return obj
 
 
+def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.with_name(f".{path.name}.tmp-{os.getpid()}-{time.time_ns()}")
+    try:
+        temp_path.write_text(
+            json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+            encoding="utf-8",
+        )
+        os.replace(temp_path, path)
+    finally:
+        if temp_path.exists():
+            temp_path.unlink()
+
+
+def _write_refreshed_auth_file(
+    path: Path,
+    payload: dict[str, Any],
+    refreshed: RefreshedTokenData,
+    fields: dict[str, str],
+) -> None:
+    updated = dict(payload)
+    updated["type"] = updated.get("type") or fields.get("provider") or "codex"
+    updated["access_token"] = refreshed.access_token
+    updated["refresh_token"] = refreshed.refresh_token or fields.get("refresh_token") or ""
+    if refreshed.id_token:
+        updated["id_token"] = refreshed.id_token
+    if refreshed.account_id or fields.get("account_id"):
+        updated["account_id"] = refreshed.account_id or fields.get("account_id") or ""
+    if refreshed.email or fields.get("email"):
+        updated["email"] = refreshed.email or fields.get("email") or ""
+    if refreshed.expired:
+        updated["expired"] = refreshed.expired
+    updated["last_refresh"] = _utc_now_rfc3339()
+    _write_json_atomic(path, updated)
+
+
 def _scan_single_file(path: Path, args: argparse.Namespace) -> list[CheckResult]:
     try:
         payload = _load_json(path)
@@ -481,26 +887,38 @@ def _scan_single_file(path: Path, args: argparse.Namespace) -> list[CheckResult]
     fields = _extract_auth_fields(payload)
     access_token = fields["access_token"]
     refresh_token = fields["refresh_token"]
+    prefetched_refresh: RefreshedTokenData | None = None
+    prefetched_refresh_error = ""
 
-    try:
-        if args.refresh_before_check and refresh_token:
-            access_token, _ = _refresh_access_token(args.refresh_url, refresh_token, args.timeout)
-    except Exception as exc:  # noqa: BLE001
-        return [
-            CheckResult(
-                file=str(path),
-                provider=fields["provider"],
-                email=fields["email"],
-                account_id=fields["account_id"],
-                status_code=None,
-                unauthorized_401=False,
-                no_limit_unlimited=False,
-                quota_exceeded=False,
-                quota_resets_at=None,
-                error=str(exc),
-                response_preview="",
-            )
-        ]
+    if args.refresh_before_check and refresh_token:
+        refresh_status, refreshed_data, refresh_error = _try_refresh_token(
+            refresh_token=refresh_token,
+            refresh_url=args.refresh_url,
+            timeout=args.timeout,
+            retry_attempts=args.retry_attempts,
+            retry_backoff=args.retry_backoff,
+        )
+        prefetched_refresh_error = refresh_error
+        if refresh_status == "alive" and refreshed_data:
+            access_token = refreshed_data.access_token
+            prefetched_refresh = refreshed_data
+        elif refresh_status == "deleted":
+            return [
+                CheckResult(
+                    file=str(path),
+                    provider=fields["provider"],
+                    email=fields["email"],
+                    account_id=fields["account_id"],
+                    status_code=401,
+                    unauthorized_401=True,
+                    no_limit_unlimited=False,
+                    quota_exceeded=False,
+                    quota_resets_at=None,
+                    error=refresh_error or "refresh reports deleted",
+                    response_preview="",
+                    delete_invalid=True,
+                )
+            ]
 
     if not access_token:
         return [
@@ -522,37 +940,160 @@ def _scan_single_file(path: Path, args: argparse.Namespace) -> list[CheckResult]
     base_url = fields["base_url"] or args.base_url
     probe_url = base_url.rstrip("/") + "/" + args.quota_path.lstrip("/")
     headers = _build_probe_headers(access_token, fields["account_id"])
+    headers["User-Agent"] = _random_browser_user_agent()
     body = _build_probe_body(args.model)
+    status, response_text, request_error = _probe_once(
+        url=probe_url,
+        headers=headers,
+        body=body,
+        timeout=args.timeout,
+        retry_attempts=args.retry_attempts,
+        retry_backoff=args.retry_backoff,
+    )
+    preview = response_text[:300]
 
-    try:
-        status, resp_body = _http_request_with_retry(
-            url=probe_url,
-            method="POST",
-            headers=headers,
-            body=body,
+    if status == 401:
+        refreshed_data = None
+        refresh_status = ""
+        refresh_error = ""
+        if refresh_token:
+            refresh_status, refreshed_data, refresh_error = _try_refresh_token(
+                refresh_token=refresh_token,
+                refresh_url=args.refresh_url,
+                timeout=args.timeout,
+                retry_attempts=args.retry_attempts,
+                retry_backoff=args.retry_backoff,
+            )
+            if refresh_status == "alive" and refreshed_data:
+                verify_status, verify_error = _check_access_token(
+                    refreshed_data.access_token,
+                    timeout=args.timeout,
+                    retry_attempts=args.retry_attempts,
+                    retry_backoff=args.retry_backoff,
+                )
+                if verify_status in {"alive", "geo_blocked"}:
+                    _write_refreshed_auth_file(path, payload, refreshed_data, fields)
+                    retry_headers = _build_probe_headers(refreshed_data.access_token, fields["account_id"])
+                    retry_headers["User-Agent"] = _random_browser_user_agent()
+                    retry_status, retry_text, retry_error = _probe_once(
+                        url=probe_url,
+                        headers=retry_headers,
+                        body=body,
+                        timeout=args.timeout,
+                        retry_attempts=args.retry_attempts,
+                        retry_backoff=args.retry_backoff,
+                    )
+                    if retry_status is not None and retry_status != 401:
+                        quota_exceeded, resets_at = _detect_quota_exceeded(retry_text)
+                        return [
+                            CheckResult(
+                                file=str(path),
+                                provider=fields["provider"],
+                                email=fields["email"],
+                                account_id=fields["account_id"],
+                                status_code=retry_status,
+                                unauthorized_401=False,
+                                no_limit_unlimited=_looks_unlimited_from_response(retry_status, retry_text),
+                                quota_exceeded=quota_exceeded,
+                                quota_resets_at=resets_at,
+                                error=retry_error,
+                                response_preview=retry_text[:300],
+                                delete_invalid=False,
+                            )
+                        ]
+                elif verify_status == "deleted":
+                    return [
+                        CheckResult(
+                            file=str(path),
+                            provider=fields["provider"],
+                            email=fields["email"],
+                            account_id=fields["account_id"],
+                            status_code=401,
+                            unauthorized_401=True,
+                            no_limit_unlimited=False,
+                            quota_exceeded=False,
+                            quota_resets_at=None,
+                            error=verify_error or refresh_error or "confirmed deleted after refresh",
+                            response_preview=preview,
+                            delete_invalid=True,
+                        )
+                    ]
+            elif refresh_status == "deleted":
+                return [
+                    CheckResult(
+                        file=str(path),
+                        provider=fields["provider"],
+                        email=fields["email"],
+                        account_id=fields["account_id"],
+                        status_code=401,
+                        unauthorized_401=True,
+                        no_limit_unlimited=False,
+                        quota_exceeded=False,
+                        quota_resets_at=None,
+                        error=refresh_error or "refresh reports deleted",
+                        response_preview=preview,
+                        delete_invalid=True,
+                    )
+                ]
+
+        verify_status, verify_error = _check_access_token(
+            access_token,
             timeout=args.timeout,
             retry_attempts=args.retry_attempts,
             retry_backoff=args.retry_backoff,
         )
-        response_text = resp_body.decode("utf-8", errors="replace")
-        preview = response_text[:300]
-        quota_exceeded, resets_at = _detect_quota_exceeded(response_text)
+        if verify_status == "alive":
+            return [
+                CheckResult(
+                    file=str(path),
+                    provider=fields["provider"],
+                    email=fields["email"],
+                    account_id=fields["account_id"],
+                    status_code=200,
+                    unauthorized_401=False,
+                    no_limit_unlimited=False,
+                    quota_exceeded=False,
+                    quota_resets_at=None,
+                    error="access_token still valid after refresh failure",
+                    response_preview=preview,
+                    delete_invalid=False,
+                )
+            ]
+        if verify_status == "deleted":
+            return [
+                CheckResult(
+                    file=str(path),
+                    provider=fields["provider"],
+                    email=fields["email"],
+                    account_id=fields["account_id"],
+                    status_code=401,
+                    unauthorized_401=True,
+                    no_limit_unlimited=False,
+                    quota_exceeded=False,
+                    quota_resets_at=None,
+                    error=verify_error or "confirmed deleted",
+                    response_preview=preview,
+                    delete_invalid=True,
+                )
+            ]
         return [
             CheckResult(
                 file=str(path),
                 provider=fields["provider"],
                 email=fields["email"],
                 account_id=fields["account_id"],
-                status_code=status,
-                unauthorized_401=(status == 401),
-                no_limit_unlimited=_looks_unlimited_from_response(status, response_text),
-                quota_exceeded=quota_exceeded,
-                quota_resets_at=resets_at,
-                error="",
+                status_code=401,
+                unauthorized_401=True,
+                no_limit_unlimited=False,
+                quota_exceeded=False,
+                quota_resets_at=None,
+                error=refresh_error or verify_error or "401 requires review",
                 response_preview=preview,
+                delete_invalid=False,
             )
         ]
-    except error.URLError as exc:
+
+    if status is None:
         return [
             CheckResult(
                 file=str(path),
@@ -564,10 +1105,29 @@ def _scan_single_file(path: Path, args: argparse.Namespace) -> list[CheckResult]
                 no_limit_unlimited=False,
                 quota_exceeded=False,
                 quota_resets_at=None,
-                error=f"network error: {exc}",
+                error=request_error,
                 response_preview="",
             )
         ]
+
+    quota_exceeded, resets_at = _detect_quota_exceeded(response_text)
+    if prefetched_refresh is not None and status is not None and status != 401:
+        _write_refreshed_auth_file(path, payload, prefetched_refresh, fields)
+    return [
+        CheckResult(
+            file=str(path),
+            provider=fields["provider"],
+            email=fields["email"],
+            account_id=fields["account_id"],
+            status_code=status,
+            unauthorized_401=(status == 401),
+            no_limit_unlimited=_looks_unlimited_from_response(status, response_text),
+            quota_exceeded=quota_exceeded,
+            quota_resets_at=resets_at,
+            error=request_error,
+            response_preview=preview,
+        )
+    ]
 
 
 def _scan_dir_flat(
@@ -597,6 +1157,61 @@ def _scan_dir_flat(
             future_map = {
                 pool.submit(_scan_single_file, path, args): (index, path)
                 for index, path in enumerate(json_files, start=1)
+            }
+            completed = 0
+            for future in as_completed(future_map):
+                completed += 1
+                index, path = future_map[future]
+                if progress_callback is not None:
+                    progress_callback(completed, total, path)
+                try:
+                    file_results = future.result()
+                except Exception as exc:  # noqa: BLE001
+                    file_results = [
+                        CheckResult(
+                            file=str(path),
+                            provider="unknown",
+                            email="",
+                            account_id="",
+                            status_code=None,
+                            unauthorized_401=False,
+                            no_limit_unlimited=False,
+                            quota_exceeded=False,
+                            quota_resets_at=None,
+                            error=f"internal error: {exc}",
+                            response_preview="",
+                        )
+                    ]
+                if file_results:
+                    indexed_results.append((index, file_results))
+
+    indexed_results.sort(key=lambda item: item[0])
+    return [row for _, group in indexed_results for row in group]
+
+
+def _scan_dir_flat_from_paths(
+    paths: list[Path],
+    args: argparse.Namespace,
+    progress_callback: Callable[[int, int, Path], None] | None = None,
+) -> list[CheckResult]:
+    total = len(paths)
+    if total == 0:
+        return []
+
+    workers = min(args.workers, total)
+    indexed_results: list[tuple[int, list[CheckResult]]] = []
+    if workers <= 1:
+        for index, path in enumerate(paths, start=1):
+            if progress_callback is not None:
+                progress_callback(index, total, path)
+            file_results = _scan_single_file(path, args)
+            if file_results:
+                indexed_results.append((index, file_results))
+    else:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            future_map = {
+                pool.submit(_scan_single_file, path, args): (index, path)
+                for index, path in enumerate(paths, start=1)
             }
             completed = 0
             for future in as_completed(future_map):
@@ -789,16 +1404,20 @@ def main() -> int:
     auth_dir = Path(args.auth_dir).expanduser().resolve()
     exceeded_dir = Path(args.exceeded_dir).expanduser().resolve() if args.exceeded_dir else auth_dir / DEFAULT_EXCEEDED_DIR_NAME
 
+    active_targets, limit_targets, duplicate_targets = _build_scan_plan_with_duplicates(auth_dir, exceeded_dir)
+
     if progress_enabled:
         print(_paint("Scanning active auth JSON files...", ANSI_DIM, enabled=use_color))
 
     try:
-        results = scan_auth_files(args, progress_callback=progress.update if progress_enabled else None)
+        results = _scan_dir_flat_from_paths(active_targets, args, progress_callback=progress.update if progress_enabled else None)
     except Exception as exc:  # noqa: BLE001
         progress.finish()
         print(f"Error: {exc}", file=sys.stderr)
         return 2
     progress.finish()
+
+    deleted_duplicates, duplicate_delete_errors = _delete_files([str(path) for path in duplicate_targets])
 
     moved_to_exceeded: list[str] = []
     move_to_exceeded_errors: list[FileOpError] = []
@@ -817,7 +1436,7 @@ def main() -> int:
     if not args.no_quarantine and exceeded_dir.exists():
         if progress_enabled:
             print(_paint(f"Scanning limit dir: {exceeded_dir} ...", ANSI_DIM, enabled=use_color))
-        exceeded_results = _scan_dir_flat(exceeded_dir, args)
+        exceeded_results = _scan_dir_flat_from_paths(limit_targets, args)
         for item in exceeded_results:
             recovered = (not item.quota_exceeded) and item.status_code is not None and 200 <= item.status_code < 300
             if recovered:
@@ -827,7 +1446,7 @@ def main() -> int:
                 elif dst is not None:
                     moved_from_exceeded.append(dst)
 
-    unauthorized_files = [item.file for item in results if item.unauthorized_401]
+    unauthorized_files = [item.file for item in results + exceeded_results if item.delete_invalid]
     deleted_files: list[str] = []
     delete_errors: list[FileOpError] = []
     if unauthorized_files and not args.keep_401:
@@ -839,6 +1458,11 @@ def main() -> int:
                 {
                     "results": [asdict(item) for item in results],
                     "limit_dir_results": [asdict(item) for item in exceeded_results],
+                    "dedupe": {
+                        "duplicate_candidates": [str(path) for path in duplicate_targets],
+                        "deleted_duplicates": deleted_duplicates,
+                        "errors": [asdict(item) for item in duplicate_delete_errors],
+                    },
                     "quarantine": {
                         "enabled": not args.no_quarantine,
                         "limit_dir": str(exceeded_dir),
@@ -859,6 +1483,16 @@ def main() -> int:
         )
     else:
         _print_table(results, use_color=use_color)
+
+        if duplicate_targets or duplicate_delete_errors:
+            print()
+            print(_paint("Duplicate Cleanup", ANSI_BOLD, ANSI_CYAN, enabled=use_color))
+            print(f"  duplicate candidates : {len(duplicate_targets)}")
+            print(f"  deleted duplicates   : {len(deleted_duplicates)}")
+            for path in deleted_duplicates:
+                print(f"  [{_paint('deleted', ANSI_GREEN, enabled=use_color)}] {path}")
+            for item in duplicate_delete_errors:
+                print(f"  [{_paint('delete-failed', ANSI_RED, enabled=use_color)}] {item.file} :: {item.error}")
 
         if exceeded_results:
             print(_paint(f"Limit Dir Scan ({exceeded_dir})", ANSI_BOLD, ANSI_MAGENTA, enabled=use_color))
@@ -891,7 +1525,7 @@ def main() -> int:
                 for item in delete_errors:
                     print(f"  [{_paint('delete-failed', ANSI_RED, enabled=use_color)}] {item.file} :: {item.error}")
 
-    has_401 = any(item.unauthorized_401 for item in results)
+    has_401 = any(item.unauthorized_401 for item in results + exceeded_results)
     return 1 if has_401 else 0
 
 
