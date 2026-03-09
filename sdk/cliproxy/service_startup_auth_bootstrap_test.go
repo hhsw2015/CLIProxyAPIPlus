@@ -820,9 +820,9 @@ func TestRunPoolEvalCycle_LogsWindowDeltas(t *testing.T) {
 
 	stats := internalusage.NewRequestStatistics()
 	service := &Service{
-		usageStats:   stats,
-		poolManager:  NewPoolManager(config.PoolManagerConfig{Size: 2, Provider: "codex"}),
-		poolMetrics:  NewPoolMetrics(config.PoolManagerConfig{Size: 2, Provider: "codex"}),
+		usageStats:      stats,
+		poolManager:     NewPoolManager(config.PoolManagerConfig{Size: 2, Provider: "codex"}),
+		poolMetrics:     NewPoolMetrics(config.PoolManagerConfig{Size: 2, Provider: "codex"}),
 		publishedActive: map[string]time.Time{},
 	}
 	service.poolManager.SetActive(PoolMember{AuthID: "a-1", Provider: "codex"})
@@ -831,8 +831,8 @@ func TestRunPoolEvalCycle_LogsWindowDeltas(t *testing.T) {
 
 	start := time.Unix(1_700_000_000, 0).UTC()
 	service.runPoolEvalCycle(start)
-	if strings.Contains(buf.String(), "pool-eval: window=") {
-		t.Fatalf("expected first cycle to establish baseline only, got %q", buf.String())
+	if !strings.Contains(buf.String(), "pool-eval: baseline interval=5m0s total_requests=0 success=0 failure=0 success_rate=0.00% active_size=1 reserve_size=1 limit_size=1") {
+		t.Fatalf("expected baseline log on first cycle, got %q", buf.String())
 	}
 
 	stats.Record(context.Background(), coreusage.Record{Provider: "codex", Model: "gpt-5", RequestedAt: start.Add(time.Minute)})
@@ -851,5 +851,67 @@ func TestRunPoolEvalCycle_LogsWindowDeltas(t *testing.T) {
 	}
 	if !strings.Contains(logOutput, "pool-eval: window=5m0s active_removed=1 promoted=1 refreshed=1 moved_to_limit=1 deleted=0 restored=0") {
 		t.Fatalf("expected churn delta log, got %q", logOutput)
+	}
+}
+
+func TestLogPoolUnderfilled_TracksDuration(t *testing.T) {
+	var buf bytes.Buffer
+	oldOutput := log.StandardLogger().Out
+	oldFormatter := log.StandardLogger().Formatter
+	oldLevel := log.GetLevel()
+	log.SetOutput(&buf)
+	log.SetFormatter(&log.TextFormatter{DisableTimestamp: true, DisableColors: true})
+	log.SetLevel(log.WarnLevel)
+	t.Cleanup(func() {
+		log.SetOutput(oldOutput)
+		log.SetFormatter(oldFormatter)
+		log.SetLevel(oldLevel)
+	})
+
+	service := &Service{
+		poolManager: NewPoolManager(config.PoolManagerConfig{Size: 2, Provider: "codex"}),
+	}
+	service.poolManager.SetActive(PoolMember{AuthID: "a-1", Provider: "codex"})
+
+	start := time.Unix(1_700_000_100, 0).UTC()
+	service.logPoolUnderfilled(start, true)
+	service.logPoolUnderfilled(start.Add(2*time.Minute+15*time.Second), true)
+
+	logOutput := buf.String()
+	if !strings.Contains(logOutput, "pool-manager: underfilled active target=2 actual=1 reserve_exhausted=true underfilled_for=0s") {
+		t.Fatalf("expected initial underfilled log, got %q", logOutput)
+	}
+	if !strings.Contains(logOutput, "pool-manager: underfilled active target=2 actual=1 reserve_exhausted=true underfilled_for=2m15s") {
+		t.Fatalf("expected rolling underfilled duration log, got %q", logOutput)
+	}
+}
+
+func TestClearPoolUnderfilled_LogsRecoveryDuration(t *testing.T) {
+	var buf bytes.Buffer
+	oldOutput := log.StandardLogger().Out
+	oldFormatter := log.StandardLogger().Formatter
+	oldLevel := log.GetLevel()
+	log.SetOutput(&buf)
+	log.SetFormatter(&log.TextFormatter{DisableTimestamp: true, DisableColors: true})
+	log.SetLevel(log.InfoLevel)
+	t.Cleanup(func() {
+		log.SetOutput(oldOutput)
+		log.SetFormatter(oldFormatter)
+		log.SetLevel(oldLevel)
+	})
+
+	service := &Service{
+		poolManager: NewPoolManager(config.PoolManagerConfig{Size: 2, Provider: "codex"}),
+	}
+	service.poolManager.SetActive(PoolMember{AuthID: "a-1", Provider: "codex"})
+
+	start := time.Unix(1_700_000_200, 0).UTC()
+	service.logPoolUnderfilled(start, true)
+	service.poolManager.SetActive(PoolMember{AuthID: "a-2", Provider: "codex"})
+	service.clearPoolUnderfilled(start.Add(90 * time.Second))
+
+	logOutput := buf.String()
+	if !strings.Contains(logOutput, "pool-manager: active recovered target=2 actual=2 underfilled_for=1m30s") {
+		t.Fatalf("expected recovery log with duration, got %q", logOutput)
 	}
 }

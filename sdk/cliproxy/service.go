@@ -112,8 +112,10 @@ type Service struct {
 	// poolMetrics stores pool observability counters.
 	poolMetrics *PoolMetrics
 
-	poolEvalMu   sync.Mutex
-	poolEvalLast *poolEvalWindowSnapshot
+	poolEvalMu          sync.Mutex
+	poolEvalLast        *poolEvalWindowSnapshot
+	poolUnderfilledMu   sync.Mutex
+	poolUnderfilledSince time.Time
 }
 
 type poolEvalWindowSnapshot struct {
@@ -554,15 +556,11 @@ func (s *Service) fillActiveFromReserve(ctx context.Context) {
 		}
 		if !promoted {
 			snapshot := s.poolManager.Snapshot()
-			log.Warnf(
-				"pool-manager: underfilled active target=%d actual=%d reserve_exhausted=%t",
-				s.poolManager.TargetSize(),
-				snapshot.ActiveCount,
-				snapshot.ReserveCount == 0,
-			)
+			s.logPoolUnderfilled(time.Now(), snapshot.ReserveCount == 0)
 			break
 		}
 	}
+	s.clearPoolUnderfilled(time.Now())
 }
 
 func (s *Service) handlePoolResult(ctx context.Context, result coreauth.Result) {
@@ -938,7 +936,25 @@ func (s *Service) runPoolEvalCycle(now time.Time) {
 	previous := s.poolEvalLast
 	s.poolEvalLast = current
 	s.poolEvalMu.Unlock()
-	if previous == nil || !now.After(previous.At) {
+	if previous == nil {
+		successRate := 0.0
+		if current.TotalRequests > 0 {
+			successRate = float64(current.SuccessCount) * 100 / float64(current.TotalRequests)
+		}
+		log.Infof(
+			"pool-eval: baseline interval=%s total_requests=%d success=%d failure=%d success_rate=%.2f%% active_size=%d reserve_size=%d limit_size=%d",
+			poolEvalLogInterval,
+			current.TotalRequests,
+			current.SuccessCount,
+			current.FailureCount,
+			successRate,
+			poolSnapshot.ActiveCount,
+			poolSnapshot.ReserveCount,
+			poolSnapshot.LimitCount,
+		)
+		return
+	}
+	if !now.After(previous.At) {
 		return
 	}
 
@@ -971,6 +987,62 @@ func (s *Service) runPoolEvalCycle(now time.Time) {
 		current.MovedToLimitTotal-previous.MovedToLimitTotal,
 		current.DeletedTotal-previous.DeletedTotal,
 		current.RestoredTotal-previous.RestoredTotal,
+	)
+}
+
+func (s *Service) logPoolUnderfilled(now time.Time, reserveExhausted bool) {
+	if s == nil || s.poolManager == nil {
+		return
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+	snapshot := s.poolManager.Snapshot()
+	if !snapshot.Underfilled {
+		return
+	}
+
+	s.poolUnderfilledMu.Lock()
+	if s.poolUnderfilledSince.IsZero() {
+		s.poolUnderfilledSince = now
+	}
+	underfilledFor := now.Sub(s.poolUnderfilledSince)
+	s.poolUnderfilledMu.Unlock()
+
+	log.Warnf(
+		"pool-manager: underfilled active target=%d actual=%d reserve_exhausted=%t underfilled_for=%s",
+		snapshot.TargetSize,
+		snapshot.ActiveCount,
+		reserveExhausted,
+		underfilledFor.Round(time.Second),
+	)
+}
+
+func (s *Service) clearPoolUnderfilled(now time.Time) {
+	if s == nil || s.poolManager == nil {
+		return
+	}
+	snapshot := s.poolManager.Snapshot()
+	if snapshot.Underfilled {
+		return
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+
+	s.poolUnderfilledMu.Lock()
+	startedAt := s.poolUnderfilledSince
+	s.poolUnderfilledSince = time.Time{}
+	s.poolUnderfilledMu.Unlock()
+
+	if startedAt.IsZero() {
+		return
+	}
+	log.Infof(
+		"pool-manager: active recovered target=%d actual=%d underfilled_for=%s",
+		snapshot.TargetSize,
+		snapshot.ActiveCount,
+		now.Sub(startedAt).Round(time.Second),
 	)
 }
 
