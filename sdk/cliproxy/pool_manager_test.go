@@ -133,3 +133,23 @@ func TestPoolManager_LastSeenMember(t *testing.T) {
 		t.Fatalf("LastSeenMember = %+v, want AuthID=r-1 PoolState=reserve", member)
 	}
 }
+
+func TestPoolManager_PromoteNextReserve(t *testing.T) {
+	pm := NewPoolManager(config.PoolManagerConfig{Size: 2, Provider: "codex"})
+	pm.SetReserve(PoolMember{AuthID: "r-2"})
+	pm.SetReserve(PoolMember{AuthID: "r-1"})
+
+	member, ok := pm.PromoteNextReserve()
+	if !ok {
+		t.Fatal("expected PromoteNextReserve to succeed")
+	}
+	if member.AuthID != "r-1" || member.PoolState != PoolStateActive {
+		t.Fatalf("PromoteNextReserve() = %+v, want AuthID=r-1 PoolState=active", member)
+	}
+	if !pm.IsActive("r-1") {
+		t.Fatal("expected r-1 to be active after promotion")
+	}
+	if got := pm.ReserveIDs(); len(got) != 1 || got[0] != "r-2" {
+		t.Fatalf("ReserveIDs() = %#v, want [r-2]", got)
+	}
+}

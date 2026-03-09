@@ -97,6 +97,9 @@ type Service struct {
 
 	// publishedActive tracks auth IDs currently exposed to runtime routing in pool mode.
 	publishedActive map[string]time.Time
+
+	// poolCandidates stores auth snapshots known to the pool manager for promotion publishing.
+	poolCandidates map[string]*coreauth.Auth
 }
 
 // RegisterUsagePlugin registers a usage plugin on the global usage manager.
@@ -127,6 +130,18 @@ func newDefaultAuthManager() *sdkAuth.Manager {
 		sdkAuth.NewClaudeAuthenticator(),
 		sdkAuth.NewQwenAuthenticator(),
 	)
+}
+
+type serviceAuthHook struct {
+	coreauth.NoopHook
+	service *Service
+}
+
+func (h *serviceAuthHook) OnAuthDisposition(ctx context.Context, disposition coreauth.AuthDisposition) {
+	if h == nil || h.service == nil {
+		return
+	}
+	h.service.handleAuthDisposition(ctx, disposition)
 }
 
 func (s *Service) ensureAuthUpdateQueue(ctx context.Context) {
@@ -252,6 +267,19 @@ func (s *Service) bootstrapPoolSnapshot(ctx context.Context, watcherWrapper *Wat
 		ctx = context.Background()
 	}
 	ctx = coreauth.WithSkipPersist(ctx)
+	s.poolCandidates = make(map[string]*coreauth.Auth, len(rootAuths)+len(limitAuths))
+	for _, auth := range rootAuths {
+		if auth == nil || strings.TrimSpace(auth.ID) == "" {
+			continue
+		}
+		s.poolCandidates[auth.ID] = auth.Clone()
+	}
+	for _, auth := range limitAuths {
+		if auth == nil || strings.TrimSpace(auth.ID) == "" {
+			continue
+		}
+		s.poolCandidates[auth.ID] = auth.Clone()
+	}
 
 	activeCount := 0
 	for _, auth := range rootAuths {
@@ -274,7 +302,7 @@ func (s *Service) bootstrapPoolSnapshot(ctx context.Context, watcherWrapper *Wat
 		pm.SetLimit(PoolMember{AuthID: auth.ID, Provider: auth.Provider})
 	}
 	s.poolManager = pm
-	s.syncPoolActiveToRuntime(ctx, rootAuths)
+	s.syncPoolActiveToRuntime(ctx)
 	log.Infof(
 		"pool-manager: startup active target=%d selected=%d reserve=%d limit=%d",
 		pm.TargetSize(),
@@ -284,7 +312,7 @@ func (s *Service) bootstrapPoolSnapshot(ctx context.Context, watcherWrapper *Wat
 	)
 }
 
-func (s *Service) syncPoolActiveToRuntime(ctx context.Context, candidates []*coreauth.Auth) {
+func (s *Service) syncPoolActiveToRuntime(ctx context.Context) {
 	if s == nil || s.poolManager == nil {
 		return
 	}
@@ -293,30 +321,22 @@ func (s *Service) syncPoolActiveToRuntime(ctx context.Context, candidates []*cor
 	}
 	ctx = coreauth.WithSkipPersist(ctx)
 
-	candidateMap := make(map[string]*coreauth.Auth, len(candidates))
-	for _, auth := range candidates {
-		if auth == nil || strings.TrimSpace(auth.ID) == "" {
-			continue
-		}
-		candidateMap[auth.ID] = auth.Clone()
-	}
-
 	added, modified, removed := s.poolManager.ActiveDiff(s.publishedActive)
 	for _, id := range added {
-		if auth := candidateMap[id]; auth != nil {
+		if auth := s.poolCandidates[id]; auth != nil {
 			s.emitAuthUpdate(ctx, watcher.AuthUpdate{
 				Action: watcher.AuthUpdateActionAdd,
 				ID:     id,
-				Auth:   auth,
+				Auth:   auth.Clone(),
 			})
 		}
 	}
 	for _, id := range modified {
-		if auth := candidateMap[id]; auth != nil {
+		if auth := s.poolCandidates[id]; auth != nil {
 			s.emitAuthUpdate(ctx, watcher.AuthUpdate{
 				Action: watcher.AuthUpdateActionModify,
 				ID:     id,
-				Auth:   auth,
+				Auth:   auth.Clone(),
 			})
 		}
 	}
@@ -332,6 +352,47 @@ func (s *Service) syncPoolActiveToRuntime(ctx context.Context, candidates []*cor
 		published[id] = time.Now()
 	}
 	s.publishedActive = published
+}
+
+func (s *Service) handleAuthDisposition(ctx context.Context, disposition coreauth.AuthDisposition) {
+	if s == nil || s.poolManager == nil {
+		return
+	}
+	authID := strings.TrimSpace(disposition.AuthID)
+	if authID == "" {
+		return
+	}
+	if !s.poolManager.IsActive(authID) && !disposition.Deleted && !disposition.MovedToLimit && disposition.PoolEligible {
+		return
+	}
+
+	if disposition.Deleted {
+		s.poolManager.Remove(authID)
+		delete(s.poolCandidates, authID)
+	} else if disposition.MovedToLimit || !disposition.PoolEligible {
+		if member, ok := s.poolManager.LastSeenMember(authID); ok {
+			member.Provider = disposition.Provider
+			s.poolManager.SetLimit(member)
+		} else {
+			s.poolManager.Remove(authID)
+		}
+	} else {
+		if member, ok := s.poolManager.LastSeenMember(authID); ok {
+			member.Provider = disposition.Provider
+			s.poolManager.SetActive(member)
+		}
+	}
+
+	for s.poolManager.Snapshot().ActiveCount < s.poolManager.TargetSize() {
+		member, ok := s.poolManager.PromoteNextReserve()
+		if !ok {
+			break
+		}
+		if _, exists := s.poolCandidates[member.AuthID]; !exists {
+			continue
+		}
+	}
+	s.syncPoolActiveToRuntime(ctx)
 }
 
 func (s *Service) handleAuthUpdate(ctx context.Context, update watcher.AuthUpdate) {
@@ -651,6 +712,9 @@ func (s *Service) Run(ctx context.Context) error {
 	s.applyRetryConfig(s.cfg)
 
 	if s.coreManager != nil {
+		if s.cfg != nil && s.cfg.PoolManager.Size > 0 {
+			s.coreManager.SetHook(&serviceAuthHook{service: s})
+		}
 		if errLoad := s.coreManager.Load(ctx); errLoad != nil {
 			log.Warnf("failed to load auth store: %v", errLoad)
 		}

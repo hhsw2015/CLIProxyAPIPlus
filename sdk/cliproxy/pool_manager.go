@@ -181,6 +181,48 @@ func (p *PoolManager) Snapshot() PoolSnapshot {
 	}
 }
 
+// PromoteNextReserve promotes the lexicographically first reserve auth into active.
+func (p *PoolManager) PromoteNextReserve() (PoolMember, bool) {
+	if p == nil {
+		return PoolMember{}, false
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if len(p.reserve) == 0 {
+		return PoolMember{}, false
+	}
+	ids := make([]string, 0, len(p.reserve))
+	for id := range p.reserve {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	member := p.reserve[ids[0]]
+	if member == nil {
+		return PoolMember{}, false
+	}
+	cloned := *member
+	cloned.PoolState = PoolStateActive
+	p.active[cloned.AuthID] = &cloned
+	delete(p.reserve, cloned.AuthID)
+	p.lastSeen[cloned.AuthID] = &cloned
+	return cloned, true
+}
+
+// IsActive reports whether the given auth ID is part of the active pool.
+func (p *PoolManager) IsActive(authID string) bool {
+	if p == nil {
+		return false
+	}
+	authID = strings.TrimSpace(authID)
+	if authID == "" {
+		return false
+	}
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	_, ok := p.active[authID]
+	return ok
+}
+
 // ActiveDiff reports the add/modify/delete delta between the previous published active set
 // and the current active set. The first return value contains auth IDs newly active, the second
 // contains auth IDs that remain active but should be treated as modified, and the third contains
