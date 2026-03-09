@@ -71,6 +71,10 @@ const (
 
 var quotaCooldownDisabled atomic.Bool
 
+var archiveAuthFileFunc = func(m *Manager, sourcePath string, kind util.FailedAuthArchiveKind) (string, error) {
+	return m.archiveAuthFile(sourcePath, kind)
+}
+
 // SetQuotaCooldownDisabled toggles quota cooldown scheduling globally.
 func SetQuotaCooldownDisabled(disable bool) {
 	quotaCooldownDisabled.Store(disable)
@@ -1427,21 +1431,11 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	m.mu.Unlock()
 
 	if archiveAuth {
-		entry := logEntryWithRequestID(ctx)
-		targetPath, err := m.archiveAuthFile(archivePath, archiveKind)
-		if err != nil {
-			entry.WithError(err).Warnf("failed to handle auth %s after %s failure", result.AuthID, archiveKind)
-		} else {
-			if archiveKind == util.FailedAuthArchiveInvalid {
-				entry.Infof("deleted auth %s after %s failure", result.AuthID, archiveKind)
-			} else {
-				entry.Infof("archived auth %s to %s after %s failure", result.AuthID, targetPath, archiveKind)
-			}
-		}
 		m.hook.OnResult(ctx, result)
 		if emitDisposition {
 			m.hook.OnAuthDisposition(ctx, disposition)
 		}
+		go m.archiveAuthFileAsync(ctx, result.AuthID, archivePath, archiveKind)
 		return
 	}
 
@@ -1461,6 +1455,23 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	if emitDisposition {
 		m.hook.OnAuthDisposition(ctx, disposition)
 	}
+}
+
+func (m *Manager) archiveAuthFileAsync(ctx context.Context, authID, archivePath string, archiveKind util.FailedAuthArchiveKind) {
+	if m == nil {
+		return
+	}
+	entry := logEntryWithRequestID(ctx)
+	targetPath, err := archiveAuthFileFunc(m, archivePath, archiveKind)
+	if err != nil {
+		entry.WithError(err).Warnf("failed to handle auth %s after %s failure", authID, archiveKind)
+		return
+	}
+	if archiveKind == util.FailedAuthArchiveInvalid {
+		entry.Infof("deleted auth %s after %s failure", authID, archiveKind)
+		return
+	}
+	entry.Infof("archived auth %s to %s after %s failure", authID, targetPath, archiveKind)
 }
 
 func buildAuthDisposition(auth *Auth, result Result, source string) AuthDisposition {

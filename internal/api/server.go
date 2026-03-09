@@ -187,6 +187,14 @@ func (s *Server) SetPoolStatisticsProvider(provider func() any) {
 	s.mgmt.SetPoolStatisticsProvider(provider)
 }
 
+// SetSelectedAuthObserver forwards selected auth events from request execution.
+func (s *Server) SetSelectedAuthObserver(observer handlers.SelectedAuthObserver) {
+	if s == nil || s.handlers == nil {
+		return
+	}
+	s.handlers.SetSelectedAuthObserver(observer)
+}
+
 // NewServer creates and initializes a new API server instance.
 // It sets up the Gin engine, middleware, routes, and handlers.
 //

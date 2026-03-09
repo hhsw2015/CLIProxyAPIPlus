@@ -638,6 +638,111 @@ func TestRunActiveProbeCycle_RemovesQuotaAuthFromActive(t *testing.T) {
 	}
 }
 
+func TestHandleAuthDisposition_RebalancesAsynchronously(t *testing.T) {
+	activeAuthID := "pool-active-async"
+	reserveAuthID := "pool-reserve-async"
+
+	originalProbe := poolProbeAuthFunc
+	blockProbe := make(chan struct{})
+	poolProbeAuthFunc = func(ctx context.Context, cfg *config.Config, auth *coreauth.Auth) (*coreauth.Auth, coreauth.Result) {
+		if auth != nil && auth.ID == reserveAuthID {
+			<-blockProbe
+			return auth, coreauth.Result{
+				AuthID:   auth.ID,
+				Provider: "codex",
+				Model:    "gpt-5",
+				Success:  true,
+			}
+		}
+		return auth, coreauth.Result{
+			AuthID:   auth.ID,
+			Provider: "codex",
+			Model:    "gpt-5",
+			Success:  true,
+		}
+	}
+	t.Cleanup(func() { poolProbeAuthFunc = originalProbe })
+
+	reg := GlobalModelRegistry()
+	for _, id := range []string{activeAuthID, reserveAuthID} {
+		reg.UnregisterClient(id)
+	}
+	t.Cleanup(func() {
+		for _, id := range []string{activeAuthID, reserveAuthID} {
+			reg.UnregisterClient(id)
+		}
+	})
+
+	service := &Service{
+		cfg:         &config.Config{},
+		poolManager: NewPoolManager(config.PoolManagerConfig{Size: 1, Provider: "codex"}),
+		poolMetrics: NewPoolMetrics(config.PoolManagerConfig{Size: 1, Provider: "codex"}),
+		poolCandidates: map[string]*coreauth.Auth{
+			activeAuthID: {
+				ID:       activeAuthID,
+				Provider: "codex",
+				Status:   coreauth.StatusActive,
+				Attributes: map[string]string{
+					"api_key":  "active-key",
+					"base_url": "https://example.com/v1",
+				},
+			},
+			reserveAuthID: {
+				ID:       reserveAuthID,
+				Provider: "codex",
+				Status:   coreauth.StatusActive,
+				Attributes: map[string]string{
+					"api_key":  "reserve-key",
+					"base_url": "https://example.com/v1",
+				},
+			},
+		},
+		coreManager: coreauth.NewManager(nil, nil, nil),
+	}
+	service.poolManager.SetActive(PoolMember{AuthID: activeAuthID, Provider: "codex"})
+	service.poolManager.SetReserve(PoolMember{AuthID: reserveAuthID, Provider: "codex"})
+	service.syncPoolActiveToRuntime(context.Background())
+
+	workerCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	service.startPoolRebalanceWorker(workerCtx)
+
+	start := time.Now()
+	service.handleAuthDisposition(context.Background(), coreauth.AuthDisposition{
+		AuthID:       activeAuthID,
+		Provider:     "codex",
+		Healthy:      false,
+		PoolEligible: false,
+		Deleted:      true,
+		Source:       "request",
+	})
+	if time.Since(start) > 150*time.Millisecond {
+		t.Fatalf("handleAuthDisposition blocked on rebalance")
+	}
+
+	snapshot := service.poolManager.Snapshot()
+	if snapshot.ActiveCount != 0 {
+		t.Fatalf("expected active pool to be empty before async rebalance completes, got %+v", snapshot)
+	}
+	if reg.ClientSupportsModel(activeAuthID, "gpt-5") {
+		t.Fatal("expected removed auth to be unpublished immediately")
+	}
+	if reg.ClientSupportsModel(reserveAuthID, "gpt-5") {
+		t.Fatal("did not expect reserve auth to be promoted before async worker finishes")
+	}
+
+	close(blockProbe)
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if reg.ClientSupportsModel(reserveAuthID, "gpt-5") {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatal("expected async rebalance worker to promote reserve auth")
+}
+
 func TestRunReserveProbeCycle_ArchivesQuotaReserveToLimitState(t *testing.T) {
 	reserveAuthID := "pool-reserve-probe-quota"
 

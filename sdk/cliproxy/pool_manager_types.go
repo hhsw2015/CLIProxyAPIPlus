@@ -20,6 +20,8 @@ type PoolMember struct {
 	LastSuccessAt       time.Time
 	LastProbeAt         time.Time
 	NextProbeAt         time.Time
+	ProtectedUntil      time.Time
+	InFlightCount       int
 	ConsecutiveFailures int
 	LastProbeReason     string
 }
