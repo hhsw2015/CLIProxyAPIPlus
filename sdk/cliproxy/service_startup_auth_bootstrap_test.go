@@ -9,8 +9,10 @@ import (
 	"testing"
 	"time"
 
+	internalusage "github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/watcher"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	coreusage "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
 	log "github.com/sirupsen/logrus"
 )
@@ -799,5 +801,55 @@ func TestSyncPoolActiveToRuntime_LogsPoolPublish(t *testing.T) {
 	}
 	if !strings.Contains(logOutput, "pool-publish: completed add=1 modify=0 delete=0") {
 		t.Fatalf("expected pool publish summary log, got %q", logOutput)
+	}
+}
+
+func TestRunPoolEvalCycle_LogsWindowDeltas(t *testing.T) {
+	var buf bytes.Buffer
+	oldOutput := log.StandardLogger().Out
+	oldFormatter := log.StandardLogger().Formatter
+	oldLevel := log.GetLevel()
+	log.SetOutput(&buf)
+	log.SetFormatter(&log.TextFormatter{DisableTimestamp: true, DisableColors: true})
+	log.SetLevel(log.InfoLevel)
+	t.Cleanup(func() {
+		log.SetOutput(oldOutput)
+		log.SetFormatter(oldFormatter)
+		log.SetLevel(oldLevel)
+	})
+
+	stats := internalusage.NewRequestStatistics()
+	service := &Service{
+		usageStats:   stats,
+		poolManager:  NewPoolManager(config.PoolManagerConfig{Size: 2, Provider: "codex"}),
+		poolMetrics:  NewPoolMetrics(config.PoolManagerConfig{Size: 2, Provider: "codex"}),
+		publishedActive: map[string]time.Time{},
+	}
+	service.poolManager.SetActive(PoolMember{AuthID: "a-1", Provider: "codex"})
+	service.poolManager.SetReserve(PoolMember{AuthID: "r-1", Provider: "codex"})
+	service.poolManager.SetLimit(PoolMember{AuthID: "l-1", Provider: "codex"})
+
+	start := time.Unix(1_700_000_000, 0).UTC()
+	service.runPoolEvalCycle(start)
+	if strings.Contains(buf.String(), "pool-eval: window=") {
+		t.Fatalf("expected first cycle to establish baseline only, got %q", buf.String())
+	}
+
+	stats.Record(context.Background(), coreusage.Record{Provider: "codex", Model: "gpt-5", RequestedAt: start.Add(time.Minute)})
+	stats.Record(context.Background(), coreusage.Record{Provider: "codex", Model: "gpt-5", RequestedAt: start.Add(2 * time.Minute)})
+	stats.Record(context.Background(), coreusage.Record{Provider: "codex", Model: "gpt-5", RequestedAt: start.Add(3 * time.Minute), Failed: true})
+	service.poolMetrics.RecordPromotion()
+	service.poolMetrics.RecordActiveRemoval()
+	service.poolMetrics.RecordMovedToLimit()
+	service.poolMetrics.RecordRefreshed()
+
+	service.runPoolEvalCycle(start.Add(5 * time.Minute))
+
+	logOutput := buf.String()
+	if !strings.Contains(logOutput, "pool-eval: window=5m0s total_requests=3 success=2 failure=1 success_rate=66.67%") {
+		t.Fatalf("expected request delta log, got %q", logOutput)
+	}
+	if !strings.Contains(logOutput, "pool-eval: window=5m0s active_removed=1 promoted=1 refreshed=1 moved_to_limit=1 deleted=0 restored=0") {
+		t.Fatalf("expected churn delta log, got %q", logOutput)
 	}
 }

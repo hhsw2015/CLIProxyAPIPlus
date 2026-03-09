@@ -88,6 +88,9 @@ type Service struct {
 	// accessManager handles request authentication providers.
 	accessManager *sdkaccess.Manager
 
+	// usageStats allows tests and future integrations to provide a dedicated usage statistics source.
+	usageStats *internalusage.RequestStatistics
+
 	// coreManager handles core authentication and execution.
 	coreManager *coreauth.Manager
 
@@ -108,7 +111,25 @@ type Service struct {
 
 	// poolMetrics stores pool observability counters.
 	poolMetrics *PoolMetrics
+
+	poolEvalMu   sync.Mutex
+	poolEvalLast *poolEvalWindowSnapshot
 }
+
+type poolEvalWindowSnapshot struct {
+	At                 time.Time
+	TotalRequests      int64
+	SuccessCount       int64
+	FailureCount       int64
+	PromotionsTotal    int64
+	ActiveRemovedTotal int64
+	RefreshedTotal     int64
+	MovedToLimitTotal  int64
+	DeletedTotal       int64
+	RestoredTotal      int64
+}
+
+const poolEvalLogInterval = 5 * time.Minute
 
 // RegisterUsagePlugin registers a usage plugin on the global usage manager.
 // This allows external code to monitor API usage and token consumption.
@@ -610,6 +631,20 @@ func (s *Service) startPoolProbeLoops(parent context.Context) {
 			}
 		}()
 	}
+
+	go func() {
+		ticker := time.NewTicker(poolEvalLogInterval)
+		defer ticker.Stop()
+		s.runPoolEvalCycle(time.Now())
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case now := <-ticker.C:
+				s.runPoolEvalCycle(now)
+			}
+		}
+	}()
 }
 
 func (s *Service) runActiveProbeCycle(ctx context.Context, now time.Time) {
@@ -848,7 +883,7 @@ func (s *Service) logPoolEvaluation() {
 		return
 	}
 	poolSnapshot := s.poolMetrics.Snapshot(s.poolManager.Snapshot(), len(s.publishedActive))
-	usageSnapshot := internalusage.GetRequestStatistics().Snapshot()
+	usageSnapshot := s.usageStatistics().Snapshot()
 	successRate := 0.0
 	if usageSnapshot.TotalRequests > 0 {
 		successRate = float64(usageSnapshot.SuccessCount) * 100 / float64(usageSnapshot.TotalRequests)
@@ -866,6 +901,76 @@ func (s *Service) logPoolEvaluation() {
 		poolSnapshot.ActiveRemovedTotal,
 		poolSnapshot.MovedToLimitTotal,
 		poolSnapshot.DeletedTotal,
+	)
+}
+
+func (s *Service) usageStatistics() *internalusage.RequestStatistics {
+	if s != nil && s.usageStats != nil {
+		return s.usageStats
+	}
+	return internalusage.GetRequestStatistics()
+}
+
+func (s *Service) runPoolEvalCycle(now time.Time) {
+	if s == nil || s.poolManager == nil || s.poolMetrics == nil || !s.poolManager.Enabled() {
+		return
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+
+	poolSnapshot := s.poolMetrics.Snapshot(s.poolManager.Snapshot(), len(s.publishedActive))
+	usageSnapshot := s.usageStatistics().Snapshot()
+	current := &poolEvalWindowSnapshot{
+		At:                 now,
+		TotalRequests:      usageSnapshot.TotalRequests,
+		SuccessCount:       usageSnapshot.SuccessCount,
+		FailureCount:       usageSnapshot.FailureCount,
+		PromotionsTotal:    poolSnapshot.PromotionsTotal,
+		ActiveRemovedTotal: poolSnapshot.ActiveRemovedTotal,
+		RefreshedTotal:     poolSnapshot.RefreshedTotal,
+		MovedToLimitTotal:  poolSnapshot.MovedToLimitTotal,
+		DeletedTotal:       poolSnapshot.DeletedTotal,
+		RestoredTotal:      poolSnapshot.RestoredFromLimit,
+	}
+
+	s.poolEvalMu.Lock()
+	previous := s.poolEvalLast
+	s.poolEvalLast = current
+	s.poolEvalMu.Unlock()
+	if previous == nil || !now.After(previous.At) {
+		return
+	}
+
+	window := now.Sub(previous.At)
+	totalRequests := current.TotalRequests - previous.TotalRequests
+	successCount := current.SuccessCount - previous.SuccessCount
+	failureCount := current.FailureCount - previous.FailureCount
+	successRate := 0.0
+	if totalRequests > 0 {
+		successRate = float64(successCount) * 100 / float64(totalRequests)
+	}
+
+	log.Infof(
+		"pool-eval: window=%s total_requests=%d success=%d failure=%d success_rate=%.2f%% active_size=%d reserve_size=%d limit_size=%d",
+		window,
+		totalRequests,
+		successCount,
+		failureCount,
+		successRate,
+		poolSnapshot.ActiveCount,
+		poolSnapshot.ReserveCount,
+		poolSnapshot.LimitCount,
+	)
+	log.Infof(
+		"pool-eval: window=%s active_removed=%d promoted=%d refreshed=%d moved_to_limit=%d deleted=%d restored=%d",
+		window,
+		current.ActiveRemovedTotal-previous.ActiveRemovedTotal,
+		current.PromotionsTotal-previous.PromotionsTotal,
+		current.RefreshedTotal-previous.RefreshedTotal,
+		current.MovedToLimitTotal-previous.MovedToLimitTotal,
+		current.DeletedTotal-previous.DeletedTotal,
+		current.RestoredTotal-previous.RestoredTotal,
 	)
 }
 
