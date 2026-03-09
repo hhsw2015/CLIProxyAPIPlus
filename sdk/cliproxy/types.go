@@ -87,6 +87,8 @@ type WatcherWrapper struct {
 
 	setConfig             func(cfg *config.Config)
 	snapshotAuths         func() []*coreauth.Auth
+	snapshotRootFileAuths func() []*coreauth.Auth
+	snapshotLimitAuths    func() []*coreauth.Auth
 	setUpdateQueue        func(queue chan<- watcher.AuthUpdate)
 	dispatchRuntimeUpdate func(update watcher.AuthUpdate) bool
 	notifyTokenRefreshed  func(tokenID, accessToken, refreshToken, expiresAt string) // 方案 A: 后台刷新通知
@@ -138,6 +140,22 @@ func (w *WatcherWrapper) SnapshotAuths() []*coreauth.Auth {
 		return nil
 	}
 	return w.snapshotAuths()
+}
+
+// SnapshotRootFileAuths returns root auth-dir JSON auths without subdirectories.
+func (w *WatcherWrapper) SnapshotRootFileAuths() []*coreauth.Auth {
+	if w == nil || w.snapshotRootFileAuths == nil {
+		return nil
+	}
+	return w.snapshotRootFileAuths()
+}
+
+// SnapshotLimitAuths returns auths currently stored in auth-dir/limit.
+func (w *WatcherWrapper) SnapshotLimitAuths() []*coreauth.Auth {
+	if w == nil || w.snapshotLimitAuths == nil {
+		return nil
+	}
+	return w.snapshotLimitAuths()
 }
 
 // SetAuthUpdateQueue registers the channel used to propagate auth updates.
