@@ -26,10 +26,16 @@ func (h *Handler) GetUsageStatistics(c *gin.Context) {
 	if h != nil && h.usageStats != nil {
 		snapshot = h.usageStats.Snapshot()
 	}
-	c.JSON(http.StatusOK, gin.H{
+	payload := gin.H{
 		"usage":           snapshot,
 		"failed_requests": snapshot.FailureCount,
-	})
+	}
+	if h != nil && h.poolStatsProvider != nil {
+		if pool := h.poolStatsProvider(); pool != nil {
+			payload["pool"] = pool
+		}
+	}
+	c.JSON(http.StatusOK, payload)
 }
 
 // ExportUsageStatistics returns a complete usage snapshot for backup/migration.

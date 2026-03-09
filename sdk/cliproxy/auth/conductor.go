@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"io/fs"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -69,6 +71,10 @@ const (
 
 var quotaCooldownDisabled atomic.Bool
 
+var archiveAuthFileFunc = func(m *Manager, sourcePath string, kind util.FailedAuthArchiveKind) (string, error) {
+	return m.archiveAuthFile(sourcePath, kind)
+}
+
 // SetQuotaCooldownDisabled toggles quota cooldown scheduling globally.
 func SetQuotaCooldownDisabled(disable bool) {
 	quotaCooldownDisabled.Store(disable)
@@ -99,6 +105,22 @@ type Result struct {
 	Error *Error
 }
 
+// AuthDisposition describes the final post-processing outcome for a credential.
+type AuthDisposition struct {
+	AuthID         string
+	Provider       string
+	Model          string
+	Healthy        bool
+	PoolEligible   bool
+	Deleted        bool
+	MovedToLimit   bool
+	Refreshed      bool
+	QuotaExceeded  bool
+	NextRetryAfter time.Time
+	NextRecoverAt  time.Time
+	Source         string
+}
+
 // Selector chooses an auth candidate for execution.
 type Selector interface {
 	Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error)
@@ -112,6 +134,8 @@ type Hook interface {
 	OnAuthUpdated(ctx context.Context, auth *Auth)
 	// OnResult fires when execution result is recorded.
 	OnResult(ctx context.Context, result Result)
+	// OnAuthDisposition fires after final auth handling has determined the resulting disposition.
+	OnAuthDisposition(ctx context.Context, disposition AuthDisposition)
 }
 
 // NoopHook provides optional hook defaults.
@@ -125,6 +149,9 @@ func (NoopHook) OnAuthUpdated(context.Context, *Auth) {}
 
 // OnResult implements Hook.
 func (NoopHook) OnResult(context.Context, Result) {}
+
+// OnAuthDisposition implements Hook.
+func (NoopHook) OnAuthDisposition(context.Context, AuthDisposition) {}
 
 // Manager orchestrates auth lifecycle, selection, execution, and persistence.
 type Manager struct {
@@ -247,6 +274,19 @@ func (m *Manager) SetSelector(selector Selector) {
 		m.scheduler.setSelector(selector)
 		m.syncScheduler()
 	}
+}
+
+// SetHook replaces the current lifecycle hook implementation.
+func (m *Manager) SetHook(hook Hook) {
+	if m == nil {
+		return
+	}
+	if hook == nil {
+		hook = NoopHook{}
+	}
+	m.mu.Lock()
+	m.hook = hook
+	m.mu.Unlock()
 }
 
 // SetStore swaps the underlying persistence store.
@@ -1592,6 +1632,17 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	clearModelQuota := false
 	setModelQuota := false
 	var authSnapshot *Auth
+	archiveAuth := false
+	archiveKind := util.FailedAuthArchiveKind("")
+	archivePath := ""
+	archiveIDs := make([]string, 0, 1)
+	disposition := AuthDisposition{
+		AuthID:   result.AuthID,
+		Provider: result.Provider,
+		Model:    result.Model,
+		Source:   DispositionSource(ctx),
+	}
+	emitDisposition := false
 
 	m.mu.Lock()
 	if auth, ok := m.auths[result.AuthID]; ok && auth != nil {
@@ -1682,14 +1733,68 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 			} else {
 				applyAuthFailureState(auth, result.Error, result.RetryAfter, now)
 			}
+
+			if kind, sourcePath, ids, okArchive := m.failedAuthArchiveDecisionLocked(auth, result); okArchive {
+				archiveAuth = true
+				archiveKind = kind
+				archivePath = sourcePath
+				archiveIDs = append(archiveIDs[:0], ids...)
+				shouldResumeModel = false
+				shouldSuspendModel = false
+				clearModelQuota = false
+				setModelQuota = false
+				suspendReason = ""
+				for _, id := range archiveIDs {
+					delete(m.auths, id)
+				}
+			}
 		}
 
-		_ = m.persist(ctx, auth)
-		authSnapshot = auth.Clone()
+		if archiveAuth {
+			reg := registry.GetGlobalRegistry()
+			for _, id := range archiveIDs {
+				reg.UnregisterClient(id)
+				if result.Model != "" {
+					reg.ClearModelQuotaExceeded(id, result.Model)
+				}
+			}
+		}
+
+		disposition = buildAuthDisposition(auth, result, disposition.Source)
+		if !archiveAuth {
+			_ = m.persist(ctx, auth)
+			authSnapshot = auth.Clone()
+			emitDisposition = true
+		} else {
+			disposition.Deleted = archiveKind == util.FailedAuthArchiveInvalid
+			disposition.MovedToLimit = archiveKind == util.FailedAuthArchiveLimit
+			disposition.Healthy = false
+			disposition.PoolEligible = false
+			disposition.QuotaExceeded = archiveKind == util.FailedAuthArchiveLimit
+			disposition.NextRetryAfter = time.Time{}
+			disposition.NextRecoverAt = time.Time{}
+			emitDisposition = true
+		}
 	}
 	m.mu.Unlock()
-	if m.scheduler != nil && authSnapshot != nil {
-		m.scheduler.upsertAuth(authSnapshot)
+	if m.scheduler != nil {
+		if authSnapshot != nil {
+			m.scheduler.upsertAuth(authSnapshot)
+		}
+		if archiveAuth {
+			for _, id := range archiveIDs {
+				m.scheduler.removeAuth(id)
+			}
+		}
+	}
+
+	if archiveAuth {
+		m.hook.OnResult(ctx, result)
+		if emitDisposition {
+			m.hook.OnAuthDisposition(ctx, disposition)
+		}
+		go m.archiveAuthFileAsync(ctx, result.AuthID, archivePath, archiveKind)
+		return
 	}
 
 	if clearModelQuota && result.Model != "" {
@@ -1705,6 +1810,243 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	}
 
 	m.hook.OnResult(ctx, result)
+	if emitDisposition {
+		m.hook.OnAuthDisposition(ctx, disposition)
+	}
+}
+
+func (m *Manager) archiveAuthFileAsync(ctx context.Context, authID, archivePath string, archiveKind util.FailedAuthArchiveKind) {
+	if m == nil {
+		return
+	}
+	entry := logEntryWithRequestID(ctx)
+	targetPath, err := archiveAuthFileFunc(m, archivePath, archiveKind)
+	if err != nil {
+		entry.WithError(err).Warnf("failed to handle auth %s after %s failure", authID, archiveKind)
+		return
+	}
+	if archiveKind == util.FailedAuthArchiveInvalid {
+		entry.Infof("deleted auth %s after %s failure", authID, archiveKind)
+		return
+	}
+	entry.Infof("archived auth %s to %s after %s failure", authID, targetPath, archiveKind)
+}
+
+func buildAuthDisposition(auth *Auth, result Result, source string) AuthDisposition {
+	disposition := AuthDisposition{
+		AuthID:   result.AuthID,
+		Provider: result.Provider,
+		Model:    result.Model,
+		Source:   source,
+	}
+	if auth == nil {
+		return disposition
+	}
+	disposition.Provider = strings.TrimSpace(auth.Provider)
+	disposition.Deleted = false
+	disposition.MovedToLimit = false
+	disposition.Refreshed = false
+	disposition.Healthy = !auth.Disabled && !auth.Unavailable && !auth.Quota.Exceeded
+	disposition.PoolEligible = disposition.Healthy
+	disposition.QuotaExceeded = auth.Quota.Exceeded
+	disposition.NextRetryAfter = auth.NextRetryAfter
+	disposition.NextRecoverAt = auth.Quota.NextRecoverAt
+	if result.Success {
+		disposition.Healthy = true
+		disposition.PoolEligible = !auth.Disabled
+		disposition.QuotaExceeded = false
+	}
+	return disposition
+}
+
+type authDispositionSourceKey struct{}
+
+// WithDispositionSource annotates a context with the source of an auth disposition event.
+func WithDispositionSource(ctx context.Context, source string) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, authDispositionSourceKey{}, strings.TrimSpace(source))
+}
+
+// DispositionSource returns the disposition source tag from context.
+func DispositionSource(ctx context.Context) string {
+	if ctx != nil {
+		if raw, ok := ctx.Value(authDispositionSourceKey{}).(string); ok {
+			if trimmed := strings.TrimSpace(raw); trimmed != "" {
+				return trimmed
+			}
+		}
+	}
+	return "request"
+}
+
+func (m *Manager) failedAuthArchiveDecisionLocked(auth *Auth, result Result) (util.FailedAuthArchiveKind, string, []string, bool) {
+	if m == nil || auth == nil || result.Success {
+		return "", "", nil, false
+	}
+	cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
+	if cfg == nil || !cfg.ArchiveFailedAuth {
+		return "", "", nil, false
+	}
+	if auth.Attributes == nil {
+		return "", "", nil, false
+	}
+	sourcePath := strings.TrimSpace(auth.Attributes["path"])
+	if sourcePath == "" {
+		return "", "", nil, false
+	}
+	authDir, err := util.ResolveAuthDir(cfg.AuthDir)
+	if err != nil || authDir == "" || util.IsArchivedAuthPath(authDir, sourcePath) {
+		return "", "", nil, false
+	}
+	kind, ok := classifyFailedAuthArchive(result.Error)
+	if !ok {
+		return "", "", nil, false
+	}
+	ids := m.authIDsForSourcePathLocked(sourcePath)
+	if len(ids) == 0 {
+		ids = []string{auth.ID}
+	}
+	return kind, sourcePath, ids, true
+}
+
+func classifyFailedAuthArchive(resultErr *Error) (util.FailedAuthArchiveKind, bool) {
+	status := statusCodeFromResult(resultErr)
+	message := strings.ToLower(strings.TrimSpace(failedAuthArchiveText(resultErr)))
+	if isQuotaArchiveFailure(status, message) {
+		return util.FailedAuthArchiveLimit, true
+	}
+	if isInvalidArchiveFailure(status, message) {
+		return util.FailedAuthArchiveInvalid, true
+	}
+	return "", false
+}
+
+func failedAuthArchiveText(resultErr *Error) string {
+	if resultErr == nil {
+		return ""
+	}
+	parts := make([]string, 0, 2)
+	if code := strings.TrimSpace(resultErr.Code); code != "" {
+		parts = append(parts, code)
+	}
+	if msg := strings.TrimSpace(resultErr.Message); msg != "" {
+		parts = append(parts, msg)
+	}
+	return strings.Join(parts, " ")
+}
+
+func isQuotaArchiveFailure(status int, message string) bool {
+	if containsAnyFold(message,
+		"insufficient_quota",
+		"quota_exceeded",
+		"quota exceeded",
+		"quota exhausted",
+		"free allocated quota exceeded",
+		"out of credits",
+		"credit balance",
+		"payment_required",
+		"payment required",
+	) {
+		return true
+	}
+	switch status {
+	case http.StatusPaymentRequired, http.StatusTooManyRequests:
+		return true
+	default:
+		return false
+	}
+}
+
+func isInvalidArchiveFailure(status int, message string) bool {
+	if containsAnyFold(message,
+		"token_invalid",
+		"invalid_grant",
+		"refresh_token_reused",
+		"authentication is invalid",
+		"authentication invalid",
+		"invalid api key",
+		"invalid_api_key",
+		"api key is invalid",
+		"session expired",
+		"token expired",
+		"token revoked",
+		"unauthorized",
+	) {
+		return true
+	}
+	switch status {
+	case http.StatusUnauthorized, http.StatusForbidden:
+		return true
+	default:
+		return false
+	}
+}
+
+func containsAnyFold(value string, targets ...string) bool {
+	if value == "" {
+		return false
+	}
+	for _, target := range targets {
+		if target == "" {
+			continue
+		}
+		if strings.Contains(value, strings.ToLower(target)) {
+			return true
+		}
+	}
+	return false
+}
+
+func (m *Manager) authIDsForSourcePathLocked(sourcePath string) []string {
+	if m == nil || sourcePath == "" {
+		return nil
+	}
+	ids := make([]string, 0, 1)
+	for id, auth := range m.auths {
+		if auth == nil || auth.Attributes == nil {
+			continue
+		}
+		if sameAuthSourcePath(auth.Attributes["path"], sourcePath) {
+			ids = append(ids, id)
+		}
+	}
+	return ids
+}
+
+func sameAuthSourcePath(left, right string) bool {
+	left = strings.TrimSpace(left)
+	right = strings.TrimSpace(right)
+	if left == "" || right == "" {
+		return false
+	}
+	return strings.EqualFold(filepath.Clean(left), filepath.Clean(right))
+}
+
+func (m *Manager) archiveAuthFile(sourcePath string, kind util.FailedAuthArchiveKind) (string, error) {
+	if m == nil {
+		return "", nil
+	}
+	cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
+	if cfg == nil {
+		return "", nil
+	}
+	authDir, err := util.ResolveAuthDir(cfg.AuthDir)
+	if err != nil {
+		return "", err
+	}
+	if kind == util.FailedAuthArchiveInvalid {
+		if !filepath.IsAbs(sourcePath) {
+			sourcePath = filepath.Join(authDir, sourcePath)
+		}
+		sourcePath = filepath.Clean(sourcePath)
+		if err := os.Remove(sourcePath); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return "", err
+		}
+		return sourcePath, nil
+	}
+	return util.MoveAuthToArchive(authDir, sourcePath, kind)
 }
 
 func ensureModelState(auth *Auth, model string) *ModelState {

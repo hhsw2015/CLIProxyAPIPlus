@@ -56,6 +56,9 @@ type pinnedAuthContextKey struct{}
 type selectedAuthCallbackContextKey struct{}
 type executionSessionContextKey struct{}
 
+// SelectedAuthObserver receives the auth selected by the scheduler for a request.
+type SelectedAuthObserver func(context.Context, string)
+
 // WithPinnedAuthID returns a child context that requests execution on a specific auth ID.
 func WithPinnedAuthID(ctx context.Context, authID string) context.Context {
 	authID = strings.TrimSpace(authID)
@@ -237,6 +240,29 @@ func selectedAuthIDCallbackFromContext(ctx context.Context) func(string) {
 	return nil
 }
 
+func (h *BaseAPIHandler) combinedSelectedAuthCallback(ctx context.Context) func(string) {
+	if h == nil {
+		return selectedAuthIDCallbackFromContext(ctx)
+	}
+	contextCallback := selectedAuthIDCallbackFromContext(ctx)
+	observer := h.SelectedAuthObserver
+	if contextCallback == nil {
+		if observer == nil {
+			return nil
+		}
+		return func(authID string) {
+			observer(ctx, authID)
+		}
+	}
+	if observer == nil {
+		return contextCallback
+	}
+	return func(authID string) {
+		contextCallback(authID)
+		observer(ctx, authID)
+	}
+}
+
 func executionSessionIDFromContext(ctx context.Context) string {
 	if ctx == nil {
 		return ""
@@ -261,6 +287,9 @@ type BaseAPIHandler struct {
 
 	// Cfg holds the current application configuration.
 	Cfg *config.SDKConfig
+
+	// SelectedAuthObserver receives selected auth IDs for request-level side effects.
+	SelectedAuthObserver SelectedAuthObserver
 }
 
 // NewBaseAPIHandlers creates a new API handlers instance.
@@ -287,6 +316,14 @@ func NewBaseAPIHandlers(cfg *config.SDKConfig, authManager *coreauth.Manager) *B
 //   - clients: The new slice of AI service clients
 //   - cfg: The new application configuration
 func (h *BaseAPIHandler) UpdateClients(cfg *config.SDKConfig) { h.Cfg = cfg }
+
+// SetSelectedAuthObserver registers an observer for selected auth IDs.
+func (h *BaseAPIHandler) SetSelectedAuthObserver(observer SelectedAuthObserver) {
+	if h == nil {
+		return
+	}
+	h.SelectedAuthObserver = observer
+}
 
 // GetAlt extracts the 'alt' parameter from the request query string.
 // It checks both 'alt' and '$alt' parameters and returns the appropriate value.
@@ -474,6 +511,9 @@ func (h *BaseAPIHandler) ExecuteWithAuthManager(ctx context.Context, handlerType
 		return nil, nil, errMsg
 	}
 	reqMeta := requestExecutionMetadata(ctx)
+	if callback := h.combinedSelectedAuthCallback(ctx); callback != nil {
+		reqMeta[coreexecutor.SelectedAuthCallbackMetadataKey] = callback
+	}
 	reqMeta[coreexecutor.RequestedModelMetadataKey] = normalizedModel
 	payload := rawJSON
 	if len(payload) == 0 {
@@ -520,6 +560,9 @@ func (h *BaseAPIHandler) ExecuteCountWithAuthManager(ctx context.Context, handle
 		return nil, nil, errMsg
 	}
 	reqMeta := requestExecutionMetadata(ctx)
+	if callback := h.combinedSelectedAuthCallback(ctx); callback != nil {
+		reqMeta[coreexecutor.SelectedAuthCallbackMetadataKey] = callback
+	}
 	reqMeta[coreexecutor.RequestedModelMetadataKey] = normalizedModel
 	payload := rawJSON
 	if len(payload) == 0 {
@@ -570,6 +613,9 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 		return nil, nil, errChan
 	}
 	reqMeta := requestExecutionMetadata(ctx)
+	if callback := h.combinedSelectedAuthCallback(ctx); callback != nil {
+		reqMeta[coreexecutor.SelectedAuthCallbackMetadataKey] = callback
+	}
 	reqMeta[coreexecutor.RequestedModelMetadataKey] = normalizedModel
 	payload := rawJSON
 	if len(payload) == 0 {
