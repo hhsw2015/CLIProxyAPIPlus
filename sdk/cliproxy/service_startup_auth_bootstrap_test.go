@@ -524,3 +524,216 @@ func TestHandleAuthDisposition_RemovesActiveAndPromotesHealthyReserve(t *testing
 		t.Fatalf("expected unhealthy reserve auth to move to limit state, got %+v", snapshot)
 	}
 }
+
+func TestRunActiveProbeCycle_RemovesQuotaAuthFromActive(t *testing.T) {
+	activeAuthID := "pool-active-probe"
+	reserveAuthID := "pool-reserve-probe"
+
+	reg := GlobalModelRegistry()
+	for _, id := range []string{activeAuthID, reserveAuthID} {
+		reg.UnregisterClient(id)
+	}
+	t.Cleanup(func() {
+		for _, id := range []string{activeAuthID, reserveAuthID} {
+			reg.UnregisterClient(id)
+		}
+	})
+
+	originalProbe := poolProbeAuthFunc
+	poolProbeAuthFunc = func(ctx context.Context, cfg *config.Config, auth *coreauth.Auth) (*coreauth.Auth, coreauth.Result) {
+		switch auth.ID {
+		case activeAuthID:
+			return auth, coreauth.Result{
+				AuthID:   auth.ID,
+				Provider: "codex",
+				Model:    "gpt-5",
+				Success:  false,
+				Error:    &coreauth.Error{HTTPStatus: 429, Code: "quota_exceeded", Message: "quota exceeded"},
+			}
+		case reserveAuthID:
+			return auth, coreauth.Result{
+				AuthID:   auth.ID,
+				Provider: "codex",
+				Model:    "gpt-5",
+				Success:  true,
+			}
+		default:
+			return auth, coreauth.Result{
+				AuthID:   auth.ID,
+				Provider: "codex",
+				Model:    "gpt-5",
+				Success:  true,
+			}
+		}
+	}
+	t.Cleanup(func() { poolProbeAuthFunc = originalProbe })
+
+	service := &Service{
+		cfg: &config.Config{
+			PoolManager: config.PoolManagerConfig{
+				Size:                          1,
+				Provider:                      "codex",
+				ActiveIdleScanIntervalSeconds: 1800,
+			},
+		},
+		poolManager: NewPoolManager(config.PoolManagerConfig{
+			Size:                          1,
+			Provider:                      "codex",
+			ActiveIdleScanIntervalSeconds: 1800,
+		}),
+		poolCandidates: map[string]*coreauth.Auth{
+			activeAuthID: {
+				ID:       activeAuthID,
+				Provider: "codex",
+				Status:   coreauth.StatusActive,
+				Attributes: map[string]string{
+					"api_key":  "active-key",
+					"base_url": "https://example.com/v1",
+				},
+			},
+			reserveAuthID: {
+				ID:       reserveAuthID,
+				Provider: "codex",
+				Status:   coreauth.StatusActive,
+				Attributes: map[string]string{
+					"api_key":  "reserve-key",
+					"base_url": "https://example.com/v1",
+				},
+			},
+		},
+		coreManager: coreauth.NewManager(nil, nil, &serviceAuthHook{}),
+	}
+	service.coreManager.SetHook(&serviceAuthHook{service: service})
+	service.poolManager.SetActive(PoolMember{AuthID: activeAuthID, Provider: "codex"})
+	service.poolManager.SetReserve(PoolMember{AuthID: reserveAuthID, Provider: "codex"})
+	service.syncPoolActiveToRuntime(context.Background())
+
+	service.runActiveProbeCycle(context.Background(), time.Now().Add(2*time.Hour))
+
+	snapshot := service.poolManager.Snapshot()
+	if snapshot.ActiveCount != 1 || snapshot.ActiveIDs[0] != reserveAuthID {
+		t.Fatalf("unexpected active snapshot after probe cycle: %+v", snapshot)
+	}
+	if snapshot.LimitCount != 1 || snapshot.LimitIDs[0] != activeAuthID {
+		t.Fatalf("expected original active auth to move to limit, got %+v", snapshot)
+	}
+	if !reg.ClientSupportsModel(reserveAuthID, "gpt-5") {
+		t.Fatal("expected reserve auth to be promoted to runtime after active probe failure")
+	}
+}
+
+func TestRunReserveProbeCycle_ArchivesQuotaReserveToLimitState(t *testing.T) {
+	reserveAuthID := "pool-reserve-probe-quota"
+
+	originalProbe := poolProbeAuthFunc
+	poolProbeAuthFunc = func(ctx context.Context, cfg *config.Config, auth *coreauth.Auth) (*coreauth.Auth, coreauth.Result) {
+		return auth, coreauth.Result{
+			AuthID:   auth.ID,
+			Provider: "codex",
+			Model:    "gpt-5",
+			Success:  false,
+			Error:    &coreauth.Error{HTTPStatus: 429, Code: "quota_exceeded", Message: "quota exceeded"},
+		}
+	}
+	t.Cleanup(func() { poolProbeAuthFunc = originalProbe })
+
+	originalShuffle := poolShuffleStringsFunc
+	poolShuffleStringsFunc = func(values []string) {}
+	t.Cleanup(func() { poolShuffleStringsFunc = originalShuffle })
+
+	service := &Service{
+		cfg: &config.Config{
+			PoolManager: config.PoolManagerConfig{
+				Size:                       1,
+				Provider:                   "codex",
+				ReserveScanIntervalSeconds: 300,
+				ReserveSampleSize:          5,
+			},
+		},
+		poolManager: NewPoolManager(config.PoolManagerConfig{
+			Size:                       1,
+			Provider:                   "codex",
+			ReserveScanIntervalSeconds: 300,
+			ReserveSampleSize:          5,
+		}),
+		poolCandidates: map[string]*coreauth.Auth{
+			reserveAuthID: {
+				ID:       reserveAuthID,
+				Provider: "codex",
+				Status:   coreauth.StatusActive,
+				Attributes: map[string]string{
+					"api_key":  "reserve-key",
+					"base_url": "https://example.com/v1",
+				},
+			},
+		},
+	}
+	service.poolManager.SetReserve(PoolMember{AuthID: reserveAuthID, Provider: "codex"})
+
+	service.runReserveProbeCycle(context.Background(), time.Now().Add(time.Hour))
+
+	snapshot := service.poolManager.Snapshot()
+	if snapshot.ReserveCount != 0 {
+		t.Fatalf("expected reserve to be emptied, got %+v", snapshot)
+	}
+	if snapshot.LimitCount != 1 || snapshot.LimitIDs[0] != reserveAuthID {
+		t.Fatalf("expected reserve auth to move to limit, got %+v", snapshot)
+	}
+}
+
+func TestRunLimitProbeCycle_RestoresHealthyLimitToReserve(t *testing.T) {
+	limitAuthID := "pool-limit-probe-restore"
+
+	originalProbe := poolProbeAuthFunc
+	poolProbeAuthFunc = func(ctx context.Context, cfg *config.Config, auth *coreauth.Auth) (*coreauth.Auth, coreauth.Result) {
+		return auth, coreauth.Result{
+			AuthID:   auth.ID,
+			Provider: "codex",
+			Model:    "gpt-5",
+			Success:  true,
+		}
+	}
+	t.Cleanup(func() { poolProbeAuthFunc = originalProbe })
+
+	service := &Service{
+		cfg: &config.Config{
+			PoolManager: config.PoolManagerConfig{
+				Size:                       1,
+				Provider:                   "codex",
+				LimitScanIntervalSeconds:   3600,
+				ReserveScanIntervalSeconds: 300,
+			},
+		},
+		poolManager: NewPoolManager(config.PoolManagerConfig{
+			Size:                       1,
+			Provider:                   "codex",
+			LimitScanIntervalSeconds:   3600,
+			ReserveScanIntervalSeconds: 300,
+		}),
+		poolCandidates: map[string]*coreauth.Auth{
+			limitAuthID: {
+				ID:       limitAuthID,
+				Provider: "codex",
+				Status:   coreauth.StatusActive,
+				Attributes: map[string]string{
+					"api_key":  "limit-key",
+					"base_url": "https://example.com/v1",
+				},
+			},
+		},
+	}
+	service.poolManager.SetLimit(PoolMember{AuthID: limitAuthID, Provider: "codex"})
+
+	service.runLimitProbeCycle(context.Background(), time.Now().Add(2*time.Hour))
+
+	snapshot := service.poolManager.Snapshot()
+	if snapshot.LimitCount != 0 {
+		t.Fatalf("expected limit to be emptied, got %+v", snapshot)
+	}
+	if snapshot.ReserveCount != 0 {
+		t.Fatalf("expected restored auth to be promoted into active because pool is underfilled, got %+v", snapshot)
+	}
+	if snapshot.ActiveCount != 1 || snapshot.ActiveIDs[0] != limitAuthID {
+		t.Fatalf("expected restored limit auth to end up active after refill, got %+v", snapshot)
+	}
+}
