@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"net/http"
 	"os"
 	"path/filepath"
 	"testing"
@@ -9,7 +10,37 @@ import (
 
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 )
+
+type refreshArchiveTestExecutor struct {
+	refreshFunc func(context.Context, *Auth) (*Auth, error)
+}
+
+func (e refreshArchiveTestExecutor) Identifier() string { return "codex" }
+
+func (e refreshArchiveTestExecutor) Execute(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	return cliproxyexecutor.Response{}, nil
+}
+
+func (e refreshArchiveTestExecutor) ExecuteStream(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+	return nil, nil
+}
+
+func (e refreshArchiveTestExecutor) Refresh(ctx context.Context, auth *Auth) (*Auth, error) {
+	if e.refreshFunc == nil {
+		return auth, nil
+	}
+	return e.refreshFunc(ctx, auth)
+}
+
+func (e refreshArchiveTestExecutor) CountTokens(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	return cliproxyexecutor.Response{}, nil
+}
+
+func (e refreshArchiveTestExecutor) HttpRequest(context.Context, *Auth, *http.Request) (*http.Response, error) {
+	return nil, nil
+}
 
 func waitForCondition(t *testing.T, timeout time.Duration, condition func() bool, description string) {
 	t.Helper()
@@ -180,4 +211,42 @@ func TestMarkResult_ArchivesAsyncAfterDisposition(t *testing.T) {
 	}
 
 	close(unblockArchive)
+}
+
+func TestRefreshAuthDeletesInvalidAuthFileWhenRefreshReportsReusedAndCredentialIsUnusable(t *testing.T) {
+	tmpDir := t.TempDir()
+	sourcePath := filepath.Join(tmpDir, "codex.json")
+	if err := os.WriteFile(sourcePath, []byte(`{"type":"codex","email":"demo@example.com"}`), 0o600); err != nil {
+		t.Fatalf("write auth file: %v", err)
+	}
+
+	m := NewManager(nil, &RoundRobinSelector{}, nil)
+	m.RegisterExecutor(refreshArchiveTestExecutor{
+		refreshFunc: func(context.Context, *Auth) (*Auth, error) {
+			return nil, &Error{
+				Code:       "refresh_token_reused",
+				Message:    "refresh token reused and access token invalid",
+				HTTPStatus: 401,
+			}
+		},
+	})
+	m.SetConfig(&internalconfig.Config{AuthDir: tmpDir, ArchiveFailedAuth: true})
+	if _, err := m.Register(context.Background(), &Auth{
+		ID:         "codex.json",
+		Provider:   "codex",
+		Metadata:   map[string]any{"type": "codex"},
+		Attributes: map[string]string{"path": sourcePath},
+	}); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+
+	m.refreshAuth(context.Background(), "codex.json")
+
+	if _, ok := m.GetByID("codex.json"); ok {
+		t.Fatal("expected invalid auth to be removed from manager after refresh failure")
+	}
+	waitForCondition(t, 2*time.Second, func() bool {
+		_, err := os.Stat(sourcePath)
+		return os.IsNotExist(err)
+	}, "source auth file removal after refresh failure")
 }

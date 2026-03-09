@@ -114,11 +114,11 @@ type Service struct {
 	// poolMetrics stores pool observability counters.
 	poolMetrics *PoolMetrics
 
-	poolRebalanceMu    sync.Mutex
-	poolRebalanceQueue chan struct{}
-	poolEvalMu          sync.Mutex
-	poolEvalLast        *poolEvalWindowSnapshot
-	poolUnderfilledMu   sync.Mutex
+	poolRebalanceMu      sync.Mutex
+	poolRebalanceQueue   chan struct{}
+	poolEvalMu           sync.Mutex
+	poolEvalLast         *poolEvalWindowSnapshot
+	poolUnderfilledMu    sync.Mutex
 	poolUnderfilledSince time.Time
 	poolLowSuccessMu     sync.Mutex
 	poolLowSuccessStreak int
@@ -274,6 +274,27 @@ func (s *Service) bootstrapAuthSnapshot(ctx context.Context, watcherWrapper *Wat
 		}
 		s.applyCoreAuthAddOrUpdate(ctx, auth)
 	}
+}
+
+func (s *Service) seedLoadedCoreAuthModels() {
+	if s == nil || s.coreManager == nil {
+		return
+	}
+	if s.cfg != nil && s.cfg.PoolManager.Size > 0 {
+		return
+	}
+
+	loaded := s.coreManager.List()
+	if len(loaded) == 0 {
+		return
+	}
+	for _, auth := range loaded {
+		if auth == nil || strings.TrimSpace(auth.ID) == "" {
+			continue
+		}
+		s.registerModelsForAuth(auth)
+	}
+	s.coreManager.RebuildScheduler()
 }
 
 func (s *Service) bootstrapPoolSnapshot(ctx context.Context, watcherWrapper *WatcherWrapper) {
@@ -1504,6 +1525,7 @@ func (s *Service) Run(ctx context.Context) error {
 		if errLoad := s.coreManager.Load(ctx); errLoad != nil {
 			log.Warnf("failed to load auth store: %v", errLoad)
 		}
+		s.seedLoadedCoreAuthModels()
 	}
 
 	tokenResult, err := s.tokenProvider.Load(ctx, s.cfg)

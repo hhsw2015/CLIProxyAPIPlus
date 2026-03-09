@@ -167,6 +167,80 @@ class ClassifyAuthTests(unittest.TestCase):
             self.assertTrue(result.unauthorized_401)
             self.assertTrue(result.delete_invalid)
 
+    def test_scan_single_file_keeps_refresh_token_reused_when_access_token_still_alive(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            auth_path = Path(temp_dir) / "codex.json"
+            auth_path.write_text(
+                json.dumps(
+                    {
+                        "type": "codex",
+                        "email": "still-alive@example.com",
+                        "refresh_token": "refresh-token",
+                        "access_token": "still-alive-token",
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            args = make_args()
+
+            with mock.patch.object(
+                MODULE,
+                "_probe_once",
+                return_value=(401, '{"error":"unauthorized"}', ""),
+            ), mock.patch.object(
+                MODULE,
+                "_try_refresh_token",
+                return_value=("error", None, "invalid_request_error: refresh_token_reused (HTTP 401)"),
+            ), mock.patch.object(
+                MODULE,
+                "_check_access_token",
+                return_value=("alive", ""),
+            ):
+                result = MODULE._scan_single_file(auth_path, args)[0]
+
+            self.assertEqual(result.status_code, 200)
+            self.assertFalse(result.unauthorized_401)
+            self.assertFalse(result.delete_invalid)
+            self.assertIn("still valid", result.error.lower())
+
+    def test_scan_single_file_deletes_refresh_token_reused_when_access_token_unusable(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            auth_path = Path(temp_dir) / "codex.json"
+            auth_path.write_text(
+                json.dumps(
+                    {
+                        "type": "codex",
+                        "email": "expired@example.com",
+                        "refresh_token": "refresh-token",
+                        "access_token": "expired-token",
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            args = make_args()
+
+            with mock.patch.object(
+                MODULE,
+                "_probe_once",
+                return_value=(401, '{"error":"unauthorized"}', ""),
+            ), mock.patch.object(
+                MODULE,
+                "_try_refresh_token",
+                return_value=("error", None, "invalid_request_error: refresh_token_reused (HTTP 401)"),
+            ), mock.patch.object(
+                MODULE,
+                "_check_access_token",
+                return_value=("expired", "HTTP 401: token expired or invalid"),
+            ):
+                result = MODULE._scan_single_file(auth_path, args)[0]
+
+            self.assertEqual(result.status_code, 401)
+            self.assertTrue(result.unauthorized_401)
+            self.assertTrue(result.delete_invalid)
+            self.assertIn("refresh_token_reused", result.error)
+
 
 if __name__ == "__main__":
     unittest.main()

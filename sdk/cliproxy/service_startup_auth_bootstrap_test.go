@@ -3,6 +3,7 @@ package cliproxy
 import (
 	"bytes"
 	"context"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,6 +14,7 @@ import (
 	internalusage "github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/watcher"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	coreusage "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
 	log "github.com/sirupsen/logrus"
@@ -22,6 +24,32 @@ type captureAuthStore struct {
 	mu       sync.Mutex
 	lastAuth *coreauth.Auth
 	saveCnt  int
+}
+
+type serviceStartupTestExecutor struct {
+	provider string
+}
+
+func (e serviceStartupTestExecutor) Identifier() string { return e.provider }
+
+func (e serviceStartupTestExecutor) Execute(context.Context, *coreauth.Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	return cliproxyexecutor.Response{Payload: []byte(`{"ok":true}`)}, nil
+}
+
+func (e serviceStartupTestExecutor) ExecuteStream(context.Context, *coreauth.Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+	return nil, nil
+}
+
+func (e serviceStartupTestExecutor) Refresh(_ context.Context, auth *coreauth.Auth) (*coreauth.Auth, error) {
+	return auth, nil
+}
+
+func (e serviceStartupTestExecutor) CountTokens(context.Context, *coreauth.Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	return cliproxyexecutor.Response{}, nil
+}
+
+func (e serviceStartupTestExecutor) HttpRequest(context.Context, *coreauth.Auth, *http.Request) (*http.Response, error) {
+	return nil, nil
 }
 
 func (s *captureAuthStore) List(context.Context) ([]*coreauth.Auth, error) { return nil, nil }
@@ -140,6 +168,119 @@ func TestServiceRunBootstrapsSnapshotAuthsWithoutWatcherQueue(t *testing.T) {
 		t.Fatal("service did not stop after cancel")
 	}
 	t.Fatal("expected startup auth snapshot to be registered in model registry")
+}
+
+func TestServiceRunSeedsLoadedCoreAuthModelsWithoutWatcherSnapshot(t *testing.T) {
+	authID := "loaded-codex-startup"
+	reg := GlobalModelRegistry()
+	reg.UnregisterClient(authID)
+	t.Cleanup(func() {
+		reg.UnregisterClient(authID)
+	})
+
+	cfg := &config.Config{
+		Host:    "127.0.0.1",
+		Port:    0,
+		AuthDir: filepath.Join(t.TempDir(), "auth"),
+		SDKConfig: config.SDKConfig{
+			APIKeys: []string{"test-key"},
+		},
+	}
+
+	coreManager := coreauth.NewManager(nil, &coreauth.RoundRobinSelector{}, nil)
+	coreManager.RegisterExecutor(serviceStartupTestExecutor{provider: "codex"})
+	auth := &coreauth.Auth{
+		ID:       authID,
+		Provider: "codex",
+		Status:   coreauth.StatusActive,
+		Metadata: map[string]any{
+			"type":          "codex",
+			"access_token":  "access-token",
+			"refresh_token": "refresh-token",
+			"expired":       time.Now().Add(10 * 24 * time.Hour).Format(time.RFC3339),
+		},
+	}
+	if _, err := coreManager.Register(coreauth.WithSkipPersist(context.Background()), auth); err != nil {
+		t.Fatalf("preload core auth: %v", err)
+	}
+
+	tempDir := t.TempDir()
+	configPath := filepath.Join(tempDir, "config.yaml")
+	if err := os.WriteFile(configPath, []byte("port: 0\n"), 0o600); err != nil {
+		t.Fatalf("write temp config: %v", err)
+	}
+
+	service, err := NewBuilder().
+		WithConfig(cfg).
+		WithConfigPath(configPath).
+		WithCoreAuthManager(coreManager).
+		WithWatcherFactory(func(configPath, authDir string, reload func(*config.Config)) (*WatcherWrapper, error) {
+			return &WatcherWrapper{
+				start: func(ctx context.Context) error { return nil },
+				stop:  func() error { return nil },
+				setConfig: func(cfg *config.Config) {
+					_ = cfg
+				},
+				snapshotAuths: func() []*coreauth.Auth { return nil },
+				setUpdateQueue: func(queue chan<- watcher.AuthUpdate) {
+					_ = queue
+				},
+			}, nil
+		}).
+		Build()
+	if err != nil {
+		t.Fatalf("build service: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- service.Run(ctx)
+	}()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if reg.ClientSupportsModel(authID, "gpt-5-codex") {
+			break
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+
+	if !reg.ClientSupportsModel(authID, "gpt-5-codex") {
+		cancel()
+		select {
+		case errRun := <-done:
+			if errRun != nil && errRun != context.Canceled {
+				t.Fatalf("service run returned error: %v", errRun)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("service did not stop after cancel")
+		}
+		t.Fatal("expected loaded core auth to be registered in model registry")
+	}
+
+	if _, errExecute := coreManager.Execute(context.Background(), []string{"codex"}, cliproxyexecutor.Request{Model: "gpt-5-codex"}, cliproxyexecutor.Options{}); errExecute != nil {
+		cancel()
+		select {
+		case errRun := <-done:
+			if errRun != nil && errRun != context.Canceled {
+				t.Fatalf("service run returned error: %v", errRun)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("service did not stop after cancel")
+		}
+		t.Fatalf("expected scheduler to route loaded core auth after startup: %v", errExecute)
+	}
+
+	cancel()
+	select {
+	case errRun := <-done:
+		if errRun != nil && errRun != context.Canceled {
+			t.Fatalf("service run returned error: %v", errRun)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("service did not stop after cancel")
+	}
 }
 
 func TestServiceRunBootstrapsPoolStartupFromRootCandidatesOnly(t *testing.T) {
@@ -479,9 +620,9 @@ func TestServiceRunBootstrapsPoolStartupSkipsLowQuotaRootCandidate(t *testing.T)
 			APIKeys: []string{"test-key"},
 		},
 		PoolManager: config.PoolManagerConfig{
-			Size:                      1,
-			Provider:                  "codex",
-			LowQuotaThresholdPercent:  20,
+			Size:                     1,
+			Provider:                 "codex",
+			LowQuotaThresholdPercent: 20,
 		},
 	}
 
@@ -499,9 +640,9 @@ func TestServiceRunBootstrapsPoolStartupSkipsLowQuotaRootCandidate(t *testing.T)
 		WithConfigPath(configPath).
 		WithWatcherFactory(func(configPath, authDir string, reload func(*config.Config)) (*WatcherWrapper, error) {
 			return &WatcherWrapper{
-				start: func(ctx context.Context) error { return nil },
-				stop:  func() error { return nil },
-				setConfig: func(cfg *config.Config) { _ = cfg },
+				start:         func(ctx context.Context) error { return nil },
+				stop:          func() error { return nil },
+				setConfig:     func(cfg *config.Config) { _ = cfg },
 				snapshotAuths: func() []*coreauth.Auth { return nil },
 				snapshotRootFileAuths: func() []*coreauth.Auth {
 					return []*coreauth.Auth{lowQuotaAuth.Clone(), healthyAuth.Clone()}
@@ -954,19 +1095,19 @@ func TestRunReserveProbeCycle_MovesLowQuotaReserveToLowQuotaState(t *testing.T) 
 	service := &Service{
 		cfg: &config.Config{
 			PoolManager: config.PoolManagerConfig{
-				Size:                     1,
-				Provider:                 "codex",
+				Size:                       1,
+				Provider:                   "codex",
 				ReserveScanIntervalSeconds: 300,
-				ReserveSampleSize:        5,
-				LowQuotaThresholdPercent: 20,
+				ReserveSampleSize:          5,
+				LowQuotaThresholdPercent:   20,
 			},
 		},
 		poolManager: NewPoolManager(config.PoolManagerConfig{
-			Size:                     1,
-			Provider:                 "codex",
+			Size:                       1,
+			Provider:                   "codex",
 			ReserveScanIntervalSeconds: 300,
-			ReserveSampleSize:        5,
-			LowQuotaThresholdPercent: 20,
+			ReserveSampleSize:          5,
+			LowQuotaThresholdPercent:   20,
 		}),
 		poolCandidates: map[string]*coreauth.Auth{
 			reserveAuthID: {
@@ -1078,17 +1219,17 @@ func TestRunActiveProbeCycle_DemotesLowQuotaActive(t *testing.T) {
 	service := &Service{
 		cfg: &config.Config{
 			PoolManager: config.PoolManagerConfig{
-				Size:                        1,
-				Provider:                    "codex",
+				Size:                          1,
+				Provider:                      "codex",
 				ActiveIdleScanIntervalSeconds: 1800,
-				LowQuotaThresholdPercent:    20,
+				LowQuotaThresholdPercent:      20,
 			},
 		},
 		poolManager: NewPoolManager(config.PoolManagerConfig{
-			Size:                        1,
-			Provider:                    "codex",
+			Size:                          1,
+			Provider:                      "codex",
 			ActiveIdleScanIntervalSeconds: 1800,
-			LowQuotaThresholdPercent:    20,
+			LowQuotaThresholdPercent:      20,
 		}),
 		poolMetrics: NewPoolMetrics(config.PoolManagerConfig{Size: 1, Provider: "codex"}),
 		poolCandidates: map[string]*coreauth.Auth{
