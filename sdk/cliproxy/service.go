@@ -82,6 +82,9 @@ type Service struct {
 	// poolProbeStop cancels background pool probe loops.
 	poolProbeStop context.CancelFunc
 
+	// poolRebalanceStop cancels the async rebalance worker.
+	poolRebalanceStop context.CancelFunc
+
 	// authManager handles legacy authentication operations.
 	authManager *sdkAuth.Manager
 
@@ -112,6 +115,8 @@ type Service struct {
 	// poolMetrics stores pool observability counters.
 	poolMetrics *PoolMetrics
 
+	poolRebalanceMu    sync.Mutex
+	poolRebalanceQueue chan struct{}
 	poolEvalMu          sync.Mutex
 	poolEvalLast        *poolEvalWindowSnapshot
 	poolUnderfilledMu   sync.Mutex
@@ -137,6 +142,7 @@ type poolEvalWindowSnapshot struct {
 const poolEvalLogInterval = 5 * time.Minute
 const poolEvalLowSuccessThreshold = 80.0
 const poolEvalLowSuccessConsecutiveWindows = 3
+const poolSelectedAuthLeaseDuration = 30 * time.Second
 
 // RegisterUsagePlugin registers a usage plugin on the global usage manager.
 // This allows external code to monitor API usage and token consumption.
@@ -526,8 +532,10 @@ func (s *Service) handleAuthDisposition(ctx context.Context, disposition coreaut
 		s.poolMetrics.RecordRefreshed()
 	}
 
-	s.fillActiveFromReserve(ctx)
 	s.syncPoolActiveToRuntime(ctx)
+	if wasActive || s.poolManager.Snapshot().Underfilled {
+		s.schedulePoolRebalance()
+	}
 }
 
 func (s *Service) fillActiveFromReserve(ctx context.Context) {
@@ -568,6 +576,13 @@ func (s *Service) fillActiveFromReserve(ctx context.Context) {
 	s.clearPoolUnderfilled(time.Now())
 }
 
+func (s *Service) handleSelectedAuth(ctx context.Context, authID string) {
+	if s == nil || s.poolManager == nil {
+		return
+	}
+	s.poolManager.BeginUse(authID, time.Now(), poolSelectedAuthLeaseDuration)
+}
+
 func (s *Service) handlePoolResult(ctx context.Context, result coreauth.Result) {
 	if s == nil || s.poolManager == nil {
 		return
@@ -581,6 +596,54 @@ func (s *Service) handlePoolResult(ctx context.Context, result coreauth.Result) 
 	s.poolManager.RecordRequest(result.AuthID, result.Success, time.Now())
 }
 
+func (s *Service) startPoolRebalanceWorker(parent context.Context) {
+	if s == nil || s.poolManager == nil || !s.poolManager.Enabled() {
+		return
+	}
+	if s.poolRebalanceStop != nil {
+		return
+	}
+	if s.poolRebalanceQueue == nil {
+		s.poolRebalanceQueue = make(chan struct{}, 1)
+	}
+	ctx, cancel := context.WithCancel(parent)
+	s.poolRebalanceStop = cancel
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-s.poolRebalanceQueue:
+				s.runPoolRebalanceNow(ctx)
+			}
+		}
+	}()
+}
+
+func (s *Service) schedulePoolRebalance() {
+	if s == nil || s.poolManager == nil || !s.poolManager.Enabled() {
+		return
+	}
+	if s.poolRebalanceQueue == nil {
+		s.runPoolRebalanceNow(context.Background())
+		return
+	}
+	select {
+	case s.poolRebalanceQueue <- struct{}{}:
+	default:
+	}
+}
+
+func (s *Service) runPoolRebalanceNow(ctx context.Context) {
+	if s == nil || s.poolManager == nil {
+		return
+	}
+	s.poolRebalanceMu.Lock()
+	defer s.poolRebalanceMu.Unlock()
+	s.fillActiveFromReserve(ctx)
+	s.syncPoolActiveToRuntime(ctx)
+}
+
 func (s *Service) startPoolProbeLoops(parent context.Context) {
 	if s == nil || s.poolManager == nil || s.cfg == nil || !s.poolManager.Enabled() {
 		return
@@ -590,6 +653,7 @@ func (s *Service) startPoolProbeLoops(parent context.Context) {
 	}
 	ctx, cancel := context.WithCancel(parent)
 	s.poolProbeStop = cancel
+	s.startPoolRebalanceWorker(parent)
 
 	go func() {
 		ticker := time.NewTicker(30 * time.Second)
@@ -1443,6 +1507,7 @@ func (s *Service) Run(ctx context.Context) error {
 	s.server = api.NewServer(s.cfg, s.coreManager, s.accessManager, s.configPath, s.serverOptions...)
 	if s.server != nil {
 		s.server.SetPoolStatisticsProvider(s.poolMetricsSnapshot)
+		s.server.SetSelectedAuthObserver(s.handleSelectedAuth)
 	}
 
 	if s.authManager == nil {
@@ -1643,6 +1708,10 @@ func (s *Service) Shutdown(ctx context.Context) error {
 		if s.poolProbeStop != nil {
 			s.poolProbeStop()
 			s.poolProbeStop = nil
+		}
+		if s.poolRebalanceStop != nil {
+			s.poolRebalanceStop()
+			s.poolRebalanceStop = nil
 		}
 
 		if errShutdownPprof := s.shutdownPprof(ctx); errShutdownPprof != nil {

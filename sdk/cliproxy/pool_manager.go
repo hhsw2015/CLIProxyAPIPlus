@@ -304,7 +304,41 @@ func (p *PoolManager) LastSeenMember(authID string) (PoolMember, bool) {
 	return *member, true
 }
 
-// RecordRequest records a real request outcome for an active auth.
+// BeginUse marks an auth as selected for a live request and protects it from background probing.
+func (p *PoolManager) BeginUse(authID string, now time.Time, lease time.Duration) {
+	if p == nil {
+		return
+	}
+	authID = strings.TrimSpace(authID)
+	if authID == "" {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	member := p.lastSeen[authID]
+	if member == nil {
+		return
+	}
+	member.LastSelectedAt = now
+	member.InFlightCount++
+	if lease > 0 {
+		protectedUntil := now.Add(lease)
+		if protectedUntil.After(member.ProtectedUntil) {
+			member.ProtectedUntil = protectedUntil
+		}
+	}
+	if active := p.active[authID]; active != nil {
+		*active = *member
+	}
+	if reserve := p.reserve[authID]; reserve != nil {
+		*reserve = *member
+	}
+	if limit := p.limit[authID]; limit != nil {
+		*limit = *member
+	}
+}
+
+// RecordRequest records a completed real request outcome and releases any in-flight protection.
 func (p *PoolManager) RecordRequest(authID string, success bool, now time.Time) {
 	if p == nil {
 		return
@@ -315,15 +349,26 @@ func (p *PoolManager) RecordRequest(authID string, success bool, now time.Time) 
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	member := p.active[authID]
+	member := p.lastSeen[authID]
 	if member == nil {
 		return
 	}
-	member.LastSelectedAt = now
+	if member.InFlightCount > 0 {
+		member.InFlightCount--
+	}
 	if success {
 		member.LastSuccessAt = now
 		member.ConsecutiveFailures = 0
 		member.LastProbeReason = ""
+	}
+	if active := p.active[authID]; active != nil {
+		*active = *member
+	}
+	if reserve := p.reserve[authID]; reserve != nil {
+		*reserve = *member
+	}
+	if limit := p.limit[authID]; limit != nil {
+		*limit = *member
 	}
 }
 
@@ -374,6 +419,12 @@ func (p *PoolManager) DueActiveProbeIDs(now time.Time, interval time.Duration) [
 		if member == nil {
 			continue
 		}
+		if member.InFlightCount > 0 {
+			continue
+		}
+		if !member.ProtectedUntil.IsZero() && member.ProtectedUntil.After(now) {
+			continue
+		}
 		if !member.NextProbeAt.IsZero() && member.NextProbeAt.After(now) {
 			continue
 		}
@@ -395,6 +446,12 @@ func (p *PoolManager) DueReserveProbeIDs(now time.Time, interval time.Duration, 
 	ids := make([]string, 0, len(p.reserve))
 	for id, member := range p.reserve {
 		if member == nil {
+			continue
+		}
+		if member.InFlightCount > 0 {
+			continue
+		}
+		if !member.ProtectedUntil.IsZero() && member.ProtectedUntil.After(now) {
 			continue
 		}
 		if !member.NextProbeAt.IsZero() && member.NextProbeAt.After(now) {
@@ -426,6 +483,12 @@ func (p *PoolManager) DueLimitProbeIDs(now time.Time, interval time.Duration) []
 	ids := make([]string, 0, len(p.limit))
 	for id, member := range p.limit {
 		if member == nil {
+			continue
+		}
+		if member.InFlightCount > 0 {
+			continue
+		}
+		if !member.ProtectedUntil.IsZero() && member.ProtectedUntil.After(now) {
 			continue
 		}
 		if !member.NextProbeAt.IsZero() && member.NextProbeAt.After(now) {

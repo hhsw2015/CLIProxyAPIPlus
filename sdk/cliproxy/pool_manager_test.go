@@ -168,6 +168,18 @@ func TestPoolManager_DueActiveProbeIDsSkipsFreshSuccess(t *testing.T) {
 	}
 }
 
+func TestPoolManager_DueActiveProbeIDsSkipsInFlight(t *testing.T) {
+	pm := NewPoolManager(config.PoolManagerConfig{Size: 1, Provider: "codex"})
+	now := time.Unix(1_700_000_000, 0).UTC()
+	pm.SetActive(PoolMember{AuthID: "a-1", Provider: "codex"})
+	pm.BeginUse("a-1", now, 30*time.Second)
+
+	got := pm.DueActiveProbeIDs(now.Add(time.Hour), time.Minute)
+	if len(got) != 0 {
+		t.Fatalf("DueActiveProbeIDs = %#v, want nil while in-flight", got)
+	}
+}
+
 func TestPoolManager_MarkProbeUpdatesTimestamps(t *testing.T) {
 	pm := NewPoolManager(config.PoolManagerConfig{Size: 1, Provider: "codex"})
 	pm.SetActive(PoolMember{AuthID: "a-1"})
