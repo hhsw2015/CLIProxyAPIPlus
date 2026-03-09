@@ -72,6 +72,12 @@ class ClassifyAuthTests(unittest.TestCase):
             self.assertEqual([path.name for path in active_targets], ["codex-new.json"])
             self.assertEqual([path.name for path in limit_targets], ["codex-unique.json"])
 
+    def test_dedupe_summary_lines_print_zero_counts(self):
+        lines = MODULE._dedupe_summary_lines([], [], [])
+        self.assertEqual(lines[0], "Duplicate Cleanup")
+        self.assertIn("duplicate candidates : 0", lines[1])
+        self.assertIn("deleted duplicates   : 0", lines[2])
+
     def test_scan_single_file_recovers_refreshable_401(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             auth_path = Path(temp_dir) / "codex.json"
