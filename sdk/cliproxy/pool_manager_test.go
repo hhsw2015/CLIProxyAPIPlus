@@ -97,3 +97,39 @@ func TestPoolManager_MoveBetweenStates(t *testing.T) {
 		t.Fatalf("LimitIDs = %#v, want []", got)
 	}
 }
+
+func TestPoolManager_ActiveDiff(t *testing.T) {
+	pm := NewPoolManager(config.PoolManagerConfig{Size: 2, Provider: "codex"})
+	pm.SetActive(PoolMember{AuthID: "a-1"})
+	pm.SetActive(PoolMember{AuthID: "a-2"})
+
+	previous := map[string]time.Time{
+		"a-2": time.Now(),
+		"a-3": time.Now(),
+	}
+
+	added, modified, removed := pm.ActiveDiff(previous)
+
+	if len(added) != 1 || added[0] != "a-1" {
+		t.Fatalf("added = %#v, want [a-1]", added)
+	}
+	if len(modified) != 1 || modified[0] != "a-2" {
+		t.Fatalf("modified = %#v, want [a-2]", modified)
+	}
+	if len(removed) != 1 || removed[0] != "a-3" {
+		t.Fatalf("removed = %#v, want [a-3]", removed)
+	}
+}
+
+func TestPoolManager_LastSeenMember(t *testing.T) {
+	pm := NewPoolManager(config.PoolManagerConfig{Size: 1, Provider: "codex"})
+	pm.SetReserve(PoolMember{AuthID: "r-1", Provider: "codex"})
+
+	member, ok := pm.LastSeenMember("r-1")
+	if !ok {
+		t.Fatal("expected LastSeenMember to find r-1")
+	}
+	if member.AuthID != "r-1" || member.PoolState != PoolStateReserve {
+		t.Fatalf("LastSeenMember = %+v, want AuthID=r-1 PoolState=reserve", member)
+	}
+}

@@ -4,6 +4,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
 )
@@ -17,6 +18,7 @@ type PoolManager struct {
 	active   map[string]*PoolMember
 	reserve  map[string]*PoolMember
 	limit    map[string]*PoolMember
+	lastSeen map[string]*PoolMember
 }
 
 // NewPoolManager creates a new pool manager from config.
@@ -31,6 +33,7 @@ func NewPoolManager(cfg config.PoolManagerConfig) *PoolManager {
 		active:   make(map[string]*PoolMember),
 		reserve:  make(map[string]*PoolMember),
 		limit:    make(map[string]*PoolMember),
+		lastSeen: make(map[string]*PoolMember),
 	}
 }
 
@@ -88,6 +91,7 @@ func (p *PoolManager) setMember(member PoolMember, state PoolState) {
 	delete(p.reserve, member.AuthID)
 	delete(p.limit, member.AuthID)
 	cloned := member
+	p.lastSeen[member.AuthID] = &cloned
 	switch state {
 	case PoolStateLimit:
 		p.limit[member.AuthID] = &cloned
@@ -112,6 +116,7 @@ func (p *PoolManager) Remove(authID string) {
 	delete(p.active, authID)
 	delete(p.reserve, authID)
 	delete(p.limit, authID)
+	delete(p.lastSeen, authID)
 }
 
 // ActiveIDs returns the active auth identifiers in deterministic order.
@@ -174,4 +179,60 @@ func (p *PoolManager) Snapshot() PoolSnapshot {
 		ReserveCount: len(reserve),
 		LimitCount:   len(limit),
 	}
+}
+
+// ActiveDiff reports the add/modify/delete delta between the previous published active set
+// and the current active set. The first return value contains auth IDs newly active, the second
+// contains auth IDs that remain active but should be treated as modified, and the third contains
+// auth IDs removed from active.
+func (p *PoolManager) ActiveDiff(previous map[string]time.Time) ([]string, []string, []string) {
+	if p == nil {
+		return nil, nil, nil
+	}
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
+	if previous == nil {
+		previous = make(map[string]time.Time)
+	}
+
+	added := make([]string, 0, len(p.active))
+	modified := make([]string, 0, len(p.active))
+	removed := make([]string, 0, len(previous))
+
+	for id := range p.active {
+		if _, ok := previous[id]; !ok {
+			added = append(added, id)
+			continue
+		}
+		modified = append(modified, id)
+	}
+	for id := range previous {
+		if _, ok := p.active[id]; !ok {
+			removed = append(removed, id)
+		}
+	}
+
+	sort.Strings(added)
+	sort.Strings(modified)
+	sort.Strings(removed)
+	return added, modified, removed
+}
+
+// LastSeenMember returns the latest known pool member state for a given auth ID.
+func (p *PoolManager) LastSeenMember(authID string) (PoolMember, bool) {
+	if p == nil {
+		return PoolMember{}, false
+	}
+	authID = strings.TrimSpace(authID)
+	if authID == "" {
+		return PoolMember{}, false
+	}
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	member, ok := p.lastSeen[authID]
+	if !ok || member == nil {
+		return PoolMember{}, false
+	}
+	return *member, true
 }

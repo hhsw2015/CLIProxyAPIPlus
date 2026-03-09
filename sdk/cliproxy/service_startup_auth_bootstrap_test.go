@@ -240,6 +240,16 @@ func TestServiceRunBootstrapsPoolStartupFromRootCandidatesOnly(t *testing.T) {
 		<-done
 		t.Fatalf("unexpected limit snapshot: %+v", snapshot)
 	}
+	if len(service.publishedActive) != 1 {
+		cancel()
+		<-done
+		t.Fatalf("publishedActive len = %d, want 1", len(service.publishedActive))
+	}
+	if _, ok := service.publishedActive[activeAuthID]; !ok {
+		cancel()
+		<-done
+		t.Fatalf("expected active auth %s to be published", activeAuthID)
+	}
 
 	if !reg.ClientSupportsModel(activeAuthID, "gpt-5") {
 		cancel()
