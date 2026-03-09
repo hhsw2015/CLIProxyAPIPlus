@@ -101,6 +101,22 @@ type Result struct {
 	Error *Error
 }
 
+// AuthDisposition describes the final post-processing outcome for a credential.
+type AuthDisposition struct {
+	AuthID         string
+	Provider       string
+	Model          string
+	Healthy        bool
+	PoolEligible   bool
+	Deleted        bool
+	MovedToLimit   bool
+	Refreshed      bool
+	QuotaExceeded  bool
+	NextRetryAfter time.Time
+	NextRecoverAt  time.Time
+	Source         string
+}
+
 // Selector chooses an auth candidate for execution.
 type Selector interface {
 	Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error)
@@ -114,6 +130,8 @@ type Hook interface {
 	OnAuthUpdated(ctx context.Context, auth *Auth)
 	// OnResult fires when execution result is recorded.
 	OnResult(ctx context.Context, result Result)
+	// OnAuthDisposition fires after final auth handling has determined the resulting disposition.
+	OnAuthDisposition(ctx context.Context, disposition AuthDisposition)
 }
 
 // NoopHook provides optional hook defaults.
@@ -127,6 +145,9 @@ func (NoopHook) OnAuthUpdated(context.Context, *Auth) {}
 
 // OnResult implements Hook.
 func (NoopHook) OnResult(context.Context, Result) {}
+
+// OnAuthDisposition implements Hook.
+func (NoopHook) OnAuthDisposition(context.Context, AuthDisposition) {}
 
 // Manager orchestrates auth lifecycle, selection, execution, and persistence.
 type Manager struct {
@@ -195,6 +216,19 @@ func (m *Manager) SetSelector(selector Selector) {
 	}
 	m.mu.Lock()
 	m.selector = selector
+	m.mu.Unlock()
+}
+
+// SetHook replaces the current lifecycle hook implementation.
+func (m *Manager) SetHook(hook Hook) {
+	if m == nil {
+		return
+	}
+	if hook == nil {
+		hook = NoopHook{}
+	}
+	m.mu.Lock()
+	m.hook = hook
 	m.mu.Unlock()
 }
 
@@ -1251,6 +1285,13 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	archiveKind := util.FailedAuthArchiveKind("")
 	archivePath := ""
 	archiveIDs := make([]string, 0, 1)
+	disposition := AuthDisposition{
+		AuthID:   result.AuthID,
+		Provider: result.Provider,
+		Model:    result.Model,
+		Source:   authDispositionSource(ctx),
+	}
+	emitDisposition := false
 
 	m.mu.Lock()
 	if auth, ok := m.auths[result.AuthID]; ok && auth != nil {
@@ -1370,6 +1411,17 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 
 		if !archiveAuth {
 			_ = m.persist(ctx, auth)
+			disposition = buildAuthDisposition(auth, result, disposition.Source)
+			emitDisposition = true
+		} else {
+			disposition.Healthy = false
+			disposition.PoolEligible = false
+			disposition.QuotaExceeded = archiveKind == util.FailedAuthArchiveLimit
+			disposition.NextRetryAfter = time.Time{}
+			disposition.NextRecoverAt = time.Time{}
+			disposition.Deleted = archiveKind == util.FailedAuthArchiveInvalid
+			disposition.MovedToLimit = archiveKind == util.FailedAuthArchiveLimit
+			emitDisposition = true
 		}
 	}
 	m.mu.Unlock()
@@ -1387,6 +1439,9 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 			}
 		}
 		m.hook.OnResult(ctx, result)
+		if emitDisposition {
+			m.hook.OnAuthDisposition(ctx, disposition)
+		}
 		return
 	}
 
@@ -1403,6 +1458,57 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	}
 
 	m.hook.OnResult(ctx, result)
+	if emitDisposition {
+		m.hook.OnAuthDisposition(ctx, disposition)
+	}
+}
+
+func buildAuthDisposition(auth *Auth, result Result, source string) AuthDisposition {
+	disposition := AuthDisposition{
+		AuthID:   result.AuthID,
+		Provider: result.Provider,
+		Model:    result.Model,
+		Source:   source,
+	}
+	if auth == nil {
+		return disposition
+	}
+	disposition.Provider = strings.TrimSpace(auth.Provider)
+	disposition.Deleted = false
+	disposition.MovedToLimit = false
+	disposition.Refreshed = false
+	disposition.Healthy = !auth.Disabled && !auth.Unavailable && !auth.Quota.Exceeded
+	disposition.PoolEligible = disposition.Healthy
+	disposition.QuotaExceeded = auth.Quota.Exceeded
+	disposition.NextRetryAfter = auth.NextRetryAfter
+	disposition.NextRecoverAt = auth.Quota.NextRecoverAt
+	if result.Success {
+		disposition.Healthy = true
+		disposition.PoolEligible = !auth.Disabled
+		disposition.QuotaExceeded = false
+	}
+	return disposition
+}
+
+type authDispositionSourceKey struct{}
+
+// WithDispositionSource annotates a context with the source of an auth disposition event.
+func WithDispositionSource(ctx context.Context, source string) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, authDispositionSourceKey{}, strings.TrimSpace(source))
+}
+
+func authDispositionSource(ctx context.Context) string {
+	if ctx != nil {
+		if raw, ok := ctx.Value(authDispositionSourceKey{}).(string); ok {
+			if trimmed := strings.TrimSpace(raw); trimmed != "" {
+				return trimmed
+			}
+		}
+	}
+	return "request"
 }
 
 func (m *Manager) failedAuthArchiveDecisionLocked(auth *Auth, result Result) (util.FailedAuthArchiveKind, string, []string, bool) {

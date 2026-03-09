@@ -277,3 +277,74 @@ func TestServiceRunBootstrapsPoolStartupFromRootCandidatesOnly(t *testing.T) {
 		t.Fatal("service did not stop after cancel")
 	}
 }
+
+func TestHandleAuthDisposition_RemovesActiveAndPromotesReserve(t *testing.T) {
+	activeAuthID := "pool-active-auth-disposition"
+	reserveAuthID := "pool-reserve-auth-disposition"
+
+	reg := GlobalModelRegistry()
+	for _, id := range []string{activeAuthID, reserveAuthID} {
+		reg.UnregisterClient(id)
+	}
+	t.Cleanup(func() {
+		for _, id := range []string{activeAuthID, reserveAuthID} {
+			reg.UnregisterClient(id)
+		}
+	})
+
+	service := &Service{
+		cfg:         &config.Config{},
+		poolManager: NewPoolManager(config.PoolManagerConfig{Size: 1, Provider: "codex"}),
+		poolCandidates: map[string]*coreauth.Auth{
+			activeAuthID: {
+				ID:       activeAuthID,
+				Provider: "codex",
+				Status:   coreauth.StatusActive,
+				Attributes: map[string]string{
+					"api_key":  "active-key",
+					"base_url": "https://example.com/v1",
+				},
+			},
+			reserveAuthID: {
+				ID:       reserveAuthID,
+				Provider: "codex",
+				Status:   coreauth.StatusActive,
+				Attributes: map[string]string{
+					"api_key":  "reserve-key",
+					"base_url": "https://example.com/v1",
+				},
+			},
+		},
+		coreManager: coreauth.NewManager(nil, nil, nil),
+	}
+	service.poolManager.SetActive(PoolMember{AuthID: activeAuthID, Provider: "codex"})
+	service.poolManager.SetReserve(PoolMember{AuthID: reserveAuthID, Provider: "codex"})
+	service.syncPoolActiveToRuntime(context.Background())
+
+	if !reg.ClientSupportsModel(activeAuthID, "gpt-5") {
+		t.Fatal("expected initial active auth to be published")
+	}
+	if reg.ClientSupportsModel(reserveAuthID, "gpt-5") {
+		t.Fatal("did not expect reserve auth to be published before promotion")
+	}
+
+	service.handleAuthDisposition(context.Background(), coreauth.AuthDisposition{
+		AuthID:       activeAuthID,
+		Provider:     "codex",
+		Healthy:      false,
+		PoolEligible: false,
+		Deleted:      true,
+		Source:       "request",
+	})
+
+	snapshot := service.poolManager.Snapshot()
+	if snapshot.ActiveCount != 1 || snapshot.ActiveIDs[0] != reserveAuthID {
+		t.Fatalf("unexpected active snapshot after disposition: %+v", snapshot)
+	}
+	if reg.ClientSupportsModel(activeAuthID, "gpt-5") {
+		t.Fatal("expected deleted active auth to be removed from runtime")
+	}
+	if !reg.ClientSupportsModel(reserveAuthID, "gpt-5") {
+		t.Fatal("expected reserve auth to be promoted into runtime")
+	}
+}
