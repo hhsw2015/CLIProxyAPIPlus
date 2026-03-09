@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -90,6 +91,9 @@ type Service struct {
 
 	// wsGateway manages websocket Gemini providers.
 	wsGateway *wsrelay.Manager
+
+	// poolManager maintains the active/reserve/limit auth pool when enabled.
+	poolManager *PoolManager
 }
 
 // RegisterUsagePlugin registers a usage plugin on the global usage manager.
@@ -186,6 +190,10 @@ func (s *Service) bootstrapAuthSnapshot(ctx context.Context, watcherWrapper *Wat
 	if s == nil || watcherWrapper == nil {
 		return
 	}
+	if s.cfg != nil && s.cfg.PoolManager.Size > 0 {
+		s.bootstrapPoolSnapshot(ctx, watcherWrapper)
+		return
+	}
 	auths := watcherWrapper.SnapshotAuths()
 	if len(auths) == 0 {
 		return
@@ -200,6 +208,76 @@ func (s *Service) bootstrapAuthSnapshot(ctx context.Context, watcherWrapper *Wat
 		}
 		s.applyCoreAuthAddOrUpdate(ctx, auth)
 	}
+}
+
+func (s *Service) bootstrapPoolSnapshot(ctx context.Context, watcherWrapper *WatcherWrapper) {
+	if s == nil || watcherWrapper == nil || s.cfg == nil {
+		return
+	}
+	pm := NewPoolManager(s.cfg.PoolManager)
+	if !pm.Enabled() {
+		return
+	}
+
+	rootAuths := watcherWrapper.SnapshotRootFileAuths()
+	limitAuths := watcherWrapper.SnapshotLimitAuths()
+	if len(rootAuths) == 0 && len(limitAuths) == 0 {
+		s.poolManager = pm
+		return
+	}
+
+	sort.Slice(rootAuths, func(i, j int) bool {
+		if rootAuths[i] == nil {
+			return false
+		}
+		if rootAuths[j] == nil {
+			return true
+		}
+		return rootAuths[i].ID < rootAuths[j].ID
+	})
+	sort.Slice(limitAuths, func(i, j int) bool {
+		if limitAuths[i] == nil {
+			return false
+		}
+		if limitAuths[j] == nil {
+			return true
+		}
+		return limitAuths[i].ID < limitAuths[j].ID
+	})
+
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ctx = coreauth.WithSkipPersist(ctx)
+
+	activeCount := 0
+	for _, auth := range rootAuths {
+		if auth == nil || strings.TrimSpace(auth.ID) == "" {
+			continue
+		}
+		member := PoolMember{AuthID: auth.ID, Provider: auth.Provider}
+		if activeCount < pm.TargetSize() {
+			pm.SetActive(member)
+			s.applyCoreAuthAddOrUpdate(ctx, auth)
+			activeCount++
+			continue
+		}
+		pm.SetReserve(member)
+	}
+	for _, auth := range limitAuths {
+		if auth == nil || strings.TrimSpace(auth.ID) == "" {
+			continue
+		}
+		pm.SetLimit(PoolMember{AuthID: auth.ID, Provider: auth.Provider})
+	}
+	s.poolManager = pm
+	log.Infof(
+		"pool-manager: startup active target=%d selected=%d reserve=%d limit=%d",
+		pm.TargetSize(),
+		pm.Snapshot().ActiveCount,
+		pm.Snapshot().ReserveCount,
+		pm.Snapshot().LimitCount,
+	)
 }
 
 func (s *Service) handleAuthUpdate(ctx context.Context, update watcher.AuthUpdate) {
