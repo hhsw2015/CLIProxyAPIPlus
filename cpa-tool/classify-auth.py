@@ -92,6 +92,7 @@ class CheckResult:
     response_preview: str
     delete_invalid: bool = False
     duplicate_deleted: bool = False
+    refreshed_auth_file: bool = False
 
 
 @dataclass
@@ -375,6 +376,42 @@ def _load_candidate(path: Path, bucket: str) -> AuthCandidate:
     )
 
 
+def _build_candidate_plan_with_duplicates(
+    auth_dir: Path, limit_dir: Path
+) -> tuple[list[AuthCandidate], list[AuthCandidate], list[Path]]:
+    grouped: dict[str, list[AuthCandidate]] = {}
+
+    for path in sorted(auth_dir.glob("*.json")):
+        candidate = _load_candidate(path, "active")
+        grouped.setdefault(candidate.identity, []).append(candidate)
+
+    if limit_dir.exists() and limit_dir.is_dir():
+        for path in sorted(limit_dir.glob("*.json")):
+            candidate = _load_candidate(path, "limit")
+            grouped.setdefault(candidate.identity, []).append(candidate)
+
+    active_targets: list[AuthCandidate] = []
+    limit_targets: list[AuthCandidate] = []
+    duplicates: list[Path] = []
+
+    for items in grouped.values():
+        primary = _choose_primary_candidate(items)
+        if primary.bucket == "active":
+            active_targets.append(primary)
+        else:
+            limit_targets.append(primary)
+
+        for item in items:
+            if item.path == primary.path:
+                continue
+            duplicates.append(item.path)
+
+    active_targets.sort(key=lambda item: item.path)
+    limit_targets.sort(key=lambda item: item.path)
+    duplicates.sort()
+    return active_targets, limit_targets, duplicates
+
+
 def _choose_primary_candidate(items: list[AuthCandidate]) -> AuthCandidate:
     return max(
         items,
@@ -390,37 +427,14 @@ def _choose_primary_candidate(items: list[AuthCandidate]) -> AuthCandidate:
 def _build_scan_plan_with_duplicates(
     auth_dir: Path, limit_dir: Path
 ) -> tuple[list[Path], list[Path], list[Path]]:
-    grouped: dict[str, list[AuthCandidate]] = {}
-
-    for path in sorted(auth_dir.glob("*.json")):
-        candidate = _load_candidate(path, "active")
-        grouped.setdefault(candidate.identity, []).append(candidate)
-
-    if limit_dir.exists() and limit_dir.is_dir():
-        for path in sorted(limit_dir.glob("*.json")):
-            candidate = _load_candidate(path, "limit")
-            grouped.setdefault(candidate.identity, []).append(candidate)
-
-    active_targets: list[Path] = []
-    limit_targets: list[Path] = []
-    duplicates: list[Path] = []
-
-    for items in grouped.values():
-        primary = _choose_primary_candidate(items)
-        if primary.bucket == "active":
-            active_targets.append(primary.path)
-        else:
-            limit_targets.append(primary.path)
-
-        for item in items:
-            if item.path == primary.path:
-                continue
-            duplicates.append(item.path)
-
-    active_targets.sort()
-    limit_targets.sort()
-    duplicates.sort()
-    return active_targets, limit_targets, duplicates
+    active_candidates, limit_candidates, duplicates = _build_candidate_plan_with_duplicates(
+        auth_dir, limit_dir
+    )
+    return (
+        [item.path for item in active_candidates],
+        [item.path for item in limit_candidates],
+        duplicates,
+    )
 
 
 def _build_scan_plan(auth_dir: Path, limit_dir: Path) -> tuple[list[Path], list[Path]]:
@@ -861,10 +875,10 @@ def _write_refreshed_auth_file(
     _write_json_atomic(path, updated)
 
 
-def _scan_single_file(path: Path, args: argparse.Namespace) -> list[CheckResult]:
-    try:
-        payload = _load_json(path)
-    except Exception as exc:  # noqa: BLE001
+def _scan_candidate(candidate: AuthCandidate, args: argparse.Namespace) -> list[CheckResult]:
+    path = candidate.path
+    payload = candidate.payload
+    if payload is None:
         return [
             CheckResult(
                 file=str(path),
@@ -876,12 +890,12 @@ def _scan_single_file(path: Path, args: argparse.Namespace) -> list[CheckResult]
                 no_limit_unlimited=False,
                 quota_exceeded=False,
                 quota_resets_at=None,
-                error=f"parse error: {exc}",
+                error=candidate.parse_error or "parse error",
                 response_preview="",
             )
         ]
 
-    if not _looks_like_codex(path, payload):
+    if not candidate.scanable:
         return []
 
     fields = _extract_auth_fields(payload)
@@ -999,6 +1013,7 @@ def _scan_single_file(path: Path, args: argparse.Namespace) -> list[CheckResult]
                                 error=retry_error,
                                 response_preview=retry_text[:300],
                                 delete_invalid=False,
+                                refreshed_auth_file=True,
                             )
                         ]
                 elif verify_status == "deleted":
@@ -1111,8 +1126,10 @@ def _scan_single_file(path: Path, args: argparse.Namespace) -> list[CheckResult]
         ]
 
     quota_exceeded, resets_at = _detect_quota_exceeded(response_text)
+    refreshed_auth_file = False
     if prefetched_refresh is not None and status is not None and status != 401:
         _write_refreshed_auth_file(path, payload, prefetched_refresh, fields)
+        refreshed_auth_file = True
     return [
         CheckResult(
             file=str(path),
@@ -1126,8 +1143,13 @@ def _scan_single_file(path: Path, args: argparse.Namespace) -> list[CheckResult]
             quota_resets_at=resets_at,
             error=request_error,
             response_preview=preview,
+            refreshed_auth_file=refreshed_auth_file,
         )
     ]
+
+
+def _scan_single_file(path: Path, args: argparse.Namespace) -> list[CheckResult]:
+    return _scan_candidate(_load_candidate(path, "active"), args)
 
 
 def _scan_dir_flat(
@@ -1212,6 +1234,61 @@ def _scan_dir_flat_from_paths(
             future_map = {
                 pool.submit(_scan_single_file, path, args): (index, path)
                 for index, path in enumerate(paths, start=1)
+            }
+            completed = 0
+            for future in as_completed(future_map):
+                completed += 1
+                index, path = future_map[future]
+                if progress_callback is not None:
+                    progress_callback(completed, total, path)
+                try:
+                    file_results = future.result()
+                except Exception as exc:  # noqa: BLE001
+                    file_results = [
+                        CheckResult(
+                            file=str(path),
+                            provider="unknown",
+                            email="",
+                            account_id="",
+                            status_code=None,
+                            unauthorized_401=False,
+                            no_limit_unlimited=False,
+                            quota_exceeded=False,
+                            quota_resets_at=None,
+                            error=f"internal error: {exc}",
+                            response_preview="",
+                        )
+                    ]
+                if file_results:
+                    indexed_results.append((index, file_results))
+
+    indexed_results.sort(key=lambda item: item[0])
+    return [row for _, group in indexed_results for row in group]
+
+
+def _scan_candidates(
+    candidates: list[AuthCandidate],
+    args: argparse.Namespace,
+    progress_callback: Callable[[int, int, Path], None] | None = None,
+) -> list[CheckResult]:
+    total = len(candidates)
+    if total == 0:
+        return []
+
+    workers = min(args.workers, total)
+    indexed_results: list[tuple[int, list[CheckResult]]] = []
+    if workers <= 1:
+        for index, candidate in enumerate(candidates, start=1):
+            if progress_callback is not None:
+                progress_callback(index, total, candidate.path)
+            file_results = _scan_candidate(candidate, args)
+            if file_results:
+                indexed_results.append((index, file_results))
+    else:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            future_map = {
+                pool.submit(_scan_candidate, candidate, args): (index, candidate.path)
+                for index, candidate in enumerate(candidates, start=1)
             }
             completed = 0
             for future in as_completed(future_map):
@@ -1364,6 +1441,23 @@ def _delete_files(paths: list[str]) -> tuple[list[str], list[FileOpError]]:
     return deleted, errors
 
 
+def _dedupe_summary_lines(
+    duplicate_candidates: list[Path],
+    deleted_duplicates: list[str],
+    duplicate_delete_errors: list[FileOpError],
+) -> list[str]:
+    lines = [
+        "Duplicate Cleanup",
+        f"  duplicate candidates : {len(duplicate_candidates)}",
+        f"  deleted duplicates   : {len(deleted_duplicates)}",
+    ]
+    for path in deleted_duplicates:
+        lines.append(f"  [deleted] {path}")
+    for item in duplicate_delete_errors:
+        lines.append(f"  [delete-failed] {item.file} :: {item.error}")
+    return lines
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Scan active Codex auth files, delete invalid tokens, quarantine quota-exhausted files, and restore recovered files from limit/."
@@ -1404,13 +1498,21 @@ def main() -> int:
     auth_dir = Path(args.auth_dir).expanduser().resolve()
     exceeded_dir = Path(args.exceeded_dir).expanduser().resolve() if args.exceeded_dir else auth_dir / DEFAULT_EXCEEDED_DIR_NAME
 
-    active_targets, limit_targets, duplicate_targets = _build_scan_plan_with_duplicates(auth_dir, exceeded_dir)
+    active_candidates, limit_candidates, duplicate_targets = _build_candidate_plan_with_duplicates(auth_dir, exceeded_dir)
 
     if progress_enabled:
+        print(_paint("Planning active/limit auth scan...", ANSI_DIM, enabled=use_color))
+        print(
+            _paint(
+                f"Active scan targets: {len(active_candidates)} | Limit scan targets: {len(limit_candidates)}",
+                ANSI_DIM,
+                enabled=use_color,
+            )
+        )
         print(_paint("Scanning active auth JSON files...", ANSI_DIM, enabled=use_color))
 
     try:
-        results = _scan_dir_flat_from_paths(active_targets, args, progress_callback=progress.update if progress_enabled else None)
+        results = _scan_candidates(active_candidates, args, progress_callback=progress.update if progress_enabled else None)
     except Exception as exc:  # noqa: BLE001
         progress.finish()
         print(f"Error: {exc}", file=sys.stderr)
@@ -1436,7 +1538,7 @@ def main() -> int:
     if not args.no_quarantine and exceeded_dir.exists():
         if progress_enabled:
             print(_paint(f"Scanning limit dir: {exceeded_dir} ...", ANSI_DIM, enabled=use_color))
-        exceeded_results = _scan_dir_flat_from_paths(limit_targets, args)
+        exceeded_results = _scan_candidates(limit_candidates, args)
         for item in exceeded_results:
             recovered = (not item.quota_exceeded) and item.status_code is not None and 200 <= item.status_code < 300
             if recovered:
@@ -1484,17 +1586,32 @@ def main() -> int:
     else:
         _print_table(results, use_color=use_color)
 
-        if duplicate_targets or duplicate_delete_errors:
-            print()
-            print(_paint("Duplicate Cleanup", ANSI_BOLD, ANSI_CYAN, enabled=use_color))
-            print(f"  duplicate candidates : {len(duplicate_targets)}")
-            print(f"  deleted duplicates   : {len(deleted_duplicates)}")
-            for path in deleted_duplicates:
-                print(f"  [{_paint('deleted', ANSI_GREEN, enabled=use_color)}] {path}")
-            for item in duplicate_delete_errors:
-                print(f"  [{_paint('delete-failed', ANSI_RED, enabled=use_color)}] {item.file} :: {item.error}")
+        print()
+        dedupe_lines = _dedupe_summary_lines(
+            duplicate_targets,
+            deleted_duplicates,
+            duplicate_delete_errors,
+        )
+        print(_paint(dedupe_lines[0], ANSI_BOLD, ANSI_CYAN, enabled=use_color))
+        for line in dedupe_lines[1:]:
+            if "[deleted]" in line:
+                label = line.replace("[deleted]", f"[{_paint('deleted', ANSI_GREEN, enabled=use_color)}]")
+                print(label)
+            elif "[delete-failed]" in line:
+                label = line.replace("[delete-failed]", f"[{_paint('delete-failed', ANSI_RED, enabled=use_color)}]")
+                print(label)
+            else:
+                print(line)
+
+        refreshed_count = sum(1 for item in results + exceeded_results if item.refreshed_auth_file)
+        print()
+        print(_paint("Scan Details", ANSI_BOLD, ANSI_CYAN, enabled=use_color))
+        print(f"  active files scanned : {len(active_candidates)}")
+        print(f"  limit files scanned  : {len(limit_candidates)}")
+        print(f"  refreshed auth files : {refreshed_count}")
 
         if exceeded_results:
+            print()
             print(_paint(f"Limit Dir Scan ({exceeded_dir})", ANSI_BOLD, ANSI_MAGENTA, enabled=use_color))
             _print_table(exceeded_results, use_color=use_color)
 
