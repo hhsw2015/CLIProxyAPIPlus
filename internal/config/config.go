@@ -83,6 +83,9 @@ type Config struct {
 	// Invalid credentials are deleted, and quota-exhausted credentials are moved to auth-dir/limit.
 	ArchiveFailedAuth bool `yaml:"archive-failed-auth" json:"archive-failed-auth"`
 
+	// PoolManager maintains a bounded healthy auth buffer for routing when enabled.
+	PoolManager PoolManagerConfig `yaml:"pool-manager,omitempty" json:"pool-manager,omitempty"`
+
 	// Routing controls credential selection behavior.
 	Routing RoutingConfig `yaml:"routing" json:"routing"`
 
@@ -201,6 +204,22 @@ type RoutingConfig struct {
 	// Strategy selects the credential selection strategy.
 	// Supported values: "round-robin" (default), "fill-first".
 	Strategy string `yaml:"strategy,omitempty" json:"strategy,omitempty"`
+}
+
+// PoolManagerConfig configures the optional runtime auth pool manager.
+type PoolManagerConfig struct {
+	// Size controls the target active pool size. Values <= 0 disable pool mode.
+	Size int `yaml:"size,omitempty" json:"size,omitempty"`
+	// Provider limits pool mode to a single provider. V1 defaults to "codex".
+	Provider string `yaml:"provider,omitempty" json:"provider,omitempty"`
+	// ActiveIdleScanIntervalSeconds controls how often idle active auths are probed.
+	ActiveIdleScanIntervalSeconds int `yaml:"active-idle-scan-interval-seconds,omitempty" json:"active-idle-scan-interval-seconds,omitempty"`
+	// ReserveScanIntervalSeconds controls how often reserve auths are sampled.
+	ReserveScanIntervalSeconds int `yaml:"reserve-scan-interval-seconds,omitempty" json:"reserve-scan-interval-seconds,omitempty"`
+	// LimitScanIntervalSeconds controls how often limit auths are retried.
+	LimitScanIntervalSeconds int `yaml:"limit-scan-interval-seconds,omitempty" json:"limit-scan-interval-seconds,omitempty"`
+	// ReserveSampleSize controls how many reserve auths are sampled per probe cycle.
+	ReserveSampleSize int `yaml:"reserve-sample-size,omitempty" json:"reserve-sample-size,omitempty"`
 }
 
 // OAuthModelAlias defines a model ID alias for a specific channel.
@@ -679,6 +698,8 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 		cfg.AuthDir = filepath.Clean(strings.TrimSpace(cfg.AuthDir))
 	}
 
+	cfg.SanitizePoolManager()
+
 	// Sanitize Gemini API key configuration and migrate legacy entries.
 	cfg.SanitizeGeminiKeys()
 
@@ -723,6 +744,51 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 
 	// Return the populated configuration struct.
 	return &cfg, nil
+}
+
+// SanitizePoolManager normalizes pool-manager config and applies defaults.
+func (cfg *Config) SanitizePoolManager() {
+	if cfg == nil {
+		return
+	}
+
+	pm := &cfg.PoolManager
+	pm.Provider = strings.ToLower(strings.TrimSpace(pm.Provider))
+	if pm.Provider == "" {
+		pm.Provider = "codex"
+	}
+
+	if pm.Size < 0 {
+		pm.Size = 0
+	}
+	if pm.ActiveIdleScanIntervalSeconds < 0 {
+		pm.ActiveIdleScanIntervalSeconds = 0
+	}
+	if pm.ReserveScanIntervalSeconds < 0 {
+		pm.ReserveScanIntervalSeconds = 0
+	}
+	if pm.LimitScanIntervalSeconds < 0 {
+		pm.LimitScanIntervalSeconds = 0
+	}
+	if pm.ReserveSampleSize < 0 {
+		pm.ReserveSampleSize = 0
+	}
+
+	if pm.Size <= 0 {
+		return
+	}
+	if pm.ActiveIdleScanIntervalSeconds == 0 {
+		pm.ActiveIdleScanIntervalSeconds = 1800
+	}
+	if pm.ReserveScanIntervalSeconds == 0 {
+		pm.ReserveScanIntervalSeconds = 300
+	}
+	if pm.LimitScanIntervalSeconds == 0 {
+		pm.LimitScanIntervalSeconds = 21600
+	}
+	if pm.ReserveSampleSize == 0 {
+		pm.ReserveSampleSize = 20
+	}
 }
 
 // SanitizePayloadRules validates raw JSON payload rule params and drops invalid rules.

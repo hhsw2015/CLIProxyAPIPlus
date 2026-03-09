@@ -91,6 +91,16 @@ max-retry-interval: 30
 # Invalid credentials are deleted, and quota-exhausted credentials are moved to auth-dir/limit.
 archive-failed-auth: false
 
+# Pool manager maintains a bounded active auth buffer for routing.
+# Set size > 0 to enable. V1 is intended for codex only.
+# pool-manager:
+#   size: 100
+#   provider: "codex"
+#   active-idle-scan-interval-seconds: 1800
+#   reserve-scan-interval-seconds: 300
+#   limit-scan-interval-seconds: 21600
+#   reserve-sample-size: 20
+
 # Quota exceeded behavior
 quota-exceeded:
   switch-project: true # Whether to automatically switch to another project when a quota is exceeded
