@@ -915,3 +915,51 @@ func TestClearPoolUnderfilled_LogsRecoveryDuration(t *testing.T) {
 		t.Fatalf("expected recovery log with duration, got %q", logOutput)
 	}
 }
+
+func TestRunPoolEvalCycle_WarnsAndRecoversForLowSuccessRate(t *testing.T) {
+	var buf bytes.Buffer
+	oldOutput := log.StandardLogger().Out
+	oldFormatter := log.StandardLogger().Formatter
+	oldLevel := log.GetLevel()
+	log.SetOutput(&buf)
+	log.SetFormatter(&log.TextFormatter{DisableTimestamp: true, DisableColors: true})
+	log.SetLevel(log.InfoLevel)
+	t.Cleanup(func() {
+		log.SetOutput(oldOutput)
+		log.SetFormatter(oldFormatter)
+		log.SetLevel(oldLevel)
+	})
+
+	stats := internalusage.NewRequestStatistics()
+	service := &Service{
+		usageStats:      stats,
+		poolManager:     NewPoolManager(config.PoolManagerConfig{Size: 2, Provider: "codex"}),
+		poolMetrics:     NewPoolMetrics(config.PoolManagerConfig{Size: 2, Provider: "codex"}),
+		publishedActive: map[string]time.Time{},
+	}
+	service.poolManager.SetActive(PoolMember{AuthID: "a-1", Provider: "codex"})
+
+	start := time.Unix(1_700_000_300, 0).UTC()
+	service.runPoolEvalCycle(start)
+
+	for i := 1; i <= 3; i++ {
+		windowStart := start.Add(time.Duration(i) * 5 * time.Minute)
+		stats.Record(context.Background(), coreusage.Record{Provider: "codex", Model: "gpt-5", RequestedAt: windowStart.Add(-4 * time.Minute)})
+		stats.Record(context.Background(), coreusage.Record{Provider: "codex", Model: "gpt-5", RequestedAt: windowStart.Add(-3 * time.Minute), Failed: true})
+		service.runPoolEvalCycle(windowStart)
+	}
+
+	logOutput := buf.String()
+	if !strings.Contains(logOutput, "pool-eval: low_success_rate warning threshold=80.00% consecutive_windows=3 current_rate=50.00% total_requests=2 failure=1") {
+		t.Fatalf("expected low success warning log after third window, got %q", logOutput)
+	}
+
+	stats.Record(context.Background(), coreusage.Record{Provider: "codex", Model: "gpt-5", RequestedAt: start.Add(16 * time.Minute)})
+	stats.Record(context.Background(), coreusage.Record{Provider: "codex", Model: "gpt-5", RequestedAt: start.Add(17 * time.Minute)})
+	service.runPoolEvalCycle(start.Add(20 * time.Minute))
+
+	logOutput = buf.String()
+	if !strings.Contains(logOutput, "pool-eval: success_rate recovered threshold=80.00% previous_streak=3 current_rate=100.00% total_requests=2") {
+		t.Fatalf("expected low success recovery log, got %q", logOutput)
+	}
+}
