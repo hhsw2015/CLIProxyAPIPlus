@@ -13,13 +13,14 @@ import (
 // PoolManager maintains the runtime active/reserve/limit auth partitioning.
 // V1 stores this state in memory only.
 type PoolManager struct {
-	mu       sync.RWMutex
-	size     int
-	provider string
-	active   map[string]*PoolMember
-	reserve  map[string]*PoolMember
-	limit    map[string]*PoolMember
-	lastSeen map[string]*PoolMember
+	mu                        sync.RWMutex
+	size                      int
+	provider                  string
+	lowQuotaThresholdPercent  int
+	active                    map[string]*PoolMember
+	reserve                   map[string]*PoolMember
+	limit                     map[string]*PoolMember
+	lastSeen                  map[string]*PoolMember
 }
 
 var poolShuffleStringsFunc = func(values []string) {
@@ -34,13 +35,21 @@ func NewPoolManager(cfg config.PoolManagerConfig) *PoolManager {
 	if provider == "" {
 		provider = "codex"
 	}
+	lowQuotaThreshold := cfg.LowQuotaThresholdPercent
+	if lowQuotaThreshold <= 0 {
+		lowQuotaThreshold = 20
+	}
+	if lowQuotaThreshold > 100 {
+		lowQuotaThreshold = 100
+	}
 	return &PoolManager{
-		size:     cfg.Size,
-		provider: provider,
-		active:   make(map[string]*PoolMember),
-		reserve:  make(map[string]*PoolMember),
-		limit:    make(map[string]*PoolMember),
-		lastSeen: make(map[string]*PoolMember),
+		size:                     cfg.Size,
+		provider:                 provider,
+		lowQuotaThresholdPercent: lowQuotaThreshold,
+		active:                   make(map[string]*PoolMember),
+		reserve:                  make(map[string]*PoolMember),
+		limit:                    make(map[string]*PoolMember),
+		lastSeen:                 make(map[string]*PoolMember),
 	}
 }
 
@@ -63,6 +72,14 @@ func (p *PoolManager) Provider() string {
 		return ""
 	}
 	return p.provider
+}
+
+// LowQuotaThresholdPercent returns the configured low-quota remaining-percent threshold.
+func (p *PoolManager) LowQuotaThresholdPercent() int {
+	if p == nil {
+		return 0
+	}
+	return p.lowQuotaThresholdPercent
 }
 
 // SetActive inserts or updates an active pool member.
