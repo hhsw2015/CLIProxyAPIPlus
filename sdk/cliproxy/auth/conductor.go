@@ -1289,7 +1289,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 		AuthID:   result.AuthID,
 		Provider: result.Provider,
 		Model:    result.Model,
-		Source:   authDispositionSource(ctx),
+		Source:   DispositionSource(ctx),
 	}
 	emitDisposition := false
 
@@ -1500,7 +1500,8 @@ func WithDispositionSource(ctx context.Context, source string) context.Context {
 	return context.WithValue(ctx, authDispositionSourceKey{}, strings.TrimSpace(source))
 }
 
-func authDispositionSource(ctx context.Context) string {
+// DispositionSource returns the disposition source tag from context.
+func DispositionSource(ctx context.Context) string {
 	if ctx != nil {
 		if raw, ok := ctx.Value(authDispositionSourceKey{}).(string); ok {
 			if trimmed := strings.TrimSpace(raw); trimmed != "" {

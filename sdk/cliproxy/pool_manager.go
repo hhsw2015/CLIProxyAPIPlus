@@ -1,6 +1,7 @@
 package cliproxy
 
 import (
+	"math/rand"
 	"sort"
 	"strings"
 	"sync"
@@ -19,6 +20,12 @@ type PoolManager struct {
 	reserve  map[string]*PoolMember
 	limit    map[string]*PoolMember
 	lastSeen map[string]*PoolMember
+}
+
+var poolShuffleStringsFunc = func(values []string) {
+	rand.Shuffle(len(values), func(i, j int) {
+		values[i], values[j] = values[j], values[i]
+	})
 }
 
 // NewPoolManager creates a new pool manager from config.
@@ -277,4 +284,137 @@ func (p *PoolManager) LastSeenMember(authID string) (PoolMember, bool) {
 		return PoolMember{}, false
 	}
 	return *member, true
+}
+
+// RecordRequest records a real request outcome for an active auth.
+func (p *PoolManager) RecordRequest(authID string, success bool, now time.Time) {
+	if p == nil {
+		return
+	}
+	authID = strings.TrimSpace(authID)
+	if authID == "" {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	member := p.active[authID]
+	if member == nil {
+		return
+	}
+	member.LastSelectedAt = now
+	if success {
+		member.LastSuccessAt = now
+		member.ConsecutiveFailures = 0
+		member.LastProbeReason = ""
+	}
+}
+
+// MarkProbe records a probe result and schedules the next probe time.
+func (p *PoolManager) MarkProbe(authID string, now time.Time, next time.Time, success bool, reason string) {
+	if p == nil {
+		return
+	}
+	authID = strings.TrimSpace(authID)
+	if authID == "" {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	member := p.lastSeen[authID]
+	if member == nil {
+		return
+	}
+	member.LastProbeAt = now
+	member.NextProbeAt = next
+	member.LastProbeReason = strings.TrimSpace(reason)
+	if success {
+		member.ConsecutiveFailures = 0
+		member.LastSuccessAt = now
+	} else {
+		member.ConsecutiveFailures++
+	}
+	if active := p.active[authID]; active != nil {
+		*active = *member
+	}
+	if reserve := p.reserve[authID]; reserve != nil {
+		*reserve = *member
+	}
+	if limit := p.limit[authID]; limit != nil {
+		*limit = *member
+	}
+}
+
+// DueActiveProbeIDs returns active auth IDs due for idle health probing.
+func (p *PoolManager) DueActiveProbeIDs(now time.Time, interval time.Duration) []string {
+	if p == nil || interval <= 0 {
+		return nil
+	}
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	ids := make([]string, 0, len(p.active))
+	for id, member := range p.active {
+		if member == nil {
+			continue
+		}
+		if !member.NextProbeAt.IsZero() && member.NextProbeAt.After(now) {
+			continue
+		}
+		if !member.LastSuccessAt.IsZero() && member.LastSuccessAt.Add(interval).After(now) {
+			continue
+		}
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	return ids
+}
+
+// DueReserveProbeIDs returns up to sampleSize reserve auth IDs that are due for background probing.
+func (p *PoolManager) DueReserveProbeIDs(now time.Time, interval time.Duration, sampleSize int) []string {
+	if p == nil || interval <= 0 || sampleSize <= 0 {
+		return nil
+	}
+	p.mu.RLock()
+	ids := make([]string, 0, len(p.reserve))
+	for id, member := range p.reserve {
+		if member == nil {
+			continue
+		}
+		if !member.NextProbeAt.IsZero() && member.NextProbeAt.After(now) {
+			continue
+		}
+		ids = append(ids, id)
+	}
+	p.mu.RUnlock()
+
+	if len(ids) == 0 {
+		return nil
+	}
+	sort.Strings(ids)
+	poolShuffleStringsFunc(ids)
+	if len(ids) > sampleSize {
+		ids = ids[:sampleSize]
+	}
+	sort.Strings(ids)
+	return ids
+}
+
+// DueLimitProbeIDs returns limit auth IDs due for recovery probing.
+func (p *PoolManager) DueLimitProbeIDs(now time.Time, interval time.Duration) []string {
+	if p == nil || interval <= 0 {
+		return nil
+	}
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	ids := make([]string, 0, len(p.limit))
+	for id, member := range p.limit {
+		if member == nil {
+			continue
+		}
+		if !member.NextProbeAt.IsZero() && member.NextProbeAt.After(now) {
+			continue
+		}
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	return ids
 }

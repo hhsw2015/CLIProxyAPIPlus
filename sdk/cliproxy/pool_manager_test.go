@@ -153,3 +153,67 @@ func TestPoolManager_PromoteNextReserve(t *testing.T) {
 		t.Fatalf("ReserveIDs() = %#v, want [r-2]", got)
 	}
 }
+
+func TestPoolManager_DueActiveProbeIDsSkipsFreshSuccess(t *testing.T) {
+	pm := NewPoolManager(config.PoolManagerConfig{Size: 2, Provider: "codex"})
+	now := time.Now()
+
+	pm.SetActive(PoolMember{AuthID: "a-1", LastSuccessAt: now})
+	pm.SetActive(PoolMember{AuthID: "a-2"})
+
+	got := pm.DueActiveProbeIDs(now.Add(5*time.Minute), 30*time.Minute)
+	if len(got) != 1 || got[0] != "a-2" {
+		t.Fatalf("DueActiveProbeIDs() = %#v, want [a-2]", got)
+	}
+}
+
+func TestPoolManager_MarkProbeUpdatesTimestamps(t *testing.T) {
+	pm := NewPoolManager(config.PoolManagerConfig{Size: 1, Provider: "codex"})
+	pm.SetActive(PoolMember{AuthID: "a-1"})
+	now := time.Now()
+	next := now.Add(30 * time.Minute)
+
+	pm.MarkProbe("a-1", now, next, true, "")
+
+	member, ok := pm.LastSeenMember("a-1")
+	if !ok {
+		t.Fatal("expected LastSeenMember to find a-1")
+	}
+	if member.LastProbeAt.IsZero() || member.NextProbeAt.IsZero() {
+		t.Fatalf("expected probe timestamps to be populated, got %+v", member)
+	}
+	if member.ConsecutiveFailures != 0 {
+		t.Fatalf("expected ConsecutiveFailures=0, got %d", member.ConsecutiveFailures)
+	}
+}
+
+func TestPoolManager_DueReserveProbeIDsRespectsSampleSize(t *testing.T) {
+	pm := NewPoolManager(config.PoolManagerConfig{Size: 1, Provider: "codex"})
+	for _, id := range []string{"r-1", "r-2", "r-3"} {
+		pm.SetReserve(PoolMember{AuthID: id})
+	}
+
+	originalShuffle := poolShuffleStringsFunc
+	poolShuffleStringsFunc = func(values []string) {}
+	defer func() { poolShuffleStringsFunc = originalShuffle }()
+
+	got := pm.DueReserveProbeIDs(time.Now(), 5*time.Minute, 2)
+	if len(got) != 2 {
+		t.Fatalf("DueReserveProbeIDs() len = %d, want 2", len(got))
+	}
+	if got[0] != "r-1" || got[1] != "r-2" {
+		t.Fatalf("DueReserveProbeIDs() = %#v, want [r-1 r-2]", got)
+	}
+}
+
+func TestPoolManager_DueLimitProbeIDs(t *testing.T) {
+	pm := NewPoolManager(config.PoolManagerConfig{Size: 1, Provider: "codex"})
+	now := time.Now()
+	pm.SetLimit(PoolMember{AuthID: "l-1"})
+	pm.SetLimit(PoolMember{AuthID: "l-2", NextProbeAt: now.Add(time.Hour)})
+
+	got := pm.DueLimitProbeIDs(now.Add(5*time.Minute), 24*time.Hour)
+	if len(got) != 1 || got[0] != "l-1" {
+		t.Fatalf("DueLimitProbeIDs() = %#v, want [l-1]", got)
+	}
+}

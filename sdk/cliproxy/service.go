@@ -78,6 +78,9 @@ type Service struct {
 	// authQueueStop cancels the auth update queue processing.
 	authQueueStop context.CancelFunc
 
+	// poolProbeStop cancels background pool probe loops.
+	poolProbeStop context.CancelFunc
+
 	// authManager handles legacy authentication operations.
 	authManager *sdkAuth.Manager
 
@@ -143,6 +146,13 @@ func (h *serviceAuthHook) OnAuthDisposition(ctx context.Context, disposition cor
 		return
 	}
 	h.service.handleAuthDisposition(ctx, disposition)
+}
+
+func (h *serviceAuthHook) OnResult(ctx context.Context, result coreauth.Result) {
+	if h == nil || h.service == nil {
+		return
+	}
+	h.service.handlePoolResult(ctx, result)
 }
 
 func (s *Service) ensureAuthUpdateQueue(ctx context.Context) {
@@ -448,6 +458,175 @@ func (s *Service) fillActiveFromReserve(ctx context.Context) {
 			break
 		}
 	}
+}
+
+func (s *Service) handlePoolResult(ctx context.Context, result coreauth.Result) {
+	if s == nil || s.poolManager == nil {
+		return
+	}
+	if coreauth.DispositionSource(ctx) != "request" {
+		return
+	}
+	if strings.TrimSpace(result.AuthID) == "" {
+		return
+	}
+	s.poolManager.RecordRequest(result.AuthID, result.Success, time.Now())
+}
+
+func (s *Service) startPoolProbeLoops(parent context.Context) {
+	if s == nil || s.poolManager == nil || s.cfg == nil || !s.poolManager.Enabled() {
+		return
+	}
+	if s.poolProbeStop != nil {
+		return
+	}
+	ctx, cancel := context.WithCancel(parent)
+	s.poolProbeStop = cancel
+
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		s.runActiveProbeCycle(ctx, time.Now())
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case now := <-ticker.C:
+				s.runActiveProbeCycle(ctx, now)
+			}
+		}
+	}()
+
+	if interval := time.Duration(s.cfg.PoolManager.ReserveScanIntervalSeconds) * time.Second; interval > 0 {
+		go func() {
+			ticker := time.NewTicker(interval)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case now := <-ticker.C:
+					s.runReserveProbeCycle(ctx, now)
+				}
+			}
+		}()
+	}
+
+	if interval := time.Duration(s.cfg.PoolManager.LimitScanIntervalSeconds) * time.Second; interval > 0 {
+		go func() {
+			ticker := time.NewTicker(interval)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case now := <-ticker.C:
+					s.runLimitProbeCycle(ctx, now)
+				}
+			}
+		}()
+	}
+}
+
+func (s *Service) runActiveProbeCycle(ctx context.Context, now time.Time) {
+	if s == nil || s.poolManager == nil || s.cfg == nil || !s.poolManager.Enabled() {
+		return
+	}
+	interval := time.Duration(s.cfg.PoolManager.ActiveIdleScanIntervalSeconds) * time.Second
+	if interval <= 0 {
+		return
+	}
+	for _, authID := range s.poolManager.DueActiveProbeIDs(now, interval) {
+		auth, ok := s.coreManager.GetByID(authID)
+		if !ok || auth == nil {
+			s.poolManager.Remove(authID)
+			continue
+		}
+		probeCtx := coreauth.WithDispositionSource(ctx, "pool_probe")
+		probedAuth, result := poolProbeAuthFunc(probeCtx, s.cfg, auth)
+		if probedAuth != nil {
+			s.poolCandidates[probedAuth.ID] = probedAuth.Clone()
+			if result.Success {
+				s.applyCoreAuthAddOrUpdate(probeCtx, probedAuth)
+			}
+		}
+		next := now.Add(interval)
+		reason := ""
+		if result.Error != nil {
+			reason = result.Error.Code
+		}
+		s.poolManager.MarkProbe(authID, now, next, result.Success, reason)
+		if s.coreManager != nil {
+			s.coreManager.MarkResult(probeCtx, result)
+		}
+	}
+}
+
+func (s *Service) runReserveProbeCycle(ctx context.Context, now time.Time) {
+	if s == nil || s.poolManager == nil || s.cfg == nil || !s.poolManager.Enabled() {
+		return
+	}
+	interval := time.Duration(s.cfg.PoolManager.ReserveScanIntervalSeconds) * time.Second
+	if interval <= 0 {
+		return
+	}
+	sampleSize := s.cfg.PoolManager.ReserveSampleSize
+	if sampleSize <= 0 {
+		return
+	}
+	for _, authID := range s.poolManager.DueReserveProbeIDs(now, interval, sampleSize) {
+		auth := s.poolCandidates[authID]
+		if auth == nil {
+			s.poolManager.Remove(authID)
+			continue
+		}
+		probedAuth, result := poolProbeAuthFunc(coreauth.WithDispositionSource(ctx, "pool_probe"), s.cfg, auth.Clone())
+		if probedAuth != nil {
+			s.poolCandidates[probedAuth.ID] = probedAuth.Clone()
+		}
+		reason := ""
+		if result.Error != nil {
+			reason = result.Error.Code
+		}
+		s.poolManager.MarkProbe(authID, now, now.Add(interval), result.Success, reason)
+		if result.Success {
+			continue
+		}
+		s.handlePoolProbeResult(authID, auth.Provider, result)
+	}
+}
+
+func (s *Service) runLimitProbeCycle(ctx context.Context, now time.Time) {
+	if s == nil || s.poolManager == nil || s.cfg == nil || !s.poolManager.Enabled() {
+		return
+	}
+	interval := time.Duration(s.cfg.PoolManager.LimitScanIntervalSeconds) * time.Second
+	if interval <= 0 {
+		return
+	}
+	for _, authID := range s.poolManager.DueLimitProbeIDs(now, interval) {
+		auth := s.poolCandidates[authID]
+		if auth == nil {
+			s.poolManager.Remove(authID)
+			continue
+		}
+		probedAuth, result := poolProbeAuthFunc(coreauth.WithDispositionSource(ctx, "pool_probe"), s.cfg, auth.Clone())
+		if probedAuth != nil {
+			s.poolCandidates[probedAuth.ID] = probedAuth.Clone()
+		}
+		reason := ""
+		if result.Error != nil {
+			reason = result.Error.Code
+		}
+		s.poolManager.MarkProbe(authID, now, now.Add(interval), result.Success, reason)
+		if result.Success && probedAuth != nil {
+			s.poolManager.SetReserve(PoolMember{AuthID: probedAuth.ID, Provider: probedAuth.Provider})
+			continue
+		}
+		s.handlePoolProbeResult(authID, auth.Provider, result)
+	}
+	s.fillActiveFromReserve(ctx)
+	s.syncPoolActiveToRuntime(ctx)
 }
 
 func (s *Service) handleAuthUpdate(ctx context.Context, update watcher.AuthUpdate) {
@@ -935,6 +1114,7 @@ func (s *Service) Run(ctx context.Context) error {
 		s.coreManager.StartAutoRefresh(context.Background(), interval)
 		log.Infof("core auth auto-refresh started (interval=%s)", interval)
 	}
+	s.startPoolProbeLoops(ctx)
 
 	select {
 	case <-ctx.Done():
@@ -989,6 +1169,10 @@ func (s *Service) Shutdown(ctx context.Context) error {
 		if s.authQueueStop != nil {
 			s.authQueueStop()
 			s.authQueueStop = nil
+		}
+		if s.poolProbeStop != nil {
+			s.poolProbeStop()
+			s.poolProbeStop = nil
 		}
 
 		if errShutdownPprof := s.shutdownPprof(ctx); errShutdownPprof != nil {
