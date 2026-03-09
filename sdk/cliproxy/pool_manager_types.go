@@ -8,6 +8,7 @@ type PoolState string
 const (
 	PoolStateActive  PoolState = "active"
 	PoolStateReserve PoolState = "reserve"
+	PoolStateLowQuota PoolState = "low_quota"
 	PoolStateLimit   PoolState = "limit"
 )
 
@@ -48,9 +49,11 @@ type PoolSnapshot struct {
 	Provider     string
 	ActiveIDs    []string
 	ReserveIDs   []string
+	LowQuotaIDs  []string
 	LimitIDs     []string
 	Underfilled  bool
 	ActiveCount  int
 	ReserveCount int
+	LowQuotaCount int
 	LimitCount   int
 }

@@ -19,6 +19,13 @@ import (
 
 const codexUsageProbeURL = "https://chatgpt.com/backend-api/wham/usage"
 
+const (
+	poolQuotaPlanTypeKey               = "pool_quota_plan_type"
+	poolQuotaWeeklyUsedPercentKey      = "pool_quota_weekly_used_percent"
+	poolQuotaWeeklyRemainingPercentKey = "pool_quota_weekly_remaining_percent"
+	poolQuotaWeeklyResetAtKey          = "pool_quota_weekly_reset_at"
+)
+
 var poolProbeAuthFunc = probePoolAuth
 
 func probeCodexUsage(ctx context.Context, cfg *config.Config, auth *coreauth.Auth) coreauth.Result {
@@ -94,6 +101,7 @@ func probeCodexUsageWithURL(ctx context.Context, cfg *config.Config, auth *corea
 	}
 
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		applyCodexQuotaMetadata(auth, body)
 		result.Success = true
 		return result
 	}
@@ -235,4 +243,67 @@ func persistPoolProbeAuth(cfg *config.Config, auth *coreauth.Auth) {
 		}
 	}
 	_, _ = store.Save(context.Background(), auth)
+}
+
+func applyCodexQuotaMetadata(auth *coreauth.Auth, body []byte) {
+	if auth == nil {
+		return
+	}
+	if auth.Metadata == nil {
+		auth.Metadata = make(map[string]any)
+	}
+	if planType := strings.TrimSpace(gjson.GetBytes(body, "plan_type").String()); planType != "" {
+		auth.Metadata[poolQuotaPlanTypeKey] = planType
+	}
+	usedPercent := int(gjson.GetBytes(body, "rate_limit.primary_window.used_percent").Int())
+	if usedPercent < 0 {
+		usedPercent = 0
+	}
+	if usedPercent > 100 {
+		usedPercent = 100
+	}
+	auth.Metadata[poolQuotaWeeklyUsedPercentKey] = usedPercent
+	auth.Metadata[poolQuotaWeeklyRemainingPercentKey] = 100 - usedPercent
+	if resetAt := gjson.GetBytes(body, "rate_limit.primary_window.reset_at").Int(); resetAt > 0 {
+		auth.Metadata[poolQuotaWeeklyResetAtKey] = time.Unix(resetAt, 0).UTC().Format(time.RFC3339)
+	}
+}
+
+func authWeeklyRemainingPercent(auth *coreauth.Auth) (int, bool) {
+	if auth == nil || auth.Metadata == nil {
+		return 0, false
+	}
+	raw, ok := auth.Metadata[poolQuotaWeeklyRemainingPercentKey]
+	if !ok || raw == nil {
+		return 0, false
+	}
+	switch value := raw.(type) {
+	case int:
+		return value, true
+	case int64:
+		return int(value), true
+	case float64:
+		return int(value), true
+	default:
+		return 0, false
+	}
+}
+
+func authIsLowQuota(auth *coreauth.Auth, thresholdPercent int) bool {
+	if thresholdPercent < 0 {
+		return false
+	}
+	remainingPercent, ok := authWeeklyRemainingPercent(auth)
+	if !ok {
+		return false
+	}
+	return remainingPercent <= thresholdPercent
+}
+
+func mustWeeklyRemainingPercent(auth *coreauth.Auth) int {
+	remainingPercent, ok := authWeeklyRemainingPercent(auth)
+	if !ok {
+		return 0
+	}
+	return remainingPercent
 }

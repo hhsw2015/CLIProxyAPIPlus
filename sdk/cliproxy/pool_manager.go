@@ -19,6 +19,7 @@ type PoolManager struct {
 	lowQuotaThresholdPercent  int
 	active                    map[string]*PoolMember
 	reserve                   map[string]*PoolMember
+	lowQuota                  map[string]*PoolMember
 	limit                     map[string]*PoolMember
 	lastSeen                  map[string]*PoolMember
 }
@@ -48,6 +49,7 @@ func NewPoolManager(cfg config.PoolManagerConfig) *PoolManager {
 		lowQuotaThresholdPercent: lowQuotaThreshold,
 		active:                   make(map[string]*PoolMember),
 		reserve:                  make(map[string]*PoolMember),
+		lowQuota:                 make(map[string]*PoolMember),
 		limit:                    make(map[string]*PoolMember),
 		lastSeen:                 make(map[string]*PoolMember),
 	}
@@ -97,6 +99,11 @@ func (p *PoolManager) SetLimit(member PoolMember) {
 	p.setMember(member, PoolStateLimit)
 }
 
+// SetLowQuota inserts or updates a low-quota pool member.
+func (p *PoolManager) SetLowQuota(member PoolMember) {
+	p.setMember(member, PoolStateLowQuota)
+}
+
 func (p *PoolManager) setMember(member PoolMember, state PoolState) {
 	if p == nil || strings.TrimSpace(member.AuthID) == "" {
 		return
@@ -113,12 +120,15 @@ func (p *PoolManager) setMember(member PoolMember, state PoolState) {
 	defer p.mu.Unlock()
 	delete(p.active, member.AuthID)
 	delete(p.reserve, member.AuthID)
+	delete(p.lowQuota, member.AuthID)
 	delete(p.limit, member.AuthID)
 	cloned := member
 	p.lastSeen[member.AuthID] = &cloned
 	switch state {
 	case PoolStateLimit:
 		p.limit[member.AuthID] = &cloned
+	case PoolStateLowQuota:
+		p.lowQuota[member.AuthID] = &cloned
 	case PoolStateReserve:
 		p.reserve[member.AuthID] = &cloned
 	default:
@@ -139,6 +149,7 @@ func (p *PoolManager) Remove(authID string) {
 	defer p.mu.Unlock()
 	delete(p.active, authID)
 	delete(p.reserve, authID)
+	delete(p.lowQuota, authID)
 	delete(p.limit, authID)
 	delete(p.lastSeen, authID)
 }
@@ -158,6 +169,11 @@ func (p *PoolManager) LimitIDs() []string {
 	return p.idsForState(PoolStateLimit)
 }
 
+// LowQuotaIDs returns low-quota auth identifiers in deterministic order.
+func (p *PoolManager) LowQuotaIDs() []string {
+	return p.idsForState(PoolStateLowQuota)
+}
+
 func (p *PoolManager) idsForState(state PoolState) []string {
 	if p == nil {
 		return nil
@@ -169,6 +185,8 @@ func (p *PoolManager) idsForState(state PoolState) []string {
 	switch state {
 	case PoolStateLimit:
 		source = p.limit
+	case PoolStateLowQuota:
+		source = p.lowQuota
 	case PoolStateReserve:
 		source = p.reserve
 	default:
@@ -190,6 +208,7 @@ func (p *PoolManager) Snapshot() PoolSnapshot {
 	}
 	active := p.ActiveIDs()
 	reserve := p.ReserveIDs()
+	lowQuota := p.LowQuotaIDs()
 	limit := p.LimitIDs()
 	target := p.TargetSize()
 	return PoolSnapshot{
@@ -197,10 +216,12 @@ func (p *PoolManager) Snapshot() PoolSnapshot {
 		Provider:     p.Provider(),
 		ActiveIDs:    active,
 		ReserveIDs:   reserve,
+		LowQuotaIDs:  lowQuota,
 		LimitIDs:     limit,
 		Underfilled:  target > 0 && len(active) < target,
 		ActiveCount:  len(active),
 		ReserveCount: len(reserve),
+		LowQuotaCount: len(lowQuota),
 		LimitCount:   len(limit),
 	}
 }
@@ -350,6 +371,9 @@ func (p *PoolManager) BeginUse(authID string, now time.Time, lease time.Duration
 	if reserve := p.reserve[authID]; reserve != nil {
 		*reserve = *member
 	}
+	if lowQuota := p.lowQuota[authID]; lowQuota != nil {
+		*lowQuota = *member
+	}
 	if limit := p.limit[authID]; limit != nil {
 		*limit = *member
 	}
@@ -383,6 +407,9 @@ func (p *PoolManager) RecordRequest(authID string, success bool, now time.Time) 
 	}
 	if reserve := p.reserve[authID]; reserve != nil {
 		*reserve = *member
+	}
+	if lowQuota := p.lowQuota[authID]; lowQuota != nil {
+		*lowQuota = *member
 	}
 	if limit := p.limit[authID]; limit != nil {
 		*limit = *member

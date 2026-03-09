@@ -13,6 +13,7 @@ import (
 )
 
 func TestProbeCodexUsageWithURL_Success(t *testing.T) {
+	resetAt := time.Now().Add(2 * time.Hour).Unix()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if got := r.Header.Get("Authorization"); got != "Bearer access-token" {
 			t.Fatalf("Authorization = %q, want %q", got, "Bearer access-token")
@@ -21,7 +22,7 @@ func TestProbeCodexUsageWithURL_Success(t *testing.T) {
 			t.Fatalf("Chatgpt-Account-Id = %q, want %q", got, "acct-1")
 		}
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"ok":true}`))
+		_, _ = w.Write([]byte(fmt.Sprintf(`{"plan_type":"Free","rate_limit":{"primary_window":{"used_percent":85,"reset_at":%d}}}`, resetAt)))
 	}))
 	defer server.Close()
 
@@ -40,6 +41,18 @@ func TestProbeCodexUsageWithURL_Success(t *testing.T) {
 	}
 	if result.Error != nil {
 		t.Fatalf("expected nil error, got %+v", result.Error)
+	}
+	if got, ok := auth.Metadata[poolQuotaPlanTypeKey].(string); !ok || got != "Free" {
+		t.Fatalf("plan_type = %#v, want Free", auth.Metadata[poolQuotaPlanTypeKey])
+	}
+	if got, ok := auth.Metadata[poolQuotaWeeklyUsedPercentKey].(int); !ok || got != 85 {
+		t.Fatalf("used_percent = %#v, want 85", auth.Metadata[poolQuotaWeeklyUsedPercentKey])
+	}
+	if got, ok := auth.Metadata[poolQuotaWeeklyRemainingPercentKey].(int); !ok || got != 15 {
+		t.Fatalf("remaining_percent = %#v, want 15", auth.Metadata[poolQuotaWeeklyRemainingPercentKey])
+	}
+	if got, ok := auth.Metadata[poolQuotaWeeklyResetAtKey].(string); !ok || got == "" {
+		t.Fatalf("reset_at = %#v, want non-empty string", auth.Metadata[poolQuotaWeeklyResetAtKey])
 	}
 }
 
