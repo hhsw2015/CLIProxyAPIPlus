@@ -48,6 +48,7 @@ type Handler struct {
 	envSecret           string
 	logDir              string
 	postAuthHook        coreauth.PostAuthHook
+	poolStatsProvider   func() any
 }
 
 // NewHandler creates a new management handler instance.
@@ -112,6 +113,9 @@ func (h *Handler) SetAuthManager(manager *coreauth.Manager) { h.authManager = ma
 
 // SetUsageStatistics allows replacing the usage statistics reference.
 func (h *Handler) SetUsageStatistics(stats *usage.RequestStatistics) { h.usageStats = stats }
+
+// SetPoolStatisticsProvider registers an optional runtime pool metrics provider.
+func (h *Handler) SetPoolStatisticsProvider(provider func() any) { h.poolStatsProvider = provider }
 
 // SetLocalPassword configures the runtime-local password accepted for localhost requests.
 func (h *Handler) SetLocalPassword(password string) { h.localPassword = password }

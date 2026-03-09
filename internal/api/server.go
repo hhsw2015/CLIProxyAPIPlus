@@ -179,6 +179,14 @@ type Server struct {
 	keepAliveStop      chan struct{}
 }
 
+// SetPoolStatisticsProvider wires runtime pool metrics into management usage endpoints.
+func (s *Server) SetPoolStatisticsProvider(provider func() any) {
+	if s == nil || s.mgmt == nil {
+		return
+	}
+	s.mgmt.SetPoolStatisticsProvider(provider)
+}
+
 // NewServer creates and initializes a new API server instance.
 // It sets up the Gin engine, middleware, routes, and handlers.
 //

@@ -1,15 +1,18 @@
 package cliproxy
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/watcher"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
+	log "github.com/sirupsen/logrus"
 )
 
 func TestServiceRunBootstrapsSnapshotAuthsWithoutWatcherQueue(t *testing.T) {
@@ -119,6 +122,17 @@ func TestServiceRunBootstrapsPoolStartupFromRootCandidatesOnly(t *testing.T) {
 	activeAuthID := "pool-active-auth"
 	reserveAuthID := "pool-reserve-auth"
 	limitAuthID := "limit/pool-limit-auth.json"
+
+	originalProbe := poolProbeAuthFunc
+	poolProbeAuthFunc = func(ctx context.Context, cfg *config.Config, auth *coreauth.Auth) (*coreauth.Auth, coreauth.Result) {
+		return auth, coreauth.Result{
+			AuthID:   auth.ID,
+			Provider: "codex",
+			Model:    "gpt-5",
+			Success:  true,
+		}
+	}
+	t.Cleanup(func() { poolProbeAuthFunc = originalProbe })
 
 	reg := GlobalModelRegistry()
 	for _, id := range []string{activeAuthID, reserveAuthID, limitAuthID} {
@@ -735,5 +749,55 @@ func TestRunLimitProbeCycle_RestoresHealthyLimitToReserve(t *testing.T) {
 	}
 	if snapshot.ActiveCount != 1 || snapshot.ActiveIDs[0] != limitAuthID {
 		t.Fatalf("expected restored limit auth to end up active after refill, got %+v", snapshot)
+	}
+}
+
+func TestSyncPoolActiveToRuntime_LogsPoolPublish(t *testing.T) {
+	activeAuthID := "pool-log-active-auth"
+
+	reg := GlobalModelRegistry()
+	reg.UnregisterClient(activeAuthID)
+	t.Cleanup(func() {
+		reg.UnregisterClient(activeAuthID)
+	})
+
+	var buf bytes.Buffer
+	oldOutput := log.StandardLogger().Out
+	oldFormatter := log.StandardLogger().Formatter
+	oldLevel := log.GetLevel()
+	log.SetOutput(&buf)
+	log.SetFormatter(&log.TextFormatter{DisableTimestamp: true, DisableColors: true})
+	log.SetLevel(log.InfoLevel)
+	t.Cleanup(func() {
+		log.SetOutput(oldOutput)
+		log.SetFormatter(oldFormatter)
+		log.SetLevel(oldLevel)
+	})
+
+	service := &Service{
+		poolManager: NewPoolManager(config.PoolManagerConfig{Size: 1, Provider: "codex"}),
+		poolCandidates: map[string]*coreauth.Auth{
+			activeAuthID: {
+				ID:       activeAuthID,
+				Provider: "codex",
+				Status:   coreauth.StatusActive,
+				Attributes: map[string]string{
+					"api_key":  "active-key",
+					"base_url": "https://example.com/v1",
+				},
+			},
+		},
+		coreManager: coreauth.NewManager(nil, nil, nil),
+	}
+	service.poolManager.SetActive(PoolMember{AuthID: activeAuthID, Provider: "codex"})
+
+	service.syncPoolActiveToRuntime(context.Background())
+
+	logOutput := buf.String()
+	if !strings.Contains(logOutput, "pool-publish: add auth="+activeAuthID+" provider=codex") {
+		t.Fatalf("expected per-auth pool publish log, got %q", logOutput)
+	}
+	if !strings.Contains(logOutput, "pool-publish: completed add=1 modify=0 delete=0") {
+		t.Fatalf("expected pool publish summary log, got %q", logOutput)
 	}
 }

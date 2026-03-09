@@ -184,6 +184,44 @@ func (m usageTabModel) renderContent() string {
 	sb.WriteString(lipgloss.JoinHorizontal(lipgloss.Top, card1, " ", card2, " ", card3, " ", card4))
 	sb.WriteString("\n\n")
 
+	if poolMap, ok := m.usage["pool"].(map[string]any); ok && getBool(poolMap, "enabled") {
+		sb.WriteString(lipgloss.NewStyle().Bold(true).Foreground(colorHighlight).Render(T("usage_pool_title")))
+		sb.WriteString("\n")
+		sb.WriteString(strings.Repeat("─", minInt(m.width, 80)))
+		sb.WriteString("\n")
+
+		activeCount := int64(getFloat(poolMap, "active_count"))
+		targetSize := int64(getFloat(poolMap, "target_size"))
+		reserveCount := int64(getFloat(poolMap, "reserve_count"))
+		limitCount := int64(getFloat(poolMap, "limit_count"))
+		promotions := int64(getFloat(poolMap, "promotions_total"))
+		removed := int64(getFloat(poolMap, "active_removed_total"))
+		movedToLimit := int64(getFloat(poolMap, "moved_to_limit_total"))
+		restored := int64(getFloat(poolMap, "restored_from_limit_total"))
+
+		sb.WriteString(fmt.Sprintf(
+			"  %s: %s  •  %s: %d  •  %s: %d  •  %s\n",
+			T("usage_pool_active"),
+			fmt.Sprintf("%d/%d", activeCount, targetSize),
+			T("usage_pool_reserve"),
+			reserveCount,
+			T("usage_pool_limit"),
+			limitCount,
+			boolEmoji(!getBool(poolMap, "underfilled")),
+		))
+		sb.WriteString(fmt.Sprintf(
+			"  %s: %d  •  %s: %d  •  %s: %d  •  %s: %d\n\n",
+			T("usage_pool_promotions"),
+			promotions,
+			T("usage_pool_removed"),
+			removed,
+			T("usage_pool_moved_limit"),
+			movedToLimit,
+			T("usage_pool_restored"),
+			restored,
+		))
+	}
+
 	// ━━━ Requests by Hour (ASCII bar chart) ━━━
 	if rByH, ok := usageMap["requests_by_hour"].(map[string]any); ok && len(rByH) > 0 {
 		sb.WriteString(lipgloss.NewStyle().Bold(true).Foreground(colorHighlight).Render(T("usage_req_by_hour")))
