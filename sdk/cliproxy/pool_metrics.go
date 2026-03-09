@@ -14,6 +14,7 @@ type PoolMetricsSnapshot struct {
 	TargetSize           int                    `json:"target_size"`
 	ActiveCount          int                    `json:"active_count"`
 	ReserveCount         int                    `json:"reserve_count"`
+	LowQuotaCount        int                    `json:"low_quota_count"`
 	LimitCount           int                    `json:"limit_count"`
 	PublishedActiveCount int                    `json:"published_active_count"`
 	Underfilled          bool                   `json:"underfilled"`
@@ -191,6 +192,7 @@ func (m *PoolMetrics) Snapshot(pool PoolSnapshot, publishedActive int) PoolMetri
 			TargetSize:           pool.TargetSize,
 			ActiveCount:          pool.ActiveCount,
 			ReserveCount:         pool.ReserveCount,
+			LowQuotaCount:        pool.LowQuotaCount,
 			LimitCount:           pool.LimitCount,
 			PublishedActiveCount: publishedActive,
 			Underfilled:          pool.Underfilled,
@@ -206,6 +208,7 @@ func (m *PoolMetrics) Snapshot(pool PoolSnapshot, publishedActive int) PoolMetri
 		TargetSize:           pool.TargetSize,
 		ActiveCount:          pool.ActiveCount,
 		ReserveCount:         pool.ReserveCount,
+		LowQuotaCount:        pool.LowQuotaCount,
 		LimitCount:           pool.LimitCount,
 		PublishedActiveCount: publishedActive,
 		Underfilled:          pool.Underfilled,

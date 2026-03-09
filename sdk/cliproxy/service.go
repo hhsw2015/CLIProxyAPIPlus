@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"net/http"
 	"os"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -296,25 +295,6 @@ func (s *Service) bootstrapPoolSnapshot(ctx context.Context, watcherWrapper *Wat
 	}
 	log.Infof("pool-manager: startup discovered root=%d limit=%d", len(rootAuths), len(limitAuths))
 
-	sort.Slice(rootAuths, func(i, j int) bool {
-		if rootAuths[i] == nil {
-			return false
-		}
-		if rootAuths[j] == nil {
-			return true
-		}
-		return rootAuths[i].ID < rootAuths[j].ID
-	})
-	sort.Slice(limitAuths, func(i, j int) bool {
-		if limitAuths[i] == nil {
-			return false
-		}
-		if limitAuths[j] == nil {
-			return true
-		}
-		return limitAuths[i].ID < limitAuths[j].ID
-	})
-
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -346,6 +326,11 @@ func (s *Service) bootstrapPoolSnapshot(ctx context.Context, watcherWrapper *Wat
 			}
 			s.recordPoolProbe(PoolStateReserve, beforeProbe, probedAuth, result, "")
 			if result.Success && probedAuth != nil {
+				if authIsLowQuota(probedAuth, pm.LowQuotaThresholdPercent()) {
+					pm.SetLowQuota(PoolMember{AuthID: probedAuth.ID, Provider: probedAuth.Provider})
+					log.Infof("pool-manager: low quota auth=%s remaining_percent=%d threshold=%d", probedAuth.ID, mustWeeklyRemainingPercent(probedAuth), pm.LowQuotaThresholdPercent())
+					continue
+				}
 				pm.SetActive(PoolMember{AuthID: probedAuth.ID, Provider: probedAuth.Provider})
 				s.applyCoreAuthAddOrUpdate(ctx, probedAuth)
 				activeCount++
@@ -364,10 +349,11 @@ func (s *Service) bootstrapPoolSnapshot(ctx context.Context, watcherWrapper *Wat
 	}
 	s.syncPoolActiveToRuntime(ctx)
 	log.Infof(
-		"pool-manager: startup active target=%d selected=%d reserve=%d limit=%d",
+		"pool-manager: startup active target=%d selected=%d reserve=%d low_quota=%d limit=%d",
 		pm.TargetSize(),
 		pm.Snapshot().ActiveCount,
 		pm.Snapshot().ReserveCount,
+		pm.Snapshot().LowQuotaCount,
 		pm.Snapshot().LimitCount,
 	)
 	s.logPoolEvaluation()
@@ -557,6 +543,11 @@ func (s *Service) fillActiveFromReserve(ctx context.Context) {
 			}
 			s.recordPoolProbe(PoolStateReserve, beforeProbe, probedAuth, result, "")
 			if result.Success && probedAuth != nil {
+				if authIsLowQuota(probedAuth, s.poolManager.LowQuotaThresholdPercent()) {
+					s.poolManager.SetLowQuota(PoolMember{AuthID: probedAuth.ID, Provider: probedAuth.Provider})
+					log.Infof("pool-manager: low quota auth=%s remaining_percent=%d threshold=%d", probedAuth.ID, mustWeeklyRemainingPercent(probedAuth), s.poolManager.LowQuotaThresholdPercent())
+					continue
+				}
 				s.poolManager.SetActive(PoolMember{AuthID: probedAuth.ID, Provider: probedAuth.Provider})
 				if s.poolMetrics != nil {
 					s.poolMetrics.RecordPromotion()
@@ -751,6 +742,12 @@ func (s *Service) runActiveProbeCycle(ctx context.Context, now time.Time) {
 		if s.coreManager != nil {
 			s.coreManager.MarkResult(probeCtx, result)
 		}
+		if result.Success && probedAuth != nil && authIsLowQuota(probedAuth, s.poolManager.LowQuotaThresholdPercent()) {
+			s.poolManager.SetLowQuota(PoolMember{AuthID: probedAuth.ID, Provider: probedAuth.Provider})
+			log.Infof("pool-manager: active demoted auth=%s reason=low_quota remaining_percent=%d threshold=%d", probedAuth.ID, mustWeeklyRemainingPercent(probedAuth), s.poolManager.LowQuotaThresholdPercent())
+			s.syncPoolActiveToRuntime(ctx)
+			s.schedulePoolRebalance()
+		}
 		if result.Success {
 			healthy++
 		} else {
@@ -798,6 +795,12 @@ func (s *Service) runReserveProbeCycle(ctx context.Context, now time.Time) {
 		}
 		s.poolManager.MarkProbe(authID, now, now.Add(interval), result.Success, reason)
 		if result.Success {
+			if probedAuth != nil && authIsLowQuota(probedAuth, s.poolManager.LowQuotaThresholdPercent()) {
+				s.poolManager.SetLowQuota(PoolMember{AuthID: probedAuth.ID, Provider: probedAuth.Provider})
+				log.Infof("pool-manager: low quota auth=%s remaining_percent=%d threshold=%d", probedAuth.ID, mustWeeklyRemainingPercent(probedAuth), s.poolManager.LowQuotaThresholdPercent())
+				healthy++
+				continue
+			}
 			healthy++
 			continue
 		}
@@ -845,6 +848,12 @@ func (s *Service) runLimitProbeCycle(ctx context.Context, now time.Time) {
 		}
 		s.poolManager.MarkProbe(authID, now, now.Add(interval), result.Success, reason)
 		if result.Success && probedAuth != nil {
+			if authIsLowQuota(probedAuth, s.poolManager.LowQuotaThresholdPercent()) {
+				s.poolManager.SetLowQuota(PoolMember{AuthID: probedAuth.ID, Provider: probedAuth.Provider})
+				log.Infof("pool-manager: low quota auth=%s remaining_percent=%d threshold=%d", probedAuth.ID, mustWeeklyRemainingPercent(probedAuth), s.poolManager.LowQuotaThresholdPercent())
+				restored++
+				continue
+			}
 			s.poolManager.SetReserve(PoolMember{AuthID: probedAuth.ID, Provider: probedAuth.Provider})
 			if s.poolMetrics != nil {
 				s.poolMetrics.RecordRestoredFromLimit()
@@ -956,13 +965,14 @@ func (s *Service) logPoolEvaluation() {
 		successRate = float64(usageSnapshot.SuccessCount) * 100 / float64(usageSnapshot.TotalRequests)
 	}
 	log.Infof(
-		"pool-eval: total_requests=%d success=%d failure=%d success_rate=%.2f%% active_size=%d reserve_size=%d limit_size=%d promoted=%d active_removed=%d moved_to_limit=%d deleted=%d",
+		"pool-eval: total_requests=%d success=%d failure=%d success_rate=%.2f%% active_size=%d reserve_size=%d low_quota_size=%d limit_size=%d promoted=%d active_removed=%d moved_to_limit=%d deleted=%d",
 		usageSnapshot.TotalRequests,
 		usageSnapshot.SuccessCount,
 		usageSnapshot.FailureCount,
 		successRate,
 		poolSnapshot.ActiveCount,
 		poolSnapshot.ReserveCount,
+		poolSnapshot.LowQuotaCount,
 		poolSnapshot.LimitCount,
 		poolSnapshot.PromotionsTotal,
 		poolSnapshot.ActiveRemovedTotal,
@@ -1011,7 +1021,7 @@ func (s *Service) runPoolEvalCycle(now time.Time) {
 			successRate = float64(current.SuccessCount) * 100 / float64(current.TotalRequests)
 		}
 		log.Infof(
-			"pool-eval: baseline interval=%s total_requests=%d success=%d failure=%d success_rate=%.2f%% active_size=%d reserve_size=%d limit_size=%d",
+			"pool-eval: baseline interval=%s total_requests=%d success=%d failure=%d success_rate=%.2f%% active_size=%d reserve_size=%d low_quota_size=%d limit_size=%d",
 			poolEvalLogInterval,
 			current.TotalRequests,
 			current.SuccessCount,
@@ -1019,6 +1029,7 @@ func (s *Service) runPoolEvalCycle(now time.Time) {
 			successRate,
 			poolSnapshot.ActiveCount,
 			poolSnapshot.ReserveCount,
+			poolSnapshot.LowQuotaCount,
 			poolSnapshot.LimitCount,
 		)
 		return
@@ -1037,7 +1048,7 @@ func (s *Service) runPoolEvalCycle(now time.Time) {
 	}
 
 	log.Infof(
-		"pool-eval: window=%s total_requests=%d success=%d failure=%d success_rate=%.2f%% active_size=%d reserve_size=%d limit_size=%d",
+		"pool-eval: window=%s total_requests=%d success=%d failure=%d success_rate=%.2f%% active_size=%d reserve_size=%d low_quota_size=%d limit_size=%d",
 		window,
 		totalRequests,
 		successCount,
@@ -1045,6 +1056,7 @@ func (s *Service) runPoolEvalCycle(now time.Time) {
 		successRate,
 		poolSnapshot.ActiveCount,
 		poolSnapshot.ReserveCount,
+		poolSnapshot.LowQuotaCount,
 		poolSnapshot.LimitCount,
 	)
 	log.Infof(

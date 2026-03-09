@@ -205,7 +205,7 @@ func TestServiceRunBootstrapsPoolStartupFromRootCandidatesOnly(t *testing.T) {
 				},
 				snapshotAuths: func() []*coreauth.Auth { return nil },
 				snapshotRootFileAuths: func() []*coreauth.Auth {
-					return []*coreauth.Auth{reserveAuth.Clone(), activeAuth.Clone()}
+					return []*coreauth.Auth{activeAuth.Clone(), reserveAuth.Clone()}
 				},
 				snapshotLimitAuths: func() []*coreauth.Auth {
 					return []*coreauth.Auth{limitAuth.Clone()}
@@ -411,6 +411,110 @@ func TestServiceRunBootstrapsPoolStartupSkipsUnhealthyRootCandidate(t *testing.T
 		cancel()
 		<-done
 		t.Fatalf("expected first auth to be moved to limit in pool state, got %+v", snapshot)
+	}
+
+	cancel()
+	select {
+	case errRun := <-done:
+		if errRun != nil && errRun != context.Canceled {
+			t.Fatalf("service run returned error: %v", errRun)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("service did not stop after cancel")
+	}
+}
+
+func TestServiceRunBootstrapsPoolStartupSkipsLowQuotaRootCandidate(t *testing.T) {
+	lowQuotaAuthID := "pool-low-quota-root"
+	healthyAuthID := "pool-healthy-root"
+
+	originalProbe := poolProbeAuthFunc
+	poolProbeAuthFunc = func(ctx context.Context, cfg *config.Config, auth *coreauth.Auth) (*coreauth.Auth, coreauth.Result) {
+		if auth == nil {
+			return nil, coreauth.Result{Provider: "codex", Success: false}
+		}
+		auth = auth.Clone()
+		if auth.ID == lowQuotaAuthID {
+			if auth.Metadata == nil {
+				auth.Metadata = make(map[string]any)
+			}
+			auth.Metadata[poolQuotaWeeklyRemainingPercentKey] = 15
+		}
+		return auth, coreauth.Result{
+			AuthID:   auth.ID,
+			Provider: "codex",
+			Model:    "gpt-5",
+			Success:  true,
+		}
+	}
+	t.Cleanup(func() { poolProbeAuthFunc = originalProbe })
+
+	cfg := &config.Config{
+		Host:    "127.0.0.1",
+		Port:    0,
+		AuthDir: filepath.Join(t.TempDir(), "auth"),
+		SDKConfig: config.SDKConfig{
+			APIKeys: []string{"test-key"},
+		},
+		PoolManager: config.PoolManagerConfig{
+			Size:                      1,
+			Provider:                  "codex",
+			LowQuotaThresholdPercent:  20,
+		},
+	}
+
+	lowQuotaAuth := &coreauth.Auth{ID: lowQuotaAuthID, Provider: "codex", Status: coreauth.StatusActive, Attributes: map[string]string{"api_key": "low-key", "base_url": "https://example.com/v1"}}
+	healthyAuth := &coreauth.Auth{ID: healthyAuthID, Provider: "codex", Status: coreauth.StatusActive, Attributes: map[string]string{"api_key": "healthy-key", "base_url": "https://example.com/v1"}}
+
+	tempDir := t.TempDir()
+	configPath := filepath.Join(tempDir, "config.yaml")
+	if err := os.WriteFile(configPath, []byte("port: 0\n"), 0o600); err != nil {
+		t.Fatalf("write temp config: %v", err)
+	}
+
+	service, err := NewBuilder().
+		WithConfig(cfg).
+		WithConfigPath(configPath).
+		WithWatcherFactory(func(configPath, authDir string, reload func(*config.Config)) (*WatcherWrapper, error) {
+			return &WatcherWrapper{
+				start: func(ctx context.Context) error { return nil },
+				stop:  func() error { return nil },
+				setConfig: func(cfg *config.Config) { _ = cfg },
+				snapshotAuths: func() []*coreauth.Auth { return nil },
+				snapshotRootFileAuths: func() []*coreauth.Auth {
+					return []*coreauth.Auth{lowQuotaAuth.Clone(), healthyAuth.Clone()}
+				},
+				snapshotLimitAuths: func() []*coreauth.Auth { return nil },
+				setUpdateQueue:     func(queue chan<- watcher.AuthUpdate) { _ = queue },
+			}, nil
+		}).
+		Build()
+	if err != nil {
+		t.Fatalf("build service: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- service.Run(ctx) }()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if service.poolManager != nil && service.poolManager.Snapshot().ActiveCount == 1 {
+			break
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+
+	snapshot := service.poolManager.Snapshot()
+	if snapshot.ActiveCount != 1 || snapshot.ActiveIDs[0] != healthyAuthID {
+		cancel()
+		<-done
+		t.Fatalf("unexpected active snapshot: %+v", snapshot)
+	}
+	if snapshot.LowQuotaCount != 1 || snapshot.LowQuotaIDs[0] != lowQuotaAuthID {
+		cancel()
+		<-done
+		t.Fatalf("expected low quota auth to be isolated, got %+v", snapshot)
 	}
 
 	cancel()
@@ -802,6 +906,68 @@ func TestRunReserveProbeCycle_ArchivesQuotaReserveToLimitState(t *testing.T) {
 	}
 }
 
+func TestRunReserveProbeCycle_MovesLowQuotaReserveToLowQuotaState(t *testing.T) {
+	reserveAuthID := "pool-reserve-probe-low-quota"
+
+	originalProbe := poolProbeAuthFunc
+	poolProbeAuthFunc = func(ctx context.Context, cfg *config.Config, auth *coreauth.Auth) (*coreauth.Auth, coreauth.Result) {
+		auth = auth.Clone()
+		if auth.Metadata == nil {
+			auth.Metadata = make(map[string]any)
+		}
+		auth.Metadata[poolQuotaWeeklyRemainingPercentKey] = 12
+		return auth, coreauth.Result{
+			AuthID:   auth.ID,
+			Provider: "codex",
+			Model:    "gpt-5",
+			Success:  true,
+		}
+	}
+	t.Cleanup(func() { poolProbeAuthFunc = originalProbe })
+
+	originalShuffle := poolShuffleStringsFunc
+	poolShuffleStringsFunc = func(values []string) {}
+	t.Cleanup(func() { poolShuffleStringsFunc = originalShuffle })
+
+	service := &Service{
+		cfg: &config.Config{
+			PoolManager: config.PoolManagerConfig{
+				Size:                     1,
+				Provider:                 "codex",
+				ReserveScanIntervalSeconds: 300,
+				ReserveSampleSize:        5,
+				LowQuotaThresholdPercent: 20,
+			},
+		},
+		poolManager: NewPoolManager(config.PoolManagerConfig{
+			Size:                     1,
+			Provider:                 "codex",
+			ReserveScanIntervalSeconds: 300,
+			ReserveSampleSize:        5,
+			LowQuotaThresholdPercent: 20,
+		}),
+		poolCandidates: map[string]*coreauth.Auth{
+			reserveAuthID: {
+				ID:         reserveAuthID,
+				Provider:   "codex",
+				Status:     coreauth.StatusActive,
+				Attributes: map[string]string{"api_key": "reserve-key", "base_url": "https://example.com/v1"},
+			},
+		},
+	}
+	service.poolManager.SetReserve(PoolMember{AuthID: reserveAuthID, Provider: "codex"})
+
+	service.runReserveProbeCycle(context.Background(), time.Now().Add(time.Hour))
+
+	snapshot := service.poolManager.Snapshot()
+	if snapshot.ReserveCount != 0 {
+		t.Fatalf("expected reserve to be emptied, got %+v", snapshot)
+	}
+	if snapshot.LowQuotaCount != 1 || snapshot.LowQuotaIDs[0] != reserveAuthID {
+		t.Fatalf("expected reserve auth to move to low_quota, got %+v", snapshot)
+	}
+}
+
 func TestRunLimitProbeCycle_RestoresHealthyLimitToReserve(t *testing.T) {
 	limitAuthID := "pool-limit-probe-restore"
 
@@ -857,6 +1023,77 @@ func TestRunLimitProbeCycle_RestoresHealthyLimitToReserve(t *testing.T) {
 	if snapshot.ActiveCount != 1 || snapshot.ActiveIDs[0] != limitAuthID {
 		t.Fatalf("expected restored limit auth to end up active after refill, got %+v", snapshot)
 	}
+}
+
+func TestRunActiveProbeCycle_DemotesLowQuotaActive(t *testing.T) {
+	activeAuthID := "pool-active-low-quota"
+	reserveAuthID := "pool-reserve-after-low-quota"
+
+	reg := GlobalModelRegistry()
+	for _, id := range []string{activeAuthID, reserveAuthID} {
+		reg.UnregisterClient(id)
+	}
+	t.Cleanup(func() {
+		for _, id := range []string{activeAuthID, reserveAuthID} {
+			reg.UnregisterClient(id)
+		}
+	})
+
+	originalProbe := poolProbeAuthFunc
+	poolProbeAuthFunc = func(ctx context.Context, cfg *config.Config, auth *coreauth.Auth) (*coreauth.Auth, coreauth.Result) {
+		auth = auth.Clone()
+		if auth.ID == activeAuthID {
+			if auth.Metadata == nil {
+				auth.Metadata = make(map[string]any)
+			}
+			auth.Metadata[poolQuotaWeeklyRemainingPercentKey] = 18
+			return auth, coreauth.Result{AuthID: auth.ID, Provider: "codex", Model: "gpt-5", Success: true}
+		}
+		return auth, coreauth.Result{AuthID: auth.ID, Provider: "codex", Model: "gpt-5", Success: true}
+	}
+	t.Cleanup(func() { poolProbeAuthFunc = originalProbe })
+
+	service := &Service{
+		cfg: &config.Config{
+			PoolManager: config.PoolManagerConfig{
+				Size:                        1,
+				Provider:                    "codex",
+				ActiveIdleScanIntervalSeconds: 1800,
+				LowQuotaThresholdPercent:    20,
+			},
+		},
+		poolManager: NewPoolManager(config.PoolManagerConfig{
+			Size:                        1,
+			Provider:                    "codex",
+			ActiveIdleScanIntervalSeconds: 1800,
+			LowQuotaThresholdPercent:    20,
+		}),
+		poolMetrics: NewPoolMetrics(config.PoolManagerConfig{Size: 1, Provider: "codex"}),
+		poolCandidates: map[string]*coreauth.Auth{
+			activeAuthID:  {ID: activeAuthID, Provider: "codex", Status: coreauth.StatusActive, Attributes: map[string]string{"api_key": "active-key", "base_url": "https://example.com/v1"}},
+			reserveAuthID: {ID: reserveAuthID, Provider: "codex", Status: coreauth.StatusActive, Attributes: map[string]string{"api_key": "reserve-key", "base_url": "https://example.com/v1"}},
+		},
+		coreManager: coreauth.NewManager(nil, nil, &serviceAuthHook{}),
+	}
+	service.coreManager.SetHook(&serviceAuthHook{service: service})
+	service.poolManager.SetActive(PoolMember{AuthID: activeAuthID, Provider: "codex"})
+	service.poolManager.SetReserve(PoolMember{AuthID: reserveAuthID, Provider: "codex"})
+	service.syncPoolActiveToRuntime(context.Background())
+	service.startPoolRebalanceWorker(context.Background())
+
+	service.runActiveProbeCycle(context.Background(), time.Now().Add(2*time.Hour))
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		snapshot := service.poolManager.Snapshot()
+		if snapshot.ActiveCount == 1 && snapshot.ActiveIDs[0] == reserveAuthID {
+			if snapshot.LowQuotaCount == 1 && snapshot.LowQuotaIDs[0] == activeAuthID {
+				return
+			}
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("expected low quota active to be demoted and reserve promoted, got %+v", service.poolManager.Snapshot())
 }
 
 func TestSyncPoolActiveToRuntime_LogsPoolPublish(t *testing.T) {
@@ -936,7 +1173,7 @@ func TestRunPoolEvalCycle_LogsWindowDeltas(t *testing.T) {
 
 	start := time.Unix(1_700_000_000, 0).UTC()
 	service.runPoolEvalCycle(start)
-	if !strings.Contains(buf.String(), "pool-eval: baseline interval=5m0s total_requests=0 success=0 failure=0 success_rate=0.00% active_size=1 reserve_size=1 limit_size=1") {
+	if !strings.Contains(buf.String(), "pool-eval: baseline interval=5m0s total_requests=0 success=0 failure=0 success_rate=0.00% active_size=1 reserve_size=1 low_quota_size=0 limit_size=1") {
 		t.Fatalf("expected baseline log on first cycle, got %q", buf.String())
 	}
 
@@ -951,7 +1188,7 @@ func TestRunPoolEvalCycle_LogsWindowDeltas(t *testing.T) {
 	service.runPoolEvalCycle(start.Add(5 * time.Minute))
 
 	logOutput := buf.String()
-	if !strings.Contains(logOutput, "pool-eval: window=5m0s total_requests=3 success=2 failure=1 success_rate=66.67%") {
+	if !strings.Contains(logOutput, "pool-eval: window=5m0s total_requests=3 success=2 failure=1 success_rate=66.67% active_size=1 reserve_size=1 low_quota_size=0 limit_size=1") {
 		t.Fatalf("expected request delta log, got %q", logOutput)
 	}
 	if !strings.Contains(logOutput, "pool-eval: window=5m0s active_removed=1 promoted=1 refreshed=1 moved_to_limit=1 deleted=0 restored=0") {
