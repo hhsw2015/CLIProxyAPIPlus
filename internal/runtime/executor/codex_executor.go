@@ -30,9 +30,21 @@ import (
 const (
 	codexClientVersion = "0.101.0"
 	codexUserAgent     = "codex_cli_rs/0.101.0 (Mac OS 26.0.1; arm64) Apple_Terminal/464"
+	codexModelsURL     = "https://api.openai.com/v1/models"
 )
 
 var dataTag = []byte("data:")
+
+type codexRefreshTokenData = codexauth.CodexTokenData
+
+var refreshCodexTokensWithRetryFunc = func(ctx context.Context, e *CodexExecutor, refreshToken string, maxRetries int) (*codexRefreshTokenData, error) {
+	svc := codexauth.NewCodexAuth(e.cfg)
+	return svc.RefreshTokensWithRetry(ctx, refreshToken, maxRetries)
+}
+
+var codexAccessTokenUsableFunc = func(ctx context.Context, e *CodexExecutor, auth *cliproxyauth.Auth, accessToken string) (bool, error) {
+	return e.codexAccessTokenUsable(ctx, auth, accessToken)
+}
 
 // CodexExecutor is a stateless executor for Codex (OpenAI Responses API entrypoint).
 // If api_key is unavailable on auth, it falls back to legacy via ClientAdapter.
@@ -571,9 +583,30 @@ func (e *CodexExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*
 	if refreshToken == "" {
 		return auth, nil
 	}
-	svc := codexauth.NewCodexAuth(e.cfg)
-	td, err := svc.RefreshTokensWithRetry(ctx, refreshToken, 3)
+	td, err := refreshCodexTokensWithRetryFunc(ctx, e, refreshToken, 3)
 	if err != nil {
+		if isRefreshTokenReusedErr(err) {
+			accessToken := ""
+			if auth.Metadata != nil {
+				if v, ok := auth.Metadata["access_token"].(string); ok {
+					accessToken = strings.TrimSpace(v)
+				}
+			}
+			usable, checkErr := codexAccessTokenUsableFunc(ctx, e, auth, accessToken)
+			if checkErr == nil {
+				if usable {
+					if expiry, ok := auth.ExpirationTime(); ok && expiry.After(time.Now()) {
+						auth.NextRefreshAfter = expiry
+					}
+					return auth, nil
+				}
+				return nil, &cliproxyauth.Error{
+					Code:       "refresh_token_reused",
+					Message:    "refresh token reused and access token is no longer usable",
+					HTTPStatus: http.StatusUnauthorized,
+				}
+			}
+		}
 		return nil, err
 	}
 	if auth.Metadata == nil {
@@ -594,6 +627,60 @@ func (e *CodexExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*
 	now := time.Now().Format(time.RFC3339)
 	auth.Metadata["last_refresh"] = now
 	return auth, nil
+}
+
+func (e *CodexExecutor) codexAccessTokenUsable(ctx context.Context, auth *cliproxyauth.Auth, accessToken string) (bool, error) {
+	accessToken = strings.TrimSpace(accessToken)
+	if accessToken == "" {
+		return false, nil
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, codexModelsURL, nil)
+	if err != nil {
+		return false, err
+	}
+	req.Header.Set("Authorization", "Bearer "+accessToken)
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", codexUserAgent)
+
+	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 30*time.Second)
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return false, err
+	}
+	defer func() {
+		if errClose := resp.Body.Close(); errClose != nil {
+			log.Errorf("codex executor: close access token validation body error: %v", errClose)
+		}
+	}()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return false, err
+	}
+	text := strings.ToLower(string(body))
+	switch resp.StatusCode {
+	case http.StatusOK:
+		return true, nil
+	case http.StatusUnauthorized:
+		return false, nil
+	case http.StatusForbidden:
+		if strings.Contains(text, "insufficient permissions") || strings.Contains(text, "missing scopes") {
+			return true, nil
+		}
+		if strings.Contains(text, "country") || strings.Contains(text, "unsupported") {
+			return true, nil
+		}
+		return false, nil
+	default:
+		return false, fmt.Errorf("codex access token validation failed with status %d", resp.StatusCode)
+	}
+}
+
+func isRefreshTokenReusedErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(strings.ToLower(err.Error()), "refresh_token_reused")
 }
 
 func (e *CodexExecutor) cacheHelper(ctx context.Context, from sdktranslator.Format, url string, req cliproxyexecutor.Request, rawJSON []byte) (*http.Request, error) {

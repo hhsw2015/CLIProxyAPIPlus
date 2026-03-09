@@ -240,6 +240,16 @@ func (m *Manager) syncScheduler() {
 	m.syncSchedulerFromSnapshot(m.snapshotAuths())
 }
 
+// RebuildScheduler rebuilds scheduler state from the current auth snapshot.
+// Call this after external code updates model registry bindings for loaded auths
+// without going through Manager Register/Update.
+func (m *Manager) RebuildScheduler() {
+	if m == nil {
+		return
+	}
+	m.syncScheduler()
+}
+
 // RefreshSchedulerEntry re-upserts a single auth into the scheduler so that its
 // supportedModelSet is rebuilt from the current global model registry state.
 // This must be called after models have been registered for a newly added auth,
@@ -2983,6 +2993,16 @@ func (m *Manager) refreshAuth(ctx context.Context, id string) {
 	log.Debugf("refreshed %s, %s, %v", auth.Provider, auth.ID, err)
 	now := time.Now()
 	if err != nil {
+		var authErr *Error
+		if errors.As(err, &authErr) && authErr != nil && containsAnyFold(strings.ToLower(authErr.Error()), "refresh_token_reused") {
+			m.MarkResult(WithDispositionSource(ctx, "refresh"), Result{
+				AuthID:   auth.ID,
+				Provider: auth.Provider,
+				Success:  false,
+				Error:    cloneError(authErr),
+			})
+			return
+		}
 		m.mu.Lock()
 		if current := m.auths[id]; current != nil {
 			current.NextRefreshAfter = now.Add(refreshFailureBackoff)

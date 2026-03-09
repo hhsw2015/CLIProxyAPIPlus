@@ -202,6 +202,10 @@ def _contains_deleted_keyword(text: str) -> bool:
     return any(keyword in lowered for keyword in DELETED_KEYWORDS)
 
 
+def _is_refresh_token_reused_error(text: str) -> bool:
+    return "refresh_token_reused" in (text or "").lower()
+
+
 def _random_browser_user_agent() -> str:
     return random.choice(BROWSER_USER_AGENTS)[1]
 
@@ -1057,6 +1061,7 @@ def _scan_candidate(candidate: AuthCandidate, args: argparse.Namespace) -> list[
             retry_attempts=args.retry_attempts,
             retry_backoff=args.retry_backoff,
         )
+        refresh_token_reused = _is_refresh_token_reused_error(refresh_error)
         if verify_status == "alive":
             return [
                 CheckResult(
@@ -1072,6 +1077,23 @@ def _scan_candidate(candidate: AuthCandidate, args: argparse.Namespace) -> list[
                     error="access_token still valid after refresh failure",
                     response_preview=preview,
                     delete_invalid=False,
+                )
+            ]
+        if refresh_token_reused and verify_status == "expired":
+            return [
+                CheckResult(
+                    file=str(path),
+                    provider=fields["provider"],
+                    email=fields["email"],
+                    account_id=fields["account_id"],
+                    status_code=401,
+                    unauthorized_401=True,
+                    no_limit_unlimited=False,
+                    quota_exceeded=False,
+                    quota_resets_at=None,
+                    error=refresh_error or verify_error or "refresh_token_reused with expired access token",
+                    response_preview=preview,
+                    delete_invalid=True,
                 )
             ]
         if verify_status == "deleted":
