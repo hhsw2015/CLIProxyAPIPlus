@@ -116,6 +116,9 @@ type Service struct {
 	poolEvalLast        *poolEvalWindowSnapshot
 	poolUnderfilledMu   sync.Mutex
 	poolUnderfilledSince time.Time
+	poolLowSuccessMu     sync.Mutex
+	poolLowSuccessStreak int
+	poolLowSuccessWarned bool
 }
 
 type poolEvalWindowSnapshot struct {
@@ -132,6 +135,8 @@ type poolEvalWindowSnapshot struct {
 }
 
 const poolEvalLogInterval = 5 * time.Minute
+const poolEvalLowSuccessThreshold = 80.0
+const poolEvalLowSuccessConsecutiveWindows = 3
 
 // RegisterUsagePlugin registers a usage plugin on the global usage manager.
 // This allows external code to monitor API usage and token consumption.
@@ -988,6 +993,51 @@ func (s *Service) runPoolEvalCycle(now time.Time) {
 		current.DeletedTotal-previous.DeletedTotal,
 		current.RestoredTotal-previous.RestoredTotal,
 	)
+	s.logPoolLowSuccess(window, totalRequests, successCount, failureCount, successRate)
+}
+
+func (s *Service) logPoolLowSuccess(window time.Duration, totalRequests, successCount, failureCount int64, successRate float64) {
+	if s == nil {
+		return
+	}
+	if totalRequests <= 0 {
+		return
+	}
+
+	s.poolLowSuccessMu.Lock()
+	defer s.poolLowSuccessMu.Unlock()
+
+	if successRate < poolEvalLowSuccessThreshold {
+		s.poolLowSuccessStreak++
+		if s.poolLowSuccessStreak >= poolEvalLowSuccessConsecutiveWindows && !s.poolLowSuccessWarned {
+			s.poolLowSuccessWarned = true
+			log.Warnf(
+				"pool-eval: low_success_rate warning threshold=%.2f%% consecutive_windows=%d current_rate=%.2f%% total_requests=%d failure=%d window=%s",
+				poolEvalLowSuccessThreshold,
+				s.poolLowSuccessStreak,
+				successRate,
+				totalRequests,
+				failureCount,
+				window,
+			)
+		}
+		return
+	}
+
+	if s.poolLowSuccessWarned {
+		log.Infof(
+			"pool-eval: success_rate recovered threshold=%.2f%% previous_streak=%d current_rate=%.2f%% total_requests=%d success=%d failure=%d window=%s",
+			poolEvalLowSuccessThreshold,
+			s.poolLowSuccessStreak,
+			successRate,
+			totalRequests,
+			successCount,
+			failureCount,
+			window,
+		)
+	}
+	s.poolLowSuccessStreak = 0
+	s.poolLowSuccessWarned = false
 }
 
 func (s *Service) logPoolUnderfilled(now time.Time, reserveExhausted bool) {
