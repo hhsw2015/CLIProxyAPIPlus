@@ -201,6 +201,14 @@ var zhStrings = map[string]string{
 	"usage_output":        "输出",
 	"usage_cached":        "缓存",
 	"usage_reasoning":     "思考",
+	"usage_pool_title":    "Pool Manager",
+	"usage_pool_active":   "Active",
+	"usage_pool_reserve":  "Reserve",
+	"usage_pool_limit":    "Limit",
+	"usage_pool_promotions": "Promotions",
+	"usage_pool_removed":  "Active Removed",
+	"usage_pool_moved_limit": "Moved To Limit",
+	"usage_pool_restored": "Restored",
 
 	// ── Logs ──
 	"logs_title":       "📋 日志",
@@ -352,6 +360,14 @@ var enStrings = map[string]string{
 	"usage_output":        "Output",
 	"usage_cached":        "Cached",
 	"usage_reasoning":     "Reasoning",
+	"usage_pool_title":    "Pool Manager",
+	"usage_pool_active":   "Active",
+	"usage_pool_reserve":  "Reserve",
+	"usage_pool_limit":    "Limit",
+	"usage_pool_promotions": "Promotions",
+	"usage_pool_removed":  "Active Removed",
+	"usage_pool_moved_limit": "Moved To Limit",
+	"usage_pool_restored": "Restored",
 
 	// ── Logs ──
 	"logs_title":       "📋 Logs",

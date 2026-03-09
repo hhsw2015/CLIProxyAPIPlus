@@ -101,11 +101,12 @@ func TestPoolManager_MoveBetweenStates(t *testing.T) {
 func TestPoolManager_ActiveDiff(t *testing.T) {
 	pm := NewPoolManager(config.PoolManagerConfig{Size: 2, Provider: "codex"})
 	pm.SetActive(PoolMember{AuthID: "a-1"})
-	pm.SetActive(PoolMember{AuthID: "a-2"})
+	previousAt := time.Now()
+	pm.SetActive(PoolMember{AuthID: "a-2", LastProbeAt: previousAt.Add(time.Second)})
 
 	previous := map[string]time.Time{
-		"a-2": time.Now(),
-		"a-3": time.Now(),
+		"a-2": previousAt,
+		"a-3": previousAt,
 	}
 
 	added, modified, removed := pm.ActiveDiff(previous)

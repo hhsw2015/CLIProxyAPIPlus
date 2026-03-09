@@ -249,12 +249,15 @@ func (p *PoolManager) ActiveDiff(previous map[string]time.Time) ([]string, []str
 	modified := make([]string, 0, len(p.active))
 	removed := make([]string, 0, len(previous))
 
-	for id := range p.active {
-		if _, ok := previous[id]; !ok {
+	for id, member := range p.active {
+		publishedAt, ok := previous[id]
+		if !ok {
 			added = append(added, id)
 			continue
 		}
-		modified = append(modified, id)
+		if poolMemberChangedAfter(member, publishedAt) {
+			modified = append(modified, id)
+		}
 	}
 	for id := range previous {
 		if _, ok := p.active[id]; !ok {
@@ -266,6 +269,21 @@ func (p *PoolManager) ActiveDiff(previous map[string]time.Time) ([]string, []str
 	sort.Strings(modified)
 	sort.Strings(removed)
 	return added, modified, removed
+}
+
+func poolMemberChangedAfter(member *PoolMember, publishedAt time.Time) bool {
+	if member == nil {
+		return false
+	}
+	if publishedAt.IsZero() {
+		return true
+	}
+	for _, ts := range []time.Time{member.LastSelectedAt, member.LastSuccessAt, member.LastProbeAt, member.NextProbeAt} {
+		if !ts.IsZero() && ts.After(publishedAt) {
+			return true
+		}
+	}
+	return false
 }
 
 // LastSeenMember returns the latest known pool member state for a given auth ID.
