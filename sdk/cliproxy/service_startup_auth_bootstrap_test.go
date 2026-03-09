@@ -278,19 +278,176 @@ func TestServiceRunBootstrapsPoolStartupFromRootCandidatesOnly(t *testing.T) {
 	}
 }
 
-func TestHandleAuthDisposition_RemovesActiveAndPromotesReserve(t *testing.T) {
-	activeAuthID := "pool-active-auth-disposition"
-	reserveAuthID := "pool-reserve-auth-disposition"
+func TestServiceRunBootstrapsPoolStartupSkipsUnhealthyRootCandidate(t *testing.T) {
+	firstAuthID := "pool-first-unhealthy"
+	secondAuthID := "pool-second-healthy"
 
 	reg := GlobalModelRegistry()
-	for _, id := range []string{activeAuthID, reserveAuthID} {
+	for _, id := range []string{firstAuthID, secondAuthID} {
 		reg.UnregisterClient(id)
 	}
 	t.Cleanup(func() {
-		for _, id := range []string{activeAuthID, reserveAuthID} {
+		for _, id := range []string{firstAuthID, secondAuthID} {
 			reg.UnregisterClient(id)
 		}
 	})
+
+	originalProbe := poolProbeAuthFunc
+	poolProbeAuthFunc = func(ctx context.Context, cfg *config.Config, auth *coreauth.Auth) (*coreauth.Auth, coreauth.Result) {
+		if auth != nil && auth.ID == firstAuthID {
+			return auth, coreauth.Result{
+				AuthID:   firstAuthID,
+				Provider: "codex",
+				Success:  false,
+				Error:    &coreauth.Error{HTTPStatus: 429, Code: "quota_exceeded", Message: "quota exceeded"},
+			}
+		}
+		return auth, coreauth.Result{
+			AuthID:   auth.ID,
+			Provider: "codex",
+			Success:  true,
+		}
+	}
+	t.Cleanup(func() { poolProbeAuthFunc = originalProbe })
+
+	cfg := &config.Config{
+		Host:    "127.0.0.1",
+		Port:    0,
+		AuthDir: filepath.Join(t.TempDir(), "auth"),
+		SDKConfig: config.SDKConfig{
+			APIKeys: []string{"test-key"},
+		},
+		PoolManager: config.PoolManagerConfig{
+			Size:     1,
+			Provider: "codex",
+		},
+	}
+
+	firstAuth := &coreauth.Auth{
+		ID:       firstAuthID,
+		Provider: "codex",
+		Status:   coreauth.StatusActive,
+		Attributes: map[string]string{
+			"api_key":  "first-key",
+			"base_url": "https://example.com/v1",
+		},
+	}
+	secondAuth := &coreauth.Auth{
+		ID:       secondAuthID,
+		Provider: "codex",
+		Status:   coreauth.StatusActive,
+		Attributes: map[string]string{
+			"api_key":  "second-key",
+			"base_url": "https://example.com/v1",
+		},
+	}
+
+	tempDir := t.TempDir()
+	configPath := filepath.Join(tempDir, "config.yaml")
+	if err := os.WriteFile(configPath, []byte("port: 0\n"), 0o600); err != nil {
+		t.Fatalf("write temp config: %v", err)
+	}
+
+	service, err := NewBuilder().
+		WithConfig(cfg).
+		WithConfigPath(configPath).
+		WithWatcherFactory(func(configPath, authDir string, reload func(*config.Config)) (*WatcherWrapper, error) {
+			return &WatcherWrapper{
+				start: func(ctx context.Context) error { return nil },
+				stop:  func() error { return nil },
+				setConfig: func(cfg *config.Config) {
+					_ = cfg
+				},
+				snapshotAuths: func() []*coreauth.Auth { return nil },
+				snapshotRootFileAuths: func() []*coreauth.Auth {
+					return []*coreauth.Auth{firstAuth.Clone(), secondAuth.Clone()}
+				},
+				snapshotLimitAuths: func() []*coreauth.Auth { return nil },
+				setUpdateQueue:     func(queue chan<- watcher.AuthUpdate) { _ = queue },
+			}, nil
+		}).
+		Build()
+	if err != nil {
+		t.Fatalf("build service: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- service.Run(ctx)
+	}()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if service.poolManager != nil && service.poolManager.Snapshot().ActiveCount == 1 {
+			break
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+
+	snapshot := service.poolManager.Snapshot()
+	if snapshot.ActiveCount != 1 || snapshot.ActiveIDs[0] != secondAuthID {
+		cancel()
+		<-done
+		t.Fatalf("unexpected active snapshot: %+v", snapshot)
+	}
+	if snapshot.LimitCount != 1 || snapshot.LimitIDs[0] != firstAuthID {
+		cancel()
+		<-done
+		t.Fatalf("expected first auth to be moved to limit in pool state, got %+v", snapshot)
+	}
+
+	cancel()
+	select {
+	case errRun := <-done:
+		if errRun != nil && errRun != context.Canceled {
+			t.Fatalf("service run returned error: %v", errRun)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("service did not stop after cancel")
+	}
+}
+
+func TestHandleAuthDisposition_RemovesActiveAndPromotesHealthyReserve(t *testing.T) {
+	activeAuthID := "pool-active-auth-disposition"
+	firstReserveAuthID := "pool-reserve-auth-disposition-bad"
+	secondReserveAuthID := "pool-reserve-auth-disposition-good"
+
+	reg := GlobalModelRegistry()
+	for _, id := range []string{activeAuthID, firstReserveAuthID, secondReserveAuthID} {
+		reg.UnregisterClient(id)
+	}
+	t.Cleanup(func() {
+		for _, id := range []string{activeAuthID, firstReserveAuthID, secondReserveAuthID} {
+			reg.UnregisterClient(id)
+		}
+	})
+
+	originalProbe := poolProbeAuthFunc
+	poolProbeAuthFunc = func(ctx context.Context, cfg *config.Config, auth *coreauth.Auth) (*coreauth.Auth, coreauth.Result) {
+		switch auth.ID {
+		case firstReserveAuthID:
+			return auth, coreauth.Result{
+				AuthID:   auth.ID,
+				Provider: "codex",
+				Success:  false,
+				Error:    &coreauth.Error{HTTPStatus: 429, Code: "quota_exceeded", Message: "quota exceeded"},
+			}
+		case secondReserveAuthID:
+			return auth, coreauth.Result{
+				AuthID:   auth.ID,
+				Provider: "codex",
+				Success:  true,
+			}
+		default:
+			return auth, coreauth.Result{
+				AuthID:   auth.ID,
+				Provider: "codex",
+				Success:  true,
+			}
+		}
+	}
+	t.Cleanup(func() { poolProbeAuthFunc = originalProbe })
 
 	service := &Service{
 		cfg:         &config.Config{},
@@ -305,12 +462,21 @@ func TestHandleAuthDisposition_RemovesActiveAndPromotesReserve(t *testing.T) {
 					"base_url": "https://example.com/v1",
 				},
 			},
-			reserveAuthID: {
-				ID:       reserveAuthID,
+			firstReserveAuthID: {
+				ID:       firstReserveAuthID,
 				Provider: "codex",
 				Status:   coreauth.StatusActive,
 				Attributes: map[string]string{
-					"api_key":  "reserve-key",
+					"api_key":  "reserve-bad-key",
+					"base_url": "https://example.com/v1",
+				},
+			},
+			secondReserveAuthID: {
+				ID:       secondReserveAuthID,
+				Provider: "codex",
+				Status:   coreauth.StatusActive,
+				Attributes: map[string]string{
+					"api_key":  "reserve-good-key",
 					"base_url": "https://example.com/v1",
 				},
 			},
@@ -318,13 +484,17 @@ func TestHandleAuthDisposition_RemovesActiveAndPromotesReserve(t *testing.T) {
 		coreManager: coreauth.NewManager(nil, nil, nil),
 	}
 	service.poolManager.SetActive(PoolMember{AuthID: activeAuthID, Provider: "codex"})
-	service.poolManager.SetReserve(PoolMember{AuthID: reserveAuthID, Provider: "codex"})
+	service.poolManager.SetReserve(PoolMember{AuthID: firstReserveAuthID, Provider: "codex"})
+	service.poolManager.SetReserve(PoolMember{AuthID: secondReserveAuthID, Provider: "codex"})
 	service.syncPoolActiveToRuntime(context.Background())
 
 	if !reg.ClientSupportsModel(activeAuthID, "gpt-5") {
 		t.Fatal("expected initial active auth to be published")
 	}
-	if reg.ClientSupportsModel(reserveAuthID, "gpt-5") {
+	if reg.ClientSupportsModel(firstReserveAuthID, "gpt-5") {
+		t.Fatal("did not expect first reserve auth to be published before promotion")
+	}
+	if reg.ClientSupportsModel(secondReserveAuthID, "gpt-5") {
 		t.Fatal("did not expect reserve auth to be published before promotion")
 	}
 
@@ -338,13 +508,19 @@ func TestHandleAuthDisposition_RemovesActiveAndPromotesReserve(t *testing.T) {
 	})
 
 	snapshot := service.poolManager.Snapshot()
-	if snapshot.ActiveCount != 1 || snapshot.ActiveIDs[0] != reserveAuthID {
+	if snapshot.ActiveCount != 1 || snapshot.ActiveIDs[0] != secondReserveAuthID {
 		t.Fatalf("unexpected active snapshot after disposition: %+v", snapshot)
 	}
 	if reg.ClientSupportsModel(activeAuthID, "gpt-5") {
 		t.Fatal("expected deleted active auth to be removed from runtime")
 	}
-	if !reg.ClientSupportsModel(reserveAuthID, "gpt-5") {
-		t.Fatal("expected reserve auth to be promoted into runtime")
+	if !reg.ClientSupportsModel(secondReserveAuthID, "gpt-5") {
+		t.Fatal("expected healthy reserve auth to be promoted into runtime")
+	}
+	if reg.ClientSupportsModel(firstReserveAuthID, "gpt-5") {
+		t.Fatal("did not expect unhealthy reserve auth to be promoted into runtime")
+	}
+	if snapshot.LimitCount != 1 || snapshot.LimitIDs[0] != firstReserveAuthID {
+		t.Fatalf("expected unhealthy reserve auth to move to limit state, got %+v", snapshot)
 	}
 }

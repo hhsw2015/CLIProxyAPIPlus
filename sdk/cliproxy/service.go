@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"sort"
 	"strings"
@@ -236,11 +237,11 @@ func (s *Service) bootstrapPoolSnapshot(ctx context.Context, watcherWrapper *Wat
 	if !pm.Enabled() {
 		return
 	}
+	s.poolManager = pm
 
 	rootAuths := watcherWrapper.SnapshotRootFileAuths()
 	limitAuths := watcherWrapper.SnapshotLimitAuths()
 	if len(rootAuths) == 0 && len(limitAuths) == 0 {
-		s.poolManager = pm
 		return
 	}
 
@@ -286,14 +287,21 @@ func (s *Service) bootstrapPoolSnapshot(ctx context.Context, watcherWrapper *Wat
 		if auth == nil || strings.TrimSpace(auth.ID) == "" {
 			continue
 		}
-		member := PoolMember{AuthID: auth.ID, Provider: auth.Provider}
 		if activeCount < pm.TargetSize() {
-			pm.SetActive(member)
-			s.applyCoreAuthAddOrUpdate(ctx, auth)
-			activeCount++
+			probedAuth, result := poolProbeAuthFunc(ctx, s.cfg, auth.Clone())
+			if probedAuth != nil {
+				s.poolCandidates[probedAuth.ID] = probedAuth.Clone()
+			}
+			if result.Success && probedAuth != nil {
+				pm.SetActive(PoolMember{AuthID: probedAuth.ID, Provider: probedAuth.Provider})
+				s.applyCoreAuthAddOrUpdate(ctx, probedAuth)
+				activeCount++
+				continue
+			}
+			s.handlePoolProbeResult(auth.ID, auth.Provider, result)
 			continue
 		}
-		pm.SetReserve(member)
+		pm.SetReserve(PoolMember{AuthID: auth.ID, Provider: auth.Provider})
 	}
 	for _, auth := range limitAuths {
 		if auth == nil || strings.TrimSpace(auth.ID) == "" {
@@ -301,7 +309,6 @@ func (s *Service) bootstrapPoolSnapshot(ctx context.Context, watcherWrapper *Wat
 		}
 		pm.SetLimit(PoolMember{AuthID: auth.ID, Provider: auth.Provider})
 	}
-	s.poolManager = pm
 	s.syncPoolActiveToRuntime(ctx)
 	log.Infof(
 		"pool-manager: startup active target=%d selected=%d reserve=%d limit=%d",
@@ -310,6 +317,33 @@ func (s *Service) bootstrapPoolSnapshot(ctx context.Context, watcherWrapper *Wat
 		pm.Snapshot().ReserveCount,
 		pm.Snapshot().LimitCount,
 	)
+}
+
+func (s *Service) handlePoolProbeResult(authID, provider string, result coreauth.Result) {
+	if s == nil || s.poolManager == nil {
+		return
+	}
+	authID = strings.TrimSpace(authID)
+	if authID == "" {
+		return
+	}
+	member, ok := s.poolManager.LastSeenMember(authID)
+	if !ok {
+		member = PoolMember{AuthID: authID, Provider: provider}
+	}
+	member.Provider = provider
+	if result.Success {
+		s.poolManager.SetReserve(member)
+		return
+	}
+	if result.Error != nil {
+		switch result.Error.HTTPStatus {
+		case http.StatusTooManyRequests, http.StatusPaymentRequired:
+			s.poolManager.SetLimit(member)
+			return
+		}
+	}
+	s.poolManager.SetReserve(member)
 }
 
 func (s *Service) syncPoolActiveToRuntime(ctx context.Context) {
@@ -383,16 +417,37 @@ func (s *Service) handleAuthDisposition(ctx context.Context, disposition coreaut
 		}
 	}
 
+	s.fillActiveFromReserve(ctx)
+	s.syncPoolActiveToRuntime(ctx)
+}
+
+func (s *Service) fillActiveFromReserve(ctx context.Context) {
+	if s == nil || s.poolManager == nil {
+		return
+	}
 	for s.poolManager.Snapshot().ActiveCount < s.poolManager.TargetSize() {
-		member, ok := s.poolManager.PromoteNextReserve()
-		if !ok {
+		promoted := false
+		for _, authID := range s.poolManager.ReserveIDs() {
+			auth := s.poolCandidates[authID]
+			if auth == nil {
+				s.poolManager.Remove(authID)
+				continue
+			}
+			probedAuth, result := poolProbeAuthFunc(ctx, s.cfg, auth.Clone())
+			if probedAuth != nil {
+				s.poolCandidates[probedAuth.ID] = probedAuth.Clone()
+			}
+			if result.Success && probedAuth != nil {
+				s.poolManager.SetActive(PoolMember{AuthID: probedAuth.ID, Provider: probedAuth.Provider})
+				promoted = true
+				break
+			}
+			s.handlePoolProbeResult(authID, auth.Provider, result)
+		}
+		if !promoted {
 			break
 		}
-		if _, exists := s.poolCandidates[member.AuthID]; !exists {
-			continue
-		}
 	}
-	s.syncPoolActiveToRuntime(ctx)
 }
 
 func (s *Service) handleAuthUpdate(ctx context.Context, update watcher.AuthUpdate) {

@@ -5,17 +5,21 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"time"
 
 	codexauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/codex"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
+	sdkAuth "github.com/router-for-me/CLIProxyAPI/v6/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
 	"github.com/tidwall/gjson"
 )
 
 const codexUsageProbeURL = "https://chatgpt.com/backend-api/wham/usage"
+
+var poolProbeAuthFunc = probePoolAuth
 
 func probeCodexUsage(ctx context.Context, cfg *config.Config, auth *coreauth.Auth) coreauth.Result {
 	return probeCodexUsageWithURL(ctx, cfg, auth, codexUsageProbeURL)
@@ -162,4 +166,73 @@ func refreshCodexAuthTokens(ctx context.Context, cfg *config.Config, auth *corea
 	}
 	svc := codexauth.NewCodexAuth(cfg)
 	return svc.RefreshTokensWithRetry(ctx, refreshToken, 3)
+}
+
+func probePoolAuth(ctx context.Context, cfg *config.Config, auth *coreauth.Auth) (*coreauth.Auth, coreauth.Result) {
+	if auth == nil {
+		return nil, coreauth.Result{
+			Provider: "codex",
+			Success:  false,
+			Error:    &coreauth.Error{Code: "auth_not_found", Message: "auth is nil"},
+		}
+	}
+	probed := auth.Clone()
+	result := probeCodexUsage(ctx, cfg, probed)
+	if result.Success {
+		return probed, result
+	}
+
+	if result.Error == nil || result.Error.HTTPStatus != http.StatusUnauthorized {
+		return probed, result
+	}
+
+	td, err := refreshCodexAuthTokens(ctx, cfg, probed)
+	if err != nil {
+		result.Error.Message = strings.TrimSpace(strings.TrimSpace(result.Error.Message) + " | refresh failed: " + err.Error())
+		return probed, result
+	}
+
+	applyCodexTokenData(probed, td)
+	persistPoolProbeAuth(cfg, probed)
+
+	refreshedResult := probeCodexUsage(ctx, cfg, probed)
+	return probed, refreshedResult
+}
+
+func applyCodexTokenData(auth *coreauth.Auth, td *codexauth.CodexTokenData) {
+	if auth == nil || td == nil {
+		return
+	}
+	if auth.Metadata == nil {
+		auth.Metadata = make(map[string]any)
+	}
+	auth.Metadata["id_token"] = td.IDToken
+	auth.Metadata["access_token"] = td.AccessToken
+	auth.Metadata["refresh_token"] = td.RefreshToken
+	auth.Metadata["account_id"] = td.AccountID
+	auth.Metadata["email"] = td.Email
+	auth.Metadata["expired"] = td.Expire
+	auth.Metadata["last_refresh"] = time.Now().Format(time.RFC3339)
+	auth.Metadata["type"] = "codex"
+}
+
+func persistPoolProbeAuth(cfg *config.Config, auth *coreauth.Auth) {
+	if auth == nil {
+		return
+	}
+	store := sdkAuth.GetTokenStore()
+	if store == nil {
+		return
+	}
+	if cfg != nil {
+		if dirSetter, ok := store.(interface{ SetBaseDir(string) }); ok {
+			dirSetter.SetBaseDir(cfg.AuthDir)
+		}
+	}
+	if auth.Attributes != nil && strings.TrimSpace(auth.Attributes["path"]) == "" {
+		if auth.FileName != "" && cfg != nil && cfg.AuthDir != "" {
+			auth.Attributes["path"] = filepath.Join(cfg.AuthDir, auth.FileName)
+		}
+	}
+	_, _ = store.Save(context.Background(), auth)
 }
