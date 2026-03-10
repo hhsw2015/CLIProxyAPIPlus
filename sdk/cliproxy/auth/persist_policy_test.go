@@ -2,8 +2,11 @@ package auth
 
 import (
 	"context"
+	"path/filepath"
 	"sync/atomic"
 	"testing"
+
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 )
 
 type countingStore struct {
@@ -18,6 +21,27 @@ func (s *countingStore) Save(context.Context, *Auth) (string, error) {
 }
 
 func (s *countingStore) Delete(context.Context, string) error { return nil }
+
+type pathResolvingStore struct {
+	baseDir string
+}
+
+func (s *pathResolvingStore) List(context.Context) ([]*Auth, error) { return nil, nil }
+
+func (s *pathResolvingStore) Save(_ context.Context, auth *Auth) (string, error) {
+	if auth == nil {
+		return "", nil
+	}
+	if auth.FileName == "" {
+		return filepath.Join(s.baseDir, auth.ID), nil
+	}
+	if filepath.IsAbs(auth.FileName) {
+		return auth.FileName, nil
+	}
+	return filepath.Join(s.baseDir, auth.FileName), nil
+}
+
+func (s *pathResolvingStore) Delete(context.Context, string) error { return nil }
 
 func TestWithSkipPersist_DisablesUpdatePersistence(t *testing.T) {
 	store := &countingStore{}
@@ -58,5 +82,29 @@ func TestWithSkipPersist_DisablesRegisterPersistence(t *testing.T) {
 	}
 	if got := store.saveCount.Load(); got != 0 {
 		t.Fatalf("expected 0 Save calls, got %d", got)
+	}
+}
+
+func TestPersistSuppressesWatcherEchoWhenUsingFileName(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	store := &pathResolvingStore{baseDir: tmpDir}
+
+	mgr := NewManager(store, nil, nil)
+	auth := &Auth{
+		ID:       "refresh.json",
+		FileName: "refresh.json",
+		Provider: "codex",
+		Metadata: map[string]any{"type": "codex", "access_token": "access-token"},
+	}
+
+	if err := mgr.persist(context.Background(), auth); err != nil {
+		t.Fatalf("persist returned error: %v", err)
+	}
+
+	path := filepath.Join(tmpDir, "refresh.json")
+	if !util.ShouldSuppressAuthPathEvent(path) {
+		t.Fatalf("expected persist to suppress watcher echo for %s", path)
 	}
 }

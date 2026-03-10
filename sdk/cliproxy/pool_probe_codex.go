@@ -237,17 +237,24 @@ func persistPoolProbeAuth(cfg *config.Config, auth *coreauth.Auth) {
 			dirSetter.SetBaseDir(cfg.AuthDir)
 		}
 	}
-	if auth.Attributes != nil && strings.TrimSpace(auth.Attributes["path"]) == "" {
+	if auth.Attributes == nil {
+		auth.Attributes = make(map[string]string)
+	}
+	if strings.TrimSpace(auth.Attributes["path"]) == "" {
 		if auth.FileName != "" && cfg != nil && cfg.AuthDir != "" {
 			auth.Attributes["path"] = filepath.Join(cfg.AuthDir, auth.FileName)
+		} else if filepath.IsAbs(strings.TrimSpace(auth.FileName)) {
+			auth.Attributes["path"] = strings.TrimSpace(auth.FileName)
+		} else if filepath.IsAbs(strings.TrimSpace(auth.ID)) {
+			auth.Attributes["path"] = strings.TrimSpace(auth.ID)
 		}
 	}
-	if auth.Attributes != nil {
-		if path := strings.TrimSpace(auth.Attributes["path"]); path != "" {
-			util.SuppressAuthPathEvent(path, 2*time.Second)
-		}
+	if path := strings.TrimSpace(auth.Attributes["path"]); path != "" {
+		util.SuppressAuthPathEvent(path, 2*time.Second)
 	}
-	_, _ = store.Save(context.Background(), auth)
+	if path, err := store.Save(context.Background(), auth); err == nil && strings.TrimSpace(path) != "" {
+		util.SuppressAuthPathEvent(path, 2*time.Second)
+	}
 }
 
 func applyCodexQuotaMetadata(auth *coreauth.Auth, body []byte) {

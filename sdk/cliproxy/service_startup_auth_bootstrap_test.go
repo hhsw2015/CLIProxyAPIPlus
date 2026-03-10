@@ -556,8 +556,11 @@ func TestServiceRunBootstrapsPoolStartupSkipsUnhealthyRootCandidate(t *testing.T
 
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		if service.poolManager != nil && service.poolManager.Snapshot().ActiveCount == 1 {
-			break
+		if service.poolManager != nil {
+			snapshot := service.poolManager.Snapshot()
+			if snapshot.ActiveCount == 1 && snapshot.LowQuotaCount == 1 {
+				break
+			}
 		}
 		time.Sleep(25 * time.Millisecond)
 	}
@@ -660,8 +663,11 @@ func TestServiceRunBootstrapsPoolStartupSkipsLowQuotaRootCandidate(t *testing.T)
 
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		if service.poolManager != nil && service.poolManager.Snapshot().ActiveCount == 1 {
-			break
+		if service.poolManager != nil {
+			snapshot := service.poolManager.Snapshot()
+			if snapshot.ActiveCount == 1 && snapshot.ActiveIDs[0] == healthyAuthID && snapshot.LowQuotaCount == 1 && snapshot.LowQuotaIDs[0] == lowQuotaAuthID {
+				break
+			}
 		}
 		time.Sleep(25 * time.Millisecond)
 	}
