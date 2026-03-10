@@ -161,10 +161,10 @@ func TestRunActiveQuotaRefreshCycle_ProbesEvenWhenLastSuccessFresh(t *testing.T)
 
 	cfg := &config.Config{
 		PoolManager: config.PoolManagerConfig{
-			Size:                          1,
-			Provider:                      "codex",
-			ActiveIdleScanIntervalSeconds: 1800,
-			LowQuotaThresholdPercent:      20,
+			Size:                              1,
+			Provider:                          "codex",
+			ActiveIdleScanIntervalSeconds:     1800,
+			LowQuotaThresholdPercent:          20,
 			ActiveQuotaRefreshIntervalSeconds: 60,
 			ActiveQuotaRefreshSampleSize:      1,
 		},
@@ -205,5 +205,37 @@ func TestRunActiveQuotaRefreshCycle_ProbesEvenWhenLastSuccessFresh(t *testing.T)
 	service.runActiveQuotaRefreshCycle(context.Background(), now.Add(10*time.Second))
 	if probeCalls != 1 {
 		t.Fatalf("second refresh should be throttled, probeCalls=%d, want 1", probeCalls)
+	}
+}
+
+func TestSyncPoolActiveToRuntime_TrimsOverflowActiveToTarget(t *testing.T) {
+	service := &Service{
+		poolManager:    NewPoolManager(config.PoolManagerConfig{Size: 2, Provider: "codex", LowQuotaThresholdPercent: 20}),
+		poolCandidates: map[string]*coreauth.Auth{},
+	}
+
+	low := testCodexAuthWithRemaining("a-low", 30)
+	mid := testCodexAuthWithRemaining("a-mid", 50)
+	high := testCodexAuthWithRemaining("a-high", 80)
+	for _, auth := range []*coreauth.Auth{low, mid, high} {
+		service.poolCandidates[auth.ID] = auth.Clone()
+		service.setPoolMemberState(service.poolMemberForAuth(auth, PoolStateActive), PoolStateActive, "seed")
+	}
+
+	service.syncPoolActiveToRuntime(context.Background())
+
+	snapshot := service.poolManager.Snapshot()
+	if snapshot.ActiveCount != 2 {
+		t.Fatalf("ActiveCount=%d, want 2", snapshot.ActiveCount)
+	}
+	if service.poolManager.IsActive(low.ID) {
+		t.Fatalf("expected %s to be trimmed from active", low.ID)
+	}
+	if !service.poolManager.IsActive(mid.ID) || !service.poolManager.IsActive(high.ID) {
+		t.Fatalf("expected higher-quota auths to remain active, snapshot=%+v", snapshot)
+	}
+	reserveIDs := service.poolManager.ReserveIDs()
+	if !containsString(reserveIDs, low.ID) {
+		t.Fatalf("expected %s to move to reserve, got reserve=%v", low.ID, reserveIDs)
 	}
 }
