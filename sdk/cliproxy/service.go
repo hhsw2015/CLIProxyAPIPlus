@@ -345,6 +345,7 @@ func (s *Service) bootstrapPoolSnapshot(ctx context.Context, watcherWrapper *Wat
 		}
 		s.storePoolCandidate(auth)
 	}
+	rootAuths = sortAuthCandidatesByRemaining(rootAuths)
 	s.resetPoolCandidateOrder(rootAuths)
 
 	for _, auth := range rootAuths {
@@ -413,6 +414,35 @@ func (s *Service) resetPoolCandidateOrder(auths []*coreauth.Auth) {
 	s.poolCandidateMu.Unlock()
 }
 
+func sortAuthCandidatesByRemaining(auths []*coreauth.Auth) []*coreauth.Auth {
+	if len(auths) <= 1 {
+		return auths
+	}
+	sorted := append([]*coreauth.Auth(nil), auths...)
+	sort.SliceStable(sorted, func(i, j int) bool {
+		left := sorted[i]
+		right := sorted[j]
+		leftRemaining, leftKnown := authWeeklyRemainingPercent(left)
+		rightRemaining, rightKnown := authWeeklyRemainingPercent(right)
+		if leftKnown != rightKnown {
+			return leftKnown
+		}
+		if leftKnown && rightKnown && leftRemaining != rightRemaining {
+			return leftRemaining > rightRemaining
+		}
+		leftID := ""
+		rightID := ""
+		if left != nil {
+			leftID = strings.TrimSpace(left.ID)
+		}
+		if right != nil {
+			rightID = strings.TrimSpace(right.ID)
+		}
+		return leftID < rightID
+	})
+	return sorted
+}
+
 func (s *Service) storePoolCandidate(auth *coreauth.Auth) {
 	if s == nil || auth == nil || strings.TrimSpace(auth.ID) == "" {
 		return
@@ -431,6 +461,30 @@ func (s *Service) storePoolCandidate(auth *coreauth.Auth) {
 		}
 	}
 	s.poolCandidateOrder = append(s.poolCandidateOrder, id)
+}
+
+func (s *Service) resortPoolCandidateOrder() {
+	if s == nil {
+		return
+	}
+	s.poolCandidateMu.Lock()
+	defer s.poolCandidateMu.Unlock()
+	if len(s.poolCandidateOrder) <= 1 {
+		return
+	}
+	sort.SliceStable(s.poolCandidateOrder, func(i, j int) bool {
+		left := s.poolCandidates[s.poolCandidateOrder[i]]
+		right := s.poolCandidates[s.poolCandidateOrder[j]]
+		leftRemaining, leftKnown := authWeeklyRemainingPercent(left)
+		rightRemaining, rightKnown := authWeeklyRemainingPercent(right)
+		if leftKnown != rightKnown {
+			return leftKnown
+		}
+		if leftKnown && rightKnown && leftRemaining != rightRemaining {
+			return leftRemaining > rightRemaining
+		}
+		return s.poolCandidateOrder[i] < s.poolCandidateOrder[j]
+	})
 }
 
 func (s *Service) poolCandidateCounts() (candidateCount, coldCandidateCount int) {
@@ -646,12 +700,12 @@ func (s *Service) placeProbedAuth(ctx context.Context, auth *coreauth.Auth, allo
 		s.applyCoreAuthAddOrUpdate(ctx, auth)
 		return true
 	}
-	if s.replaceFallbackActive(ctx, auth) {
-		return true
-	}
 	if snapshot.ReserveCount < s.poolManager.ReserveTargetSize() {
 		member.PoolState = PoolStateReserve
 		s.setPoolMemberState(member, PoolStateReserve, "fill_reserve")
+		return true
+	}
+	if s.replaceFallbackActive(ctx, auth) {
 		return true
 	}
 	return false
@@ -836,6 +890,7 @@ func (s *Service) nextColdCandidateIDs(limit int) []string {
 	if s == nil || limit <= 0 {
 		return nil
 	}
+	s.resortPoolCandidateOrder()
 	s.poolCandidateMu.Lock()
 	defer s.poolCandidateMu.Unlock()
 	if len(s.poolCandidateOrder) == 0 {
@@ -1124,41 +1179,60 @@ func (s *Service) fillWarmReserveFromColdCandidates(ctx context.Context) {
 		budget = 20
 	}
 	budget += activeDeficit + reserveDeficit + fallbackCount
+	maxBudget := budget * 5
+	if maxBudget < budget {
+		maxBudget = budget
+	}
 
 	sampled := 0
 	healthy := 0
 	unhealthy := 0
-	for _, authID := range s.nextColdCandidateIDs(budget) {
-		auth := s.poolCandidates[authID]
-		if auth == nil {
-			continue
+	for sampled < maxBudget && s.poolNeedsRebalance() {
+		batchLimit := s.cfg.PoolManager.ReserveSampleSize
+		if batchLimit <= 0 {
+			batchLimit = 20
 		}
-		sampled++
-		beforeProbe := auth.Clone()
-		probedAuth, result := poolProbeAuthFunc(coreauth.WithDispositionSource(ctx, "pool_probe"), s.cfg, auth.Clone())
-		if probedAuth != nil {
-			s.storePoolCandidate(probedAuth)
+		remainingBudget := maxBudget - sampled
+		if batchLimit > remainingBudget {
+			batchLimit = remainingBudget
 		}
-		s.recordPoolProbe(PoolStateReserve, beforeProbe, probedAuth, result, "")
-		if result.Success && probedAuth != nil {
-			if s.placeProbedAuth(ctx, probedAuth, true) {
-				healthy++
-			} else {
-				healthy++
-			}
-		} else {
-			unhealthy++
-			if result.Error != nil {
-				switch result.Error.HTTPStatus {
-				case http.StatusTooManyRequests, http.StatusPaymentRequired:
-					s.setPoolMemberState(s.poolMemberForAuth(auth, PoolStateLimit), PoolStateLimit, "cold_candidate_limit")
-				}
-			}
-		}
-		if !s.poolNeedsRebalance() {
+		ids := s.nextColdCandidateIDs(batchLimit)
+		if len(ids) == 0 {
 			break
 		}
+		for _, authID := range ids {
+			auth := s.poolCandidates[authID]
+			if auth == nil {
+				continue
+			}
+			sampled++
+			beforeProbe := auth.Clone()
+			probedAuth, result := poolProbeAuthFunc(coreauth.WithDispositionSource(ctx, "pool_probe"), s.cfg, auth.Clone())
+			if probedAuth != nil {
+				s.storePoolCandidate(probedAuth)
+			}
+			s.recordPoolProbe(PoolStateReserve, beforeProbe, probedAuth, result, "")
+			if result.Success && probedAuth != nil {
+				if s.placeProbedAuth(ctx, probedAuth, true) {
+					healthy++
+				} else {
+					healthy++
+				}
+			} else {
+				unhealthy++
+				if result.Error != nil {
+					switch result.Error.HTTPStatus {
+					case http.StatusTooManyRequests, http.StatusPaymentRequired:
+						s.setPoolMemberState(s.poolMemberForAuth(auth, PoolStateLimit), PoolStateLimit, "cold_candidate_limit")
+					}
+				}
+			}
+			if !s.poolNeedsRebalance() || sampled >= maxBudget {
+				break
+			}
+		}
 	}
+	s.replaceLowQualityActiveFromReserve(ctx, s.poolManager.ReserveTargetSize())
 	if sampled > 0 {
 		candidateCount, coldCandidateCount := s.poolCandidateCounts()
 		log.Infof("pool-manager: cold scan sampled=%d healthy=%d unhealthy=%d candidate_size=%d cold_candidate_size=%d", sampled, healthy, unhealthy, candidateCount, coldCandidateCount)

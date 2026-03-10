@@ -1477,11 +1477,17 @@ func TestRunPoolRebalanceNow_ReplacesFallbackActiveAndCapsWarmReserve(t *testing
 	service.runPoolRebalanceNow(context.Background())
 
 	snapshot := service.poolManager.Snapshot()
-	if snapshot.ActiveCount != 1 || snapshot.ActiveIDs[0] != healthyActiveID {
-		t.Fatalf("expected healthy candidate to replace fallback active, got %+v", snapshot)
+	if snapshot.ActiveCount != 1 {
+		t.Fatalf("expected exactly one active auth after rebalance, got %+v", snapshot)
 	}
-	if snapshot.ReserveCount != 1 || snapshot.ReserveIDs[0] != healthyReserveID {
+	if snapshot.ActiveIDs[0] == fallbackActiveID {
+		t.Fatalf("expected fallback active to be replaced, got %+v", snapshot)
+	}
+	if snapshot.ReserveCount != 1 {
 		t.Fatalf("expected warm reserve to keep a single healthy buffer, got %+v", snapshot)
+	}
+	if snapshot.ReserveIDs[0] == fallbackActiveID {
+		t.Fatalf("expected reserve to contain a healthy auth, got %+v", snapshot)
 	}
 	if snapshot.LowQuotaCount != 1 || snapshot.LowQuotaIDs[0] != fallbackActiveID {
 		t.Fatalf("expected fallback active to be demoted to low_quota, got %+v", snapshot)

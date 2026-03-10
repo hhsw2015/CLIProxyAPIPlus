@@ -314,3 +314,62 @@ func TestRunActiveQuotaRefreshCycle_ReplacesDegradedActiveWithBetterReserve(t *t
 		t.Fatalf("expected degraded active auth %s to move to reserve, got reserve=%v", activeAuth.ID, reserveIDs)
 	}
 }
+
+func TestRunPoolRebalanceNow_PrefersHighQuotaColdCandidatesForReserve(t *testing.T) {
+	originalProbe := poolProbeAuthFunc
+	poolProbeAuthFunc = func(ctx context.Context, cfg *config.Config, auth *coreauth.Auth) (*coreauth.Auth, coreauth.Result) {
+		if auth == nil {
+			return nil, coreauth.Result{Provider: "codex", Success: false}
+		}
+		auth = auth.Clone()
+		return auth, coreauth.Result{
+			AuthID:   auth.ID,
+			Provider: "codex",
+			Model:    "gpt-5",
+			Success:  true,
+		}
+	}
+	t.Cleanup(func() { poolProbeAuthFunc = originalProbe })
+
+	cfg := &config.Config{
+		PoolManager: config.PoolManagerConfig{
+			Size:                     1,
+			Provider:                 "codex",
+			ReserveSampleSize:        1,
+			LowQuotaThresholdPercent: 20,
+		},
+	}
+
+	activeAuth := testCodexAuthWithRemaining("a-1", 70)
+	activeAuth.Status = coreauth.StatusActive
+	low1 := testCodexAuthWithRemaining("c-low-1", 0)
+	low1.Status = coreauth.StatusActive
+	low2 := testCodexAuthWithRemaining("c-low-2", 5)
+	low2.Status = coreauth.StatusActive
+	high := testCodexAuthWithRemaining("c-high", 80)
+	high.Status = coreauth.StatusActive
+
+	service := &Service{
+		cfg:         cfg,
+		poolManager: NewPoolManager(cfg.PoolManager),
+		poolMetrics: NewPoolMetrics(cfg.PoolManager),
+		poolCandidates: map[string]*coreauth.Auth{
+			activeAuth.ID: activeAuth.Clone(),
+			low1.ID:       low1.Clone(),
+			low2.ID:       low2.Clone(),
+			high.ID:       high.Clone(),
+		},
+	}
+	service.poolManager.SetActive(service.poolMemberForAuth(activeAuth, PoolStateActive))
+	service.poolCandidateOrder = []string{low1.ID, low2.ID, high.ID}
+
+	service.runPoolRebalanceNow(context.Background())
+
+	snapshot := service.poolManager.Snapshot()
+	if snapshot.ReserveCount != 1 {
+		t.Fatalf("expected reserve to be filled, got %+v", snapshot)
+	}
+	if !containsString(snapshot.ActiveIDs, high.ID) && !containsString(snapshot.ReserveIDs, high.ID) {
+		t.Fatalf("expected highest quota cold candidate to be pulled into the warm set, got %+v", snapshot)
+	}
+}
