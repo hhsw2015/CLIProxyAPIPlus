@@ -1654,6 +1654,79 @@ func TestRunPoolEvalCycle_LogsWindowDeltas(t *testing.T) {
 	}
 }
 
+func TestLogPoolEvaluation_IncludesCandidateCounts(t *testing.T) {
+	var buf bytes.Buffer
+	oldOutput := log.StandardLogger().Out
+	oldFormatter := log.StandardLogger().Formatter
+	oldLevel := log.GetLevel()
+	log.SetOutput(&buf)
+	log.SetFormatter(&log.TextFormatter{DisableTimestamp: true, DisableColors: true})
+	log.SetLevel(log.InfoLevel)
+	t.Cleanup(func() {
+		log.SetOutput(oldOutput)
+		log.SetFormatter(oldFormatter)
+		log.SetLevel(oldLevel)
+	})
+
+	service := &Service{
+		poolManager:     NewPoolManager(config.PoolManagerConfig{Size: 2, Provider: "codex"}),
+		poolMetrics:     NewPoolMetrics(config.PoolManagerConfig{Size: 2, Provider: "codex"}),
+		publishedActive: map[string]time.Time{},
+		poolCandidates: map[string]*coreauth.Auth{
+			"a-1": {ID: "a-1", Provider: "codex"},
+			"r-1": {ID: "r-1", Provider: "codex"},
+			"c-1": {ID: "c-1", Provider: "codex"},
+		},
+	}
+	service.poolManager.SetActive(PoolMember{AuthID: "a-1", Provider: "codex"})
+	service.poolManager.SetReserve(PoolMember{AuthID: "r-1", Provider: "codex"})
+
+	service.logPoolEvaluation()
+
+	logOutput := buf.String()
+	if !strings.Contains(logOutput, "candidate_size=3") {
+		t.Fatalf("expected candidate_size in pool-eval log, got %q", logOutput)
+	}
+	if !strings.Contains(logOutput, "cold_candidate_size=1") {
+		t.Fatalf("expected cold_candidate_size in pool-eval log, got %q", logOutput)
+	}
+}
+
+func TestSetPoolMemberState_LogsTransitions(t *testing.T) {
+	var buf bytes.Buffer
+	oldOutput := log.StandardLogger().Out
+	oldFormatter := log.StandardLogger().Formatter
+	oldLevel := log.GetLevel()
+	log.SetOutput(&buf)
+	log.SetFormatter(&log.TextFormatter{DisableTimestamp: true, DisableColors: true})
+	log.SetLevel(log.InfoLevel)
+	t.Cleanup(func() {
+		log.SetOutput(oldOutput)
+		log.SetFormatter(oldFormatter)
+		log.SetLevel(oldLevel)
+	})
+
+	service := &Service{
+		poolManager: NewPoolManager(config.PoolManagerConfig{Size: 1, Provider: "codex"}),
+		poolCandidates: map[string]*coreauth.Auth{
+			"cold-1": {ID: "cold-1", Provider: "codex"},
+			"gone-1": {ID: "gone-1", Provider: "codex"},
+		},
+	}
+
+	service.setPoolMemberState(PoolMember{AuthID: "cold-1", Provider: "codex", RemainingPercent: 88}, PoolStateReserve, "probe_ok")
+	service.setPoolMemberState(PoolMember{AuthID: "gone-1", Provider: "codex"}, PoolStateActive, "startup_fill")
+	service.removePoolMember("gone-1", "codex", "deleted")
+
+	logOutput := buf.String()
+	if !strings.Contains(logOutput, "pool-transition: auth=cold-1 provider=codex from=cold to=reserve reason=probe_ok remaining_percent=88") {
+		t.Fatalf("expected cold->reserve transition log, got %q", logOutput)
+	}
+	if !strings.Contains(logOutput, "pool-transition: auth=gone-1 provider=codex from=active to=deleted reason=deleted") {
+		t.Fatalf("expected active->deleted transition log, got %q", logOutput)
+	}
+}
+
 func TestLogPoolUnderfilled_TracksDuration(t *testing.T) {
 	var buf bytes.Buffer
 	oldOutput := log.StandardLogger().Out

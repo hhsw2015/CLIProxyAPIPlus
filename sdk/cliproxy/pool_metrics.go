@@ -9,27 +9,29 @@ import (
 
 // PoolMetricsSnapshot exposes pool runtime counters through management/monitoring endpoints.
 type PoolMetricsSnapshot struct {
-	Enabled              bool                   `json:"enabled"`
-	Provider             string                 `json:"provider"`
-	TargetSize           int                    `json:"target_size"`
-	ActiveCount          int                    `json:"active_count"`
-	ReserveCount         int                    `json:"reserve_count"`
-	LowQuotaCount        int                    `json:"low_quota_count"`
-	LimitCount           int                    `json:"limit_count"`
-	PublishedActiveCount int                    `json:"published_active_count"`
-	Underfilled          bool                   `json:"underfilled"`
-	PromotionsTotal      int64                  `json:"promotions_total"`
-	ActiveRemovedTotal   int64                  `json:"active_removed_total"`
-	RefreshedTotal       int64                  `json:"refreshed_total"`
-	MovedToLimitTotal    int64                  `json:"moved_to_limit_total"`
-	DeletedTotal         int64                  `json:"deleted_total"`
-	RestoredFromLimit    int64                  `json:"restored_from_limit_total"`
-	PublishAddTotal      int64                  `json:"publish_add_total"`
-	PublishModifyTotal   int64                  `json:"publish_modify_total"`
-	PublishDeleteTotal   int64                  `json:"publish_delete_total"`
-	Probes               PoolProbeMetrics       `json:"probes"`
-	LastPublishAt        time.Time              `json:"last_publish_at,omitempty"`
-	LastEventAt          time.Time              `json:"last_event_at,omitempty"`
+	Enabled              bool             `json:"enabled"`
+	Provider             string           `json:"provider"`
+	TargetSize           int              `json:"target_size"`
+	ActiveCount          int              `json:"active_count"`
+	ReserveCount         int              `json:"reserve_count"`
+	LowQuotaCount        int              `json:"low_quota_count"`
+	LimitCount           int              `json:"limit_count"`
+	CandidateCount       int              `json:"candidate_count"`
+	ColdCandidateCount   int              `json:"cold_candidate_count"`
+	PublishedActiveCount int              `json:"published_active_count"`
+	Underfilled          bool             `json:"underfilled"`
+	PromotionsTotal      int64            `json:"promotions_total"`
+	ActiveRemovedTotal   int64            `json:"active_removed_total"`
+	RefreshedTotal       int64            `json:"refreshed_total"`
+	MovedToLimitTotal    int64            `json:"moved_to_limit_total"`
+	DeletedTotal         int64            `json:"deleted_total"`
+	RestoredFromLimit    int64            `json:"restored_from_limit_total"`
+	PublishAddTotal      int64            `json:"publish_add_total"`
+	PublishModifyTotal   int64            `json:"publish_modify_total"`
+	PublishDeleteTotal   int64            `json:"publish_delete_total"`
+	Probes               PoolProbeMetrics `json:"probes"`
+	LastPublishAt        time.Time        `json:"last_publish_at,omitempty"`
+	LastEventAt          time.Time        `json:"last_event_at,omitempty"`
 }
 
 // PoolProbeMetrics aggregates probe counters by bucket and outcome.
