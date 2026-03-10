@@ -474,3 +474,33 @@ func TestFillWarmReserveFromColdCandidates_CapsReserveOnlyBurst(t *testing.T) {
 		t.Fatalf("expected reserve-only refill to honor configured sample size, probeCalls=%d", probeCalls)
 	}
 }
+
+func TestPlaceProbedAuth_DoesNotMakeFreshActiveImmediatelyProbeDue(t *testing.T) {
+	cfg := &config.Config{
+		PoolManager: config.PoolManagerConfig{
+			Size:                          1,
+			Provider:                      "codex",
+			ActiveIdleScanIntervalSeconds: 1800,
+			LowQuotaThresholdPercent:      20,
+		},
+	}
+
+	auth := testCodexAuthWithRemaining("a-1", 70)
+	auth.Status = coreauth.StatusActive
+
+	service := &Service{
+		cfg:            cfg,
+		poolManager:    NewPoolManager(cfg.PoolManager),
+		poolCandidates: map[string]*coreauth.Auth{auth.ID: auth.Clone()},
+	}
+
+	placed := service.placeProbedAuth(context.Background(), auth, true)
+	if !placed {
+		t.Fatal("expected auth to be placed into active")
+	}
+
+	due := service.poolManager.DueActiveProbeIDs(time.Now(), 30*time.Minute)
+	if containsString(due, auth.ID) {
+		t.Fatalf("expected freshly placed active auth to avoid immediate reprobe, due=%v", due)
+	}
+}
