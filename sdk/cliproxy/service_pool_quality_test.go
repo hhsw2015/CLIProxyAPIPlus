@@ -136,3 +136,74 @@ func TestRunActiveProbeCycle_UpdatesActiveRemainingPercent(t *testing.T) {
 		t.Fatalf("RemainingPercent=%d, want 10", member.RemainingPercent)
 	}
 }
+
+func TestRunActiveQuotaRefreshCycle_ProbesEvenWhenLastSuccessFresh(t *testing.T) {
+	originalProbe := poolProbeAuthFunc
+	probeCalls := 0
+	poolProbeAuthFunc = func(ctx context.Context, cfg *config.Config, auth *coreauth.Auth) (*coreauth.Auth, coreauth.Result) {
+		probeCalls++
+		if auth == nil {
+			return nil, coreauth.Result{Provider: "codex", Success: false}
+		}
+		auth = auth.Clone()
+		if auth.Metadata == nil {
+			auth.Metadata = make(map[string]any)
+		}
+		auth.Metadata[poolQuotaWeeklyRemainingPercentKey] = 10
+		return auth, coreauth.Result{
+			AuthID:   auth.ID,
+			Provider: "codex",
+			Model:    "gpt-5",
+			Success:  true,
+		}
+	}
+	t.Cleanup(func() { poolProbeAuthFunc = originalProbe })
+
+	cfg := &config.Config{
+		PoolManager: config.PoolManagerConfig{
+			Size:                          1,
+			Provider:                      "codex",
+			ActiveIdleScanIntervalSeconds: 1800,
+			LowQuotaThresholdPercent:      20,
+			ActiveQuotaRefreshIntervalSeconds: 60,
+			ActiveQuotaRefreshSampleSize:      1,
+		},
+	}
+
+	coreManager := coreauth.NewManager(nil, &coreauth.RoundRobinSelector{}, nil)
+	coreManager.SetConfig(cfg)
+	auth := testCodexAuthWithRemaining("a-1", 50)
+	auth.Status = coreauth.StatusActive
+	if _, err := coreManager.Register(coreauth.WithSkipPersist(context.Background()), auth); err != nil {
+		t.Fatalf("register core auth: %v", err)
+	}
+
+	service := &Service{
+		cfg:            cfg,
+		coreManager:    coreManager,
+		poolManager:    NewPoolManager(cfg.PoolManager),
+		poolCandidates: map[string]*coreauth.Auth{auth.ID: auth.Clone()},
+	}
+	service.setPoolMemberState(service.poolMemberForAuth(auth, PoolStateActive), PoolStateActive, "seed")
+
+	now := time.Unix(1_700_000_100, 0).UTC()
+	service.poolManager.RecordRequest(auth.ID, true, now)
+
+	service.runActiveQuotaRefreshCycle(context.Background(), now)
+
+	member, ok := service.poolManager.LastSeenMember(auth.ID)
+	if !ok {
+		t.Fatalf("expected pool member for %s", auth.ID)
+	}
+	if member.RemainingPercent != 10 {
+		t.Fatalf("RemainingPercent=%d, want 10", member.RemainingPercent)
+	}
+	if probeCalls != 1 {
+		t.Fatalf("probeCalls=%d, want 1", probeCalls)
+	}
+
+	service.runActiveQuotaRefreshCycle(context.Background(), now.Add(10*time.Second))
+	if probeCalls != 1 {
+		t.Fatalf("second refresh should be throttled, probeCalls=%d, want 1", probeCalls)
+	}
+}

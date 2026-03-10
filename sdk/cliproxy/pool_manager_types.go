@@ -14,18 +14,21 @@ const (
 
 // PoolMember stores the runtime pool tracking information for an auth.
 type PoolMember struct {
-	AuthID              string
-	Provider            string
-	PoolState           PoolState
-	RemainingPercent    int
-	LastSelectedAt      time.Time
-	LastSuccessAt       time.Time
-	LastProbeAt         time.Time
-	NextProbeAt         time.Time
-	ProtectedUntil      time.Time
-	InFlightCount       int
-	ConsecutiveFailures int
-	LastProbeReason     string
+	AuthID               string
+	Provider             string
+	PoolState            PoolState
+	RemainingPercent     int
+	LastSelectedAt       time.Time
+	LastSuccessAt        time.Time
+	LastProbeAt          time.Time
+	NextProbeAt          time.Time
+	LastQuotaProbeAt     time.Time
+	NextQuotaProbeAt     time.Time
+	ProtectedUntil       time.Time
+	InFlightCount        int
+	ConsecutiveFailures  int
+	LastProbeReason      string
+	LastQuotaProbeReason string
 }
 
 // AuthDisposition describes the final post-processing outcome for a credential.
