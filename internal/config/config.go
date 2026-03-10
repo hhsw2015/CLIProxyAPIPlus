@@ -226,6 +226,10 @@ type PoolManagerConfig struct {
 	ActiveQuotaRefreshIntervalSeconds int `yaml:"active-quota-refresh-interval-seconds,omitempty" json:"active-quota-refresh-interval-seconds,omitempty"`
 	// ActiveQuotaRefreshSampleSize controls how many active auths are sampled per quota refresh cycle.
 	ActiveQuotaRefreshSampleSize int `yaml:"active-quota-refresh-sample-size,omitempty" json:"active-quota-refresh-sample-size,omitempty"`
+	// BackgroundProbeBudgetWindowSeconds controls the shared budgeting window for all background probes.
+	BackgroundProbeBudgetWindowSeconds int `yaml:"background-probe-budget-window-seconds,omitempty" json:"background-probe-budget-window-seconds,omitempty"`
+	// BackgroundProbeBudgetMax controls the maximum number of background probes allowed per budget window.
+	BackgroundProbeBudgetMax int `yaml:"background-probe-budget-max,omitempty" json:"background-probe-budget-max,omitempty"`
 }
 
 // OAuthModelAlias defines a model ID alias for a specific channel.

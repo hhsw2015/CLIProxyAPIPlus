@@ -504,3 +504,67 @@ func TestPlaceProbedAuth_DoesNotMakeFreshActiveImmediatelyProbeDue(t *testing.T)
 		t.Fatalf("expected freshly placed active auth to avoid immediate reprobe, due=%v", due)
 	}
 }
+
+func TestBackgroundProbeBudget_SharedAcrossLoops(t *testing.T) {
+	originalProbe := poolProbeAuthFunc
+	probeCalls := 0
+	poolProbeAuthFunc = func(ctx context.Context, cfg *config.Config, auth *coreauth.Auth) (*coreauth.Auth, coreauth.Result) {
+		probeCalls++
+		if auth == nil {
+			return nil, coreauth.Result{Provider: "codex", Success: false}
+		}
+		auth = auth.Clone()
+		return auth, coreauth.Result{
+			AuthID:   auth.ID,
+			Provider: "codex",
+			Model:    "gpt-5",
+			Success:  true,
+		}
+	}
+	t.Cleanup(func() { poolProbeAuthFunc = originalProbe })
+
+	cfg := &config.Config{
+		PoolManager: config.PoolManagerConfig{
+			Size:                               1,
+			Provider:                           "codex",
+			ActiveIdleScanIntervalSeconds:      1,
+			ReserveScanIntervalSeconds:         1,
+			ReserveSampleSize:                  1,
+			LowQuotaThresholdPercent:           20,
+			BackgroundProbeBudgetWindowSeconds: 60,
+			BackgroundProbeBudgetMax:           1,
+		},
+	}
+
+	activeAuth := testCodexAuthWithRemaining("a-1", 70)
+	activeAuth.Status = coreauth.StatusActive
+	reserveAuth := testCodexAuthWithRemaining("r-1", 80)
+	reserveAuth.Status = coreauth.StatusActive
+
+	coreManager := coreauth.NewManager(nil, &coreauth.RoundRobinSelector{}, nil)
+	coreManager.SetConfig(cfg)
+	if _, err := coreManager.Register(coreauth.WithSkipPersist(context.Background()), activeAuth); err != nil {
+		t.Fatalf("register active auth: %v", err)
+	}
+
+	service := &Service{
+		cfg:         cfg,
+		coreManager: coreManager,
+		poolManager: NewPoolManager(cfg.PoolManager),
+		poolMetrics: NewPoolMetrics(cfg.PoolManager),
+		poolCandidates: map[string]*coreauth.Auth{
+			activeAuth.ID:  activeAuth.Clone(),
+			reserveAuth.ID: reserveAuth.Clone(),
+		},
+	}
+	service.setPoolMemberState(service.poolMemberForAuth(activeAuth, PoolStateActive), PoolStateActive, "seed")
+	service.setPoolMemberState(service.poolMemberForAuth(reserveAuth, PoolStateReserve), PoolStateReserve, "seed")
+
+	now := time.Unix(1_700_000_300, 0).UTC()
+	service.runActiveProbeCycle(context.Background(), now)
+	service.runReserveProbeCycle(context.Background(), now)
+
+	if probeCalls != 1 {
+		t.Fatalf("expected shared budget to allow only one background probe, probeCalls=%d", probeCalls)
+	}
+}
