@@ -1776,7 +1776,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 			authSnapshot = auth.Clone()
 			emitDisposition = true
 		} else {
-			disposition.Deleted = archiveKind == util.FailedAuthArchiveInvalid
+			disposition.Deleted = archiveKind == util.FailedAuthArchiveDelete
 			disposition.MovedToLimit = archiveKind == util.FailedAuthArchiveLimit
 			disposition.Healthy = false
 			disposition.PoolEligible = false
@@ -1835,7 +1835,7 @@ func (m *Manager) archiveAuthFileAsync(ctx context.Context, authID, archivePath 
 		entry.WithError(err).Warnf("failed to handle auth %s after %s failure", authID, archiveKind)
 		return
 	}
-	if archiveKind == util.FailedAuthArchiveInvalid {
+	if archiveKind == util.FailedAuthArchiveDelete {
 		entry.Infof("deleted auth %s after %s failure", authID, archiveKind)
 		return
 	}
@@ -1928,7 +1928,7 @@ func classifyFailedAuthArchive(resultErr *Error) (util.FailedAuthArchiveKind, bo
 		return util.FailedAuthArchiveLimit, true
 	}
 	if isInvalidArchiveFailure(status, message) {
-		return util.FailedAuthArchiveInvalid, true
+		return util.FailedAuthArchiveDelete, true
 	}
 	return "", false
 }
@@ -2046,7 +2046,7 @@ func (m *Manager) archiveAuthFile(sourcePath string, kind util.FailedAuthArchive
 	if err != nil {
 		return "", err
 	}
-	if kind == util.FailedAuthArchiveInvalid {
+	if kind == util.FailedAuthArchiveDelete {
 		if !filepath.IsAbs(sourcePath) {
 			sourcePath = filepath.Join(authDir, sourcePath)
 		}

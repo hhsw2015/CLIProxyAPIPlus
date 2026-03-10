@@ -5,9 +5,12 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
+	sdkAuth "github.com/router-for-me/CLIProxyAPI/v6/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
 )
@@ -105,5 +108,37 @@ func TestProbeCodexUsageWithURL_ParsesRetryAfter(t *testing.T) {
 	}
 	if result.RetryAfter == nil || *result.RetryAfter <= 0 {
 		t.Fatalf("expected positive RetryAfter, got %+v", result.RetryAfter)
+	}
+}
+
+func TestPersistPoolProbeAuthSuppressesWatcherEcho(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	store := sdkAuth.NewFileTokenStore()
+	store.SetBaseDir(tmpDir)
+
+	originalStore := sdkAuth.GetTokenStore()
+	sdkAuth.RegisterTokenStore(store)
+	t.Cleanup(func() { sdkAuth.RegisterTokenStore(originalStore) })
+
+	path := filepath.Join(tmpDir, "pool.json")
+	auth := &coreauth.Auth{
+		ID:       "pool.json",
+		FileName: "pool.json",
+		Provider: "codex",
+		Metadata: map[string]any{
+			"type":         "codex",
+			"access_token": "access-token",
+		},
+		Attributes: map[string]string{
+			"path": path,
+		},
+	}
+
+	persistPoolProbeAuth(&config.Config{AuthDir: tmpDir}, auth)
+
+	if !util.ShouldSuppressAuthPathEvent(path) {
+		t.Fatalf("expected pool probe persist to suppress watcher echo for %s", path)
 	}
 }
