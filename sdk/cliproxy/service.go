@@ -600,24 +600,88 @@ func (s *Service) replaceFallbackActive(ctx context.Context, auth *coreauth.Auth
 	}
 	threshold := s.poolManager.LowQuotaThresholdPercent()
 	fallbacks := s.poolManager.ActiveFallbackIDs(threshold)
-	if len(fallbacks) == 0 {
-		return false
-	}
 	candidateMember := s.poolMemberForAuth(auth, PoolStateActive)
 	candidateRemaining := candidateMember.RemainingPercent
-	worstID := fallbacks[0]
-	worstMember, ok := s.poolManager.LastSeenMember(worstID)
-	if !ok {
+	candidateKnown := candidateRemaining >= 0 && candidateRemaining <= 100
+
+	if len(fallbacks) > 0 {
+		worstID := fallbacks[0]
+		worstMember, ok := s.poolManager.LastSeenMember(worstID)
+		if !ok {
+			return false
+		}
+		candidateComparable := candidateRemaining
+		if !candidateKnown {
+			candidateComparable = poolUnknownRemainingPercent
+		}
+		if worstMember.RemainingPercent >= 0 && candidateComparable <= worstMember.RemainingPercent {
+			return false
+		}
+		s.setPoolMemberState(worstMember, PoolStateLowQuota, "replace_fallback_active")
+		s.setPoolMemberState(candidateMember, PoolStateActive, "replace_fallback_active")
+		s.applyCoreAuthAddOrUpdate(ctx, auth)
+		s.syncPoolActiveToRuntime(ctx)
+		log.Infof("pool-manager: replaced fallback active old=%s old_remaining=%d new=%s new_remaining=%d", worstID, worstMember.RemainingPercent, auth.ID, candidateComparable)
+		return true
+	}
+
+	if !candidateKnown {
 		return false
 	}
-	if worstMember.RemainingPercent >= 0 && candidateRemaining <= worstMember.RemainingPercent {
+	if candidateRemaining <= threshold {
 		return false
 	}
-	worstMember.PoolState = PoolStateLowQuota
-	s.setPoolMemberState(worstMember, PoolStateLowQuota, "replace_fallback_active")
-	s.setPoolMemberState(candidateMember, PoolStateActive, "replace_fallback_active")
+
+	snapshot := s.poolManager.Snapshot()
+	if snapshot.ActiveCount < snapshot.TargetSize {
+		return false
+	}
+
+	now := time.Now()
+	worstID := ""
+	var worstMember PoolMember
+	worstRemaining := 101
+	for _, id := range snapshot.ActiveIDs {
+		member, ok := s.poolManager.LastSeenMember(id)
+		if !ok {
+			continue
+		}
+		if member.InFlightCount > 0 {
+			continue
+		}
+		if !member.ProtectedUntil.IsZero() && member.ProtectedUntil.After(now) {
+			continue
+		}
+		remaining := member.RemainingPercent
+		if remaining < 0 || remaining > 100 {
+			remaining = -1
+		}
+		if worstID == "" || remaining < worstRemaining || (remaining == worstRemaining && member.AuthID < worstID) {
+			worstID = member.AuthID
+			worstMember = member
+			worstRemaining = remaining
+		}
+	}
+	if worstID == "" {
+		return false
+	}
+	if strings.TrimSpace(worstID) == strings.TrimSpace(auth.ID) {
+		return false
+	}
+	if candidateRemaining <= worstRemaining {
+		return false
+	}
+
+	demoteState := PoolStateReserve
+	if worstRemaining >= 0 && worstRemaining <= threshold {
+		demoteState = PoolStateLowQuota
+	}
+
+	s.setPoolMemberState(worstMember, demoteState, "replace_low_quality_active")
+	s.setPoolMemberState(candidateMember, PoolStateActive, "replace_low_quality_active")
 	s.applyCoreAuthAddOrUpdate(ctx, auth)
-	log.Infof("pool-manager: replaced fallback active old=%s old_remaining=%d new=%s new_remaining=%d", worstID, worstMember.RemainingPercent, auth.ID, candidateRemaining)
+	s.syncPoolActiveToRuntime(ctx)
+	log.Infof("pool-manager: replaced active old=%s old_remaining=%d new=%s new_remaining=%d", worstID, worstMember.RemainingPercent, auth.ID, candidateRemaining)
 	return true
 }
 
@@ -1133,6 +1197,7 @@ func (s *Service) runActiveProbeCycle(ctx context.Context, now time.Time) {
 		}
 		if result.Success && probedAuth != nil {
 			s.storePoolCandidate(probedAuth)
+			s.setPoolMemberState(s.poolMemberForAuth(probedAuth, PoolStateActive), PoolStateActive, "active_probe_ok")
 		}
 		if result.Success && probedAuth != nil && authIsLowQuota(probedAuth, s.poolManager.LowQuotaThresholdPercent()) && s.shouldDemoteLowQuotaActive() {
 			if s.poolMetrics != nil {
