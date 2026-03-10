@@ -1113,6 +1113,22 @@ func (s *Service) startPoolProbeLoops(parent context.Context) {
 		}
 	}()
 
+	if interval := time.Duration(s.cfg.PoolManager.ActiveQuotaRefreshIntervalSeconds) * time.Second; interval > 0 && s.cfg.PoolManager.ActiveQuotaRefreshSampleSize > 0 {
+		go func() {
+			ticker := time.NewTicker(interval)
+			defer ticker.Stop()
+			s.runActiveQuotaRefreshCycle(ctx, time.Now())
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case now := <-ticker.C:
+					s.runActiveQuotaRefreshCycle(ctx, now)
+				}
+			}
+		}()
+	}
+
 	if interval := time.Duration(s.cfg.PoolManager.ReserveScanIntervalSeconds) * time.Second; interval > 0 {
 		go func() {
 			ticker := time.NewTicker(interval)
@@ -1220,6 +1236,80 @@ func (s *Service) runActiveProbeCycle(ctx context.Context, now time.Time) {
 	if s.poolNeedsRebalance() {
 		s.schedulePoolRebalance()
 	}
+}
+
+func (s *Service) runActiveQuotaRefreshCycle(ctx context.Context, now time.Time) {
+	if s == nil || s.poolManager == nil || s.cfg == nil || !s.poolManager.Enabled() {
+		return
+	}
+	interval := time.Duration(s.cfg.PoolManager.ActiveQuotaRefreshIntervalSeconds) * time.Second
+	if interval <= 0 {
+		return
+	}
+	sampleSize := s.cfg.PoolManager.ActiveQuotaRefreshSampleSize
+	if sampleSize <= 0 {
+		return
+	}
+
+	sampled := 0
+	healthy := 0
+	unhealthy := 0
+	for _, authID := range s.poolManager.DueActiveQuotaProbeIDs(now, interval, sampleSize) {
+		sampled++
+		auth, ok := s.coreManager.GetByID(authID)
+		if !ok || auth == nil {
+			provider := ""
+			if member, okMember := s.poolManager.LastSeenMember(authID); okMember {
+				provider = member.Provider
+			}
+			s.removePoolMember(authID, provider, "active_missing")
+			continue
+		}
+		probeCtx := coreauth.WithDispositionSource(ctx, "pool_probe")
+		beforeProbe := auth.Clone()
+		probedAuth, result := poolProbeAuthFunc(probeCtx, s.cfg, auth)
+		if probedAuth != nil {
+			s.poolCandidates[probedAuth.ID] = probedAuth.Clone()
+			if result.Success {
+				s.applyCoreAuthAddOrUpdate(coreauth.WithSkipPersist(probeCtx), probedAuth)
+			}
+		}
+		s.recordPoolProbe(PoolStateActive, beforeProbe, probedAuth, result, "")
+		reason := ""
+		if result.Error != nil {
+			reason = result.Error.Code
+		}
+		s.poolManager.MarkQuotaProbe(authID, now, now.Add(interval), result.Success, reason)
+		if s.coreManager != nil {
+			s.coreManager.MarkResult(coreauth.WithSkipPersist(probeCtx), result)
+		}
+		if result.Success && probedAuth != nil {
+			s.storePoolCandidate(probedAuth)
+			s.setPoolMemberState(s.poolMemberForAuth(probedAuth, PoolStateActive), PoolStateActive, "active_quota_refresh_ok")
+		}
+		if result.Success && probedAuth != nil && authIsLowQuota(probedAuth, s.poolManager.LowQuotaThresholdPercent()) && s.shouldDemoteLowQuotaActive() {
+			if s.poolMetrics != nil {
+				s.poolMetrics.RecordActiveRemoval()
+			}
+			s.setPoolMemberState(s.poolMemberForAuth(probedAuth, PoolStateLowQuota), PoolStateLowQuota, "active_quota_refresh_low_quota")
+			log.Infof("pool-manager: active demoted auth=%s reason=low_quota remaining_percent=%d threshold=%d", probedAuth.ID, mustWeeklyRemainingPercent(probedAuth), s.poolManager.LowQuotaThresholdPercent())
+			s.syncPoolActiveToRuntime(ctx)
+			s.schedulePoolRebalance()
+		}
+		if result.Success {
+			healthy++
+		} else {
+			unhealthy++
+		}
+	}
+
+	if sampled > 0 {
+		log.Infof("pool-manager: active quota refresh sampled=%d healthy=%d unhealthy=%d", sampled, healthy, unhealthy)
+	}
+	if s.poolNeedsRebalance() {
+		s.schedulePoolRebalance()
+	}
+	s.syncPoolActiveToRuntime(ctx)
 }
 
 func (s *Service) runReserveProbeCycle(ctx context.Context, now time.Time) {

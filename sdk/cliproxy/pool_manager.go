@@ -524,6 +524,44 @@ func (p *PoolManager) MarkProbe(authID string, now time.Time, next time.Time, su
 	}
 }
 
+// MarkQuotaProbe records a quota-refresh probe result and schedules the next quota probe time.
+func (p *PoolManager) MarkQuotaProbe(authID string, now time.Time, next time.Time, success bool, reason string) {
+	if p == nil {
+		return
+	}
+	authID = strings.TrimSpace(authID)
+	if authID == "" {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	member := p.lastSeen[authID]
+	if member == nil {
+		return
+	}
+	member.LastQuotaProbeAt = now
+	member.NextQuotaProbeAt = next
+	member.LastQuotaProbeReason = strings.TrimSpace(reason)
+	if success {
+		member.ConsecutiveFailures = 0
+		member.LastSuccessAt = now
+	} else {
+		member.ConsecutiveFailures++
+	}
+	if active := p.active[authID]; active != nil {
+		*active = *member
+	}
+	if reserve := p.reserve[authID]; reserve != nil {
+		*reserve = *member
+	}
+	if lowQuota := p.lowQuota[authID]; lowQuota != nil {
+		*lowQuota = *member
+	}
+	if limit := p.limit[authID]; limit != nil {
+		*limit = *member
+	}
+}
+
 // DueActiveProbeIDs returns active auth IDs due for idle health probing.
 func (p *PoolManager) DueActiveProbeIDs(now time.Time, interval time.Duration) []string {
 	if p == nil || interval <= 0 {
@@ -549,6 +587,43 @@ func (p *PoolManager) DueActiveProbeIDs(now time.Time, interval time.Duration) [
 			continue
 		}
 		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	return ids
+}
+
+// DueActiveQuotaProbeIDs returns up to sampleSize active auth IDs due for quota refresh probing.
+// Unlike DueActiveProbeIDs, this ignores LastSuccessAt and relies on NextQuotaProbeAt only.
+func (p *PoolManager) DueActiveQuotaProbeIDs(now time.Time, interval time.Duration, sampleSize int) []string {
+	if p == nil || interval <= 0 || sampleSize <= 0 {
+		return nil
+	}
+	p.mu.RLock()
+	ids := make([]string, 0, len(p.active))
+	for id, member := range p.active {
+		if member == nil {
+			continue
+		}
+		if member.InFlightCount > 0 {
+			continue
+		}
+		if !member.ProtectedUntil.IsZero() && member.ProtectedUntil.After(now) {
+			continue
+		}
+		if !member.NextQuotaProbeAt.IsZero() && member.NextQuotaProbeAt.After(now) {
+			continue
+		}
+		ids = append(ids, id)
+	}
+	p.mu.RUnlock()
+
+	if len(ids) == 0 {
+		return nil
+	}
+	sort.Strings(ids)
+	poolShuffleStringsFunc(ids)
+	if len(ids) > sampleSize {
+		ids = ids[:sampleSize]
 	}
 	sort.Strings(ids)
 	return ids

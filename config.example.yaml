@@ -97,6 +97,10 @@ archive-failed-auth: false
 #   size: 100
 #   provider: "codex"
 #   active-idle-scan-interval-seconds: 1800
+#   # Optional: sample active auths to refresh quota metadata even when recently used.
+#   # Controls how quickly active quota info converges (probe traffic increases accordingly).
+#   active-quota-refresh-interval-seconds: 60
+#   active-quota-refresh-sample-size: 10
 #   reserve-scan-interval-seconds: 300
 #   limit-scan-interval-seconds: 21600
 #   reserve-sample-size: 20

@@ -222,6 +222,10 @@ type PoolManagerConfig struct {
 	ReserveSampleSize int `yaml:"reserve-sample-size,omitempty" json:"reserve-sample-size,omitempty"`
 	// LowQuotaThresholdPercent marks auths as low-quota when weekly remaining percent is <= this threshold.
 	LowQuotaThresholdPercent int `yaml:"low-quota-threshold-percent,omitempty" json:"low-quota-threshold-percent,omitempty"`
+	// ActiveQuotaRefreshIntervalSeconds controls how often active auths are sampled for quota refresh.
+	ActiveQuotaRefreshIntervalSeconds int `yaml:"active-quota-refresh-interval-seconds,omitempty" json:"active-quota-refresh-interval-seconds,omitempty"`
+	// ActiveQuotaRefreshSampleSize controls how many active auths are sampled per quota refresh cycle.
+	ActiveQuotaRefreshSampleSize int `yaml:"active-quota-refresh-sample-size,omitempty" json:"active-quota-refresh-sample-size,omitempty"`
 }
 
 // OAuthModelAlias defines a model ID alias for a specific channel.
