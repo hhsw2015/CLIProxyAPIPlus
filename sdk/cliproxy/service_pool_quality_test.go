@@ -420,3 +420,57 @@ func TestSyncPoolActiveToRuntime_SkipsModifyOnlyPublish(t *testing.T) {
 		t.Fatalf("expected modify-only sync to be skipped, got %q", logOutput)
 	}
 }
+
+func TestFillWarmReserveFromColdCandidates_CapsReserveOnlyBurst(t *testing.T) {
+	originalProbe := poolProbeAuthFunc
+	probeCalls := 0
+	poolProbeAuthFunc = func(ctx context.Context, cfg *config.Config, auth *coreauth.Auth) (*coreauth.Auth, coreauth.Result) {
+		probeCalls++
+		if auth == nil {
+			return nil, coreauth.Result{Provider: "codex", Success: false}
+		}
+		auth = auth.Clone()
+		return auth, coreauth.Result{
+			AuthID:   auth.ID,
+			Provider: "codex",
+			Model:    "gpt-5",
+			Success:  true,
+		}
+	}
+	t.Cleanup(func() { poolProbeAuthFunc = originalProbe })
+
+	cfg := &config.Config{
+		PoolManager: config.PoolManagerConfig{
+			Size:                     1,
+			Provider:                 "codex",
+			ReserveSampleSize:        1,
+			LowQuotaThresholdPercent: 20,
+		},
+	}
+
+	activeAuth := testCodexAuthWithRemaining("a-1", 70)
+	activeAuth.Status = coreauth.StatusActive
+	low1 := testCodexAuthWithRemaining("c-low-1", 0)
+	low1.Status = coreauth.StatusActive
+	low2 := testCodexAuthWithRemaining("c-low-2", 5)
+	low2.Status = coreauth.StatusActive
+
+	service := &Service{
+		cfg:         cfg,
+		poolManager: NewPoolManager(cfg.PoolManager),
+		poolMetrics: NewPoolMetrics(cfg.PoolManager),
+		poolCandidates: map[string]*coreauth.Auth{
+			activeAuth.ID: activeAuth.Clone(),
+			low1.ID:       low1.Clone(),
+			low2.ID:       low2.Clone(),
+		},
+	}
+	service.poolManager.SetActive(service.poolMemberForAuth(activeAuth, PoolStateActive))
+	service.poolCandidateOrder = []string{low1.ID, low2.ID}
+
+	service.fillWarmReserveFromColdCandidates(context.Background())
+
+	if probeCalls != 1 {
+		t.Fatalf("expected reserve-only refill to honor configured sample size, probeCalls=%d", probeCalls)
+	}
+}

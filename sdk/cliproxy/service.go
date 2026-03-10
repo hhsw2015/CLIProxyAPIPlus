@@ -1169,10 +1169,13 @@ func (s *Service) fillWarmReserveFromColdCandidates(ctx context.Context) {
 	if budget <= 0 {
 		budget = 20
 	}
-	budget += activeDeficit + reserveDeficit + fallbackCount
-	maxBudget := budget * 5
-	if maxBudget < budget {
-		maxBudget = budget
+	maxBudget := budget
+	if activeDeficit > 0 || fallbackCount > 0 {
+		budget += activeDeficit + reserveDeficit + fallbackCount
+		maxBudget = budget * 5
+		if maxBudget < budget {
+			maxBudget = budget
+		}
 	}
 
 	sampled := 0
