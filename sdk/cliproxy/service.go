@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -531,6 +532,68 @@ func (s *Service) removePoolMember(authID, provider, reason string) {
 	s.logPoolTransition(authID, provider, fromState, poolStateDeleted, reason, -1)
 }
 
+func (s *Service) trimActiveOverflow() int {
+	if s == nil || s.poolManager == nil {
+		return 0
+	}
+	snapshot := s.poolManager.Snapshot()
+	overflow := snapshot.ActiveCount - snapshot.TargetSize
+	if overflow <= 0 {
+		return 0
+	}
+
+	now := time.Now()
+	threshold := s.poolManager.LowQuotaThresholdPercent()
+	type candidate struct {
+		member     PoolMember
+		comparable int
+	}
+
+	candidates := make([]candidate, 0, snapshot.ActiveCount)
+	for _, authID := range snapshot.ActiveIDs {
+		member, ok := s.poolManager.LastSeenMember(authID)
+		if !ok {
+			continue
+		}
+		if member.InFlightCount > 0 {
+			continue
+		}
+		if !member.ProtectedUntil.IsZero() && member.ProtectedUntil.After(now) {
+			continue
+		}
+		comparable := member.RemainingPercent
+		if comparable < 0 || comparable > 100 {
+			comparable = -1
+		}
+		candidates = append(candidates, candidate{member: member, comparable: comparable})
+	}
+
+	sort.Slice(candidates, func(i, j int) bool {
+		if candidates[i].comparable == candidates[j].comparable {
+			return candidates[i].member.AuthID < candidates[j].member.AuthID
+		}
+		return candidates[i].comparable < candidates[j].comparable
+	})
+
+	trimmed := 0
+	for _, item := range candidates {
+		if trimmed >= overflow {
+			break
+		}
+		demoteState := PoolStateReserve
+		if item.comparable >= 0 && item.comparable <= threshold {
+			demoteState = PoolStateLowQuota
+		}
+		s.setPoolMemberState(item.member, demoteState, "trim_active_overflow")
+		trimmed++
+	}
+
+	if trimmed > 0 {
+		log.Infof("pool-manager: trimmed active overflow trimmed=%d target=%d active_after=%d", trimmed, snapshot.TargetSize, s.poolManager.Snapshot().ActiveCount)
+	}
+	return trimmed
+}
+
 func (s *Service) poolMemberForAuth(auth *coreauth.Auth, state PoolState) PoolMember {
 	member := PoolMember{}
 	if auth != nil {
@@ -752,6 +815,7 @@ func (s *Service) syncPoolActiveToRuntime(ctx context.Context) {
 		ctx = context.Background()
 	}
 	ctx = coreauth.WithSkipPersist(ctx)
+	s.trimActiveOverflow()
 
 	added, modified, removed := s.poolManager.ActiveDiff(s.publishedActive)
 	for _, id := range added {
