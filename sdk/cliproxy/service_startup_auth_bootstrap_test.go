@@ -558,7 +558,7 @@ func TestServiceRunBootstrapsPoolStartupSkipsUnhealthyRootCandidate(t *testing.T
 	for time.Now().Before(deadline) {
 		if service.poolManager != nil {
 			snapshot := service.poolManager.Snapshot()
-			if snapshot.ActiveCount == 1 && snapshot.LowQuotaCount == 1 {
+			if snapshot.ActiveCount == 1 && snapshot.LimitCount == 1 {
 				break
 			}
 		}
