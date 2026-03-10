@@ -957,21 +957,12 @@ func (s *Service) syncPoolActiveToRuntime(ctx context.Context) {
 	s.trimActiveOverflow()
 
 	added, modified, removed := s.poolManager.ActiveDiff(s.publishedActive)
+	modified = nil
 	for _, id := range added {
 		if auth := s.poolCandidates[id]; auth != nil {
 			log.Infof("pool-publish: add auth=%s provider=%s", id, auth.Provider)
 			s.emitAuthUpdate(ctx, watcher.AuthUpdate{
 				Action: watcher.AuthUpdateActionAdd,
-				ID:     id,
-				Auth:   auth.Clone(),
-			})
-		}
-	}
-	for _, id := range modified {
-		if auth := s.poolCandidates[id]; auth != nil {
-			log.Infof("pool-publish: modify auth=%s provider=%s", id, auth.Provider)
-			s.emitAuthUpdate(ctx, watcher.AuthUpdate{
-				Action: watcher.AuthUpdateActionModify,
 				ID:     id,
 				Auth:   auth.Clone(),
 			})
