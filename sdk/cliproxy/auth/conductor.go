@@ -2663,8 +2663,32 @@ func (m *Manager) persist(ctx context.Context, auth *Auth) error {
 	if auth.Metadata == nil {
 		return nil
 	}
-	_, err := m.store.Save(ctx, auth)
+	if path := authPathForPersistenceSuppression(auth); path != "" {
+		util.SuppressAuthPathEvent(path, 2*time.Second)
+	}
+	path, err := m.store.Save(ctx, auth)
+	if err == nil && strings.TrimSpace(path) != "" {
+		util.SuppressAuthPathEvent(path, 2*time.Second)
+	}
 	return err
+}
+
+func authPathForPersistenceSuppression(auth *Auth) string {
+	if auth == nil {
+		return ""
+	}
+	if auth.Attributes != nil {
+		if path := strings.TrimSpace(auth.Attributes["path"]); path != "" {
+			return path
+		}
+	}
+	if fileName := strings.TrimSpace(auth.FileName); fileName != "" {
+		return fileName
+	}
+	if id := strings.TrimSpace(auth.ID); filepath.IsAbs(id) {
+		return id
+	}
+	return ""
 }
 
 // StartAutoRefresh launches a background loop that evaluates auth freshness

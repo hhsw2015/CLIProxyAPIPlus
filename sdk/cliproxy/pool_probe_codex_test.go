@@ -142,3 +142,32 @@ func TestPersistPoolProbeAuthSuppressesWatcherEcho(t *testing.T) {
 		t.Fatalf("expected pool probe persist to suppress watcher echo for %s", path)
 	}
 }
+
+func TestPersistPoolProbeAuthSuppressesWatcherEchoWithoutAttributes(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	store := sdkAuth.NewFileTokenStore()
+	store.SetBaseDir(tmpDir)
+
+	originalStore := sdkAuth.GetTokenStore()
+	sdkAuth.RegisterTokenStore(store)
+	t.Cleanup(func() { sdkAuth.RegisterTokenStore(originalStore) })
+
+	path := filepath.Join(tmpDir, "pool-nil-attrs.json")
+	auth := &coreauth.Auth{
+		ID:       "pool-nil-attrs.json",
+		FileName: "pool-nil-attrs.json",
+		Provider: "codex",
+		Metadata: map[string]any{
+			"type":         "codex",
+			"access_token": "access-token",
+		},
+	}
+
+	persistPoolProbeAuth(&config.Config{AuthDir: tmpDir}, auth)
+
+	if !util.ShouldSuppressAuthPathEvent(path) {
+		t.Fatalf("expected pool probe persist to suppress watcher echo for %s", path)
+	}
+}
