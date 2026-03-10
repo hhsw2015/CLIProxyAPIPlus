@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 )
@@ -62,6 +63,11 @@ func TestMarkResultEmitsDeletedDisposition(t *testing.T) {
 	if got.PoolEligible {
 		t.Fatalf("expected PoolEligible=false, got %+v", got)
 	}
+
+	waitForCondition(t, 2*time.Second, func() bool {
+		_, err := os.Stat(sourcePath)
+		return os.IsNotExist(err)
+	}, "source auth file removal after deleted disposition")
 }
 
 func TestMarkResultEmitsLimitDisposition(t *testing.T) {
@@ -107,4 +113,9 @@ func TestMarkResultEmitsLimitDisposition(t *testing.T) {
 	if got.PoolEligible {
 		t.Fatalf("expected PoolEligible=false, got %+v", got)
 	}
+
+	waitForCondition(t, 2*time.Second, func() bool {
+		_, err := os.Stat(filepath.Join(tmpDir, "limit", "codex.json"))
+		return err == nil
+	}, "limit archive creation after limit disposition")
 }

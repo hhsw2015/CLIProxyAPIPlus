@@ -14,6 +14,7 @@ import (
 
 	"github.com/fsnotify/fsnotify"
 	kiroauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/kiro"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -105,6 +106,16 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 
 	if isKiroIDEToken {
 		w.handleKiroIDETokenChange(event)
+		return
+	}
+
+	if isAuthJSON && util.ShouldSuppressAuthPathEvent(normalizedName) {
+		log.Debugf("ignoring suppressed auth file event: %s %s", event.Op.String(), filepath.Base(event.Name))
+		return
+	}
+
+	if isAuthJSON && util.IsArchivedAuthPath(w.authDir, normalizedName) {
+		log.Debugf("ignoring archived auth file event: %s %s", event.Op.String(), filepath.Base(event.Name))
 		return
 	}
 

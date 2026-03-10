@@ -242,6 +242,11 @@ func persistPoolProbeAuth(cfg *config.Config, auth *coreauth.Auth) {
 			auth.Attributes["path"] = filepath.Join(cfg.AuthDir, auth.FileName)
 		}
 	}
+	if auth.Attributes != nil {
+		if path := strings.TrimSpace(auth.Attributes["path"]); path != "" {
+			util.SuppressAuthPathEvent(path, 2*time.Second)
+		}
+	}
 	_, _ = store.Save(context.Background(), auth)
 }
 

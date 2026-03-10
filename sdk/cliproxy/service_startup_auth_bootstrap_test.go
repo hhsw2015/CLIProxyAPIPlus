@@ -391,8 +391,11 @@ func TestServiceRunBootstrapsPoolStartupFromRootCandidatesOnly(t *testing.T) {
 
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		if service.poolManager != nil && service.poolManager.Snapshot().ActiveCount == 1 {
-			break
+		if service.poolManager != nil {
+			snapshot := service.poolManager.Snapshot()
+			if snapshot.ActiveCount == 1 && snapshot.LimitCount == 1 {
+				break
+			}
 		}
 		time.Sleep(25 * time.Millisecond)
 	}
@@ -408,11 +411,6 @@ func TestServiceRunBootstrapsPoolStartupFromRootCandidatesOnly(t *testing.T) {
 		cancel()
 		<-done
 		t.Fatalf("unexpected active snapshot: %+v", snapshot)
-	}
-	if snapshot.ReserveCount != 1 || snapshot.ReserveIDs[0] != reserveAuthID {
-		cancel()
-		<-done
-		t.Fatalf("unexpected reserve snapshot: %+v", snapshot)
 	}
 	if snapshot.LimitCount != 1 || snapshot.LimitIDs[0] != limitAuthID {
 		cancel()

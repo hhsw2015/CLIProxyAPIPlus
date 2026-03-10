@@ -15,22 +15,31 @@ import (
 type FailedAuthArchiveKind string
 
 const (
-	FailedAuthArchiveInvalid FailedAuthArchiveKind = "invalid"
-	FailedAuthArchiveLimit   FailedAuthArchiveKind = "limit"
+	FailedAuthArchiveDelete FailedAuthArchiveKind = "delete"
+	FailedAuthArchiveLimit  FailedAuthArchiveKind = "limit"
+
+	// FailedAuthArchiveInvalid is a deprecated alias kept so legacy callers still
+	// resolve to delete semantics while on-disk invalid/ directories remain readable.
+	FailedAuthArchiveInvalid FailedAuthArchiveKind = FailedAuthArchiveDelete
+)
+
+const (
+	legacyFailedAuthArchiveInvalidDir = "invalid"
+	failedAuthArchiveLimitDir         = "limit"
 )
 
 func FailedAuthArchiveDirName(kind FailedAuthArchiveKind) string {
 	switch kind {
 	case FailedAuthArchiveLimit:
-		return string(FailedAuthArchiveLimit)
+		return failedAuthArchiveLimitDir
 	default:
-		return string(FailedAuthArchiveInvalid)
+		return legacyFailedAuthArchiveInvalidDir
 	}
 }
 
 func IsFailedAuthArchiveDirName(name string) bool {
 	switch strings.ToLower(strings.TrimSpace(name)) {
-	case string(FailedAuthArchiveInvalid), string(FailedAuthArchiveLimit):
+	case legacyFailedAuthArchiveInvalidDir, failedAuthArchiveLimitDir:
 		return true
 	default:
 		return false
@@ -72,6 +81,9 @@ func MoveAuthToArchive(authDir, sourcePath string, kind FailedAuthArchiveKind) (
 	}
 	if sourcePath == "" {
 		return "", fmt.Errorf("auth archive: source path is empty")
+	}
+	if kind == FailedAuthArchiveDelete {
+		return "", fmt.Errorf("auth archive: delete kind has no archive destination")
 	}
 
 	authDir = filepath.Clean(authDir)

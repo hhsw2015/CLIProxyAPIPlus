@@ -15,6 +15,7 @@ import (
 
 	"github.com/fsnotify/fsnotify"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/watcher/diff"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/watcher/synthesizer"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v6/sdk/auth"
@@ -802,6 +803,74 @@ func TestHandleEventRemovesAuthFile(t *testing.T) {
 	}
 	if _, ok := w.lastAuthHashes[w.normalizeAuthPath(authFile)]; ok {
 		t.Fatal("expected hash entry to be removed")
+	}
+}
+
+func TestHandleEventIgnoresArchivedAuthFileWrite(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	tests := []string{
+		filepath.Join(tmpDir, "limit", "cap.json"),
+		filepath.Join(tmpDir, "invalid", "dead.json"),
+	}
+
+	for _, authFile := range tests {
+		if err := os.MkdirAll(filepath.Dir(authFile), 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", filepath.Dir(authFile), err)
+		}
+		if err := os.WriteFile(authFile, []byte(`{"type":"codex","email":"archived@example.com"}`), 0o644); err != nil {
+			t.Fatalf("write %s: %v", authFile, err)
+		}
+	}
+
+	w := &Watcher{
+		authDir:          tmpDir,
+		config:           &config.Config{AuthDir: tmpDir},
+		lastAuthHashes:   make(map[string]string),
+		lastAuthContents: make(map[string]*coreauth.Auth),
+		fileAuthsByPath:  make(map[string]map[string]*coreauth.Auth),
+		currentAuths:     make(map[string]*coreauth.Auth),
+	}
+
+	for _, authFile := range tests {
+		w.handleEvent(fsnotify.Event{Name: authFile, Op: fsnotify.Write})
+		if _, ok := w.lastAuthHashes[w.normalizeAuthPath(authFile)]; ok {
+			t.Fatalf("expected archived auth event for %s to be ignored", authFile)
+		}
+	}
+
+	if got := len(w.currentAuths); got != 0 {
+		t.Fatalf("expected no current auths after archived events, got %d", got)
+	}
+}
+
+func TestHandleEventIgnoresSuppressedAuthFileWrite(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	authFile := filepath.Join(tmpDir, "active.json")
+	if err := os.WriteFile(authFile, []byte(`{"type":"codex","email":"suppressed@example.com"}`), 0o644); err != nil {
+		t.Fatalf("write %s: %v", authFile, err)
+	}
+
+	w := &Watcher{
+		authDir:          tmpDir,
+		config:           &config.Config{AuthDir: tmpDir},
+		lastAuthHashes:   make(map[string]string),
+		lastAuthContents: make(map[string]*coreauth.Auth),
+		fileAuthsByPath:  make(map[string]map[string]*coreauth.Auth),
+		currentAuths:     make(map[string]*coreauth.Auth),
+	}
+
+	util.SuppressAuthPathEvent(authFile, time.Second)
+	w.handleEvent(fsnotify.Event{Name: authFile, Op: fsnotify.Write})
+
+	if _, ok := w.lastAuthHashes[w.normalizeAuthPath(authFile)]; ok {
+		t.Fatalf("expected suppressed auth event for %s to be ignored", authFile)
+	}
+	if got := len(w.currentAuths); got != 0 {
+		t.Fatalf("expected no current auths after suppressed event, got %d", got)
 	}
 }
 

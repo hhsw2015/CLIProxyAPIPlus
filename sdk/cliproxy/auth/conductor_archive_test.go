@@ -13,6 +13,21 @@ import (
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 )
 
+func TestClassifyFailedAuthArchiveUsesDeleteForInvalidCredential(t *testing.T) {
+	t.Parallel()
+
+	kind, ok := classifyFailedAuthArchive(&Error{
+		HTTPStatus: http.StatusUnauthorized,
+		Message:    "unauthorized",
+	})
+	if !ok {
+		t.Fatal("expected invalid credential to be classified")
+	}
+	if kind != util.FailedAuthArchiveDelete {
+		t.Fatalf("archive kind = %q, want %q", kind, util.FailedAuthArchiveDelete)
+	}
+}
+
 type refreshArchiveTestExecutor struct {
 	refreshFunc func(context.Context, *Auth) (*Auth, error)
 }
