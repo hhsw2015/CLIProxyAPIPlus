@@ -101,6 +101,10 @@ archive-failed-auth: false
 #   # Controls how quickly active quota info converges (probe traffic increases accordingly).
 #   active-quota-refresh-interval-seconds: 60
 #   active-quota-refresh-sample-size: 10
+#   # Shared budget across all background probes (active / reserve / limit / cold scan).
+#   # Use this to cap CPU on small machines without affecting request-time routing.
+#   background-probe-budget-window-seconds: 10
+#   background-probe-budget-max: 4
 #   reserve-scan-interval-seconds: 300
 #   limit-scan-interval-seconds: 21600
 #   reserve-sample-size: 20

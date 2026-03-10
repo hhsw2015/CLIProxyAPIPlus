@@ -132,6 +132,9 @@ type Service struct {
 	poolLowSuccessMu     sync.Mutex
 	poolLowSuccessStreak int
 	poolLowSuccessWarned bool
+	probeBudgetMu        sync.Mutex
+	probeBudgetStart     time.Time
+	probeBudgetUsed      int
 }
 
 type poolEvalWindowSnapshot struct {
@@ -162,6 +165,33 @@ const poolStateDeleted = "deleted"
 //   - plugin: The usage plugin to register
 func (s *Service) RegisterUsagePlugin(plugin coreusage.Plugin) {
 	coreusage.RegisterPlugin(plugin)
+}
+
+func (s *Service) consumeBackgroundProbeBudget(now time.Time) bool {
+	if s == nil || s.cfg == nil {
+		return true
+	}
+	windowSeconds := s.cfg.PoolManager.BackgroundProbeBudgetWindowSeconds
+	maxBudget := s.cfg.PoolManager.BackgroundProbeBudgetMax
+	if windowSeconds <= 0 || maxBudget <= 0 {
+		return true
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+	window := time.Duration(windowSeconds) * time.Second
+
+	s.probeBudgetMu.Lock()
+	defer s.probeBudgetMu.Unlock()
+	if s.probeBudgetStart.IsZero() || now.Sub(s.probeBudgetStart) >= window {
+		s.probeBudgetStart = now
+		s.probeBudgetUsed = 0
+	}
+	if s.probeBudgetUsed >= maxBudget {
+		return false
+	}
+	s.probeBudgetUsed++
+	return true
 }
 
 // GetWatcher returns the underlying WatcherWrapper instance.
@@ -1114,6 +1144,9 @@ func (s *Service) fillActiveFromReserve(ctx context.Context) {
 	for s.poolManager.Snapshot().ActiveCount < s.poolManager.TargetSize() {
 		promoted := false
 		for _, authID := range s.poolManager.ReserveIDs() {
+			if !s.consumeBackgroundProbeBudget(time.Now()) {
+				return
+			}
 			auth := s.poolCandidates[authID]
 			if auth == nil {
 				s.removePoolMember(authID, "", "reserve_missing")
@@ -1229,6 +1262,9 @@ func (s *Service) fillWarmReserveFromColdCandidates(ctx context.Context) {
 			break
 		}
 		for _, authID := range ids {
+			if !s.consumeBackgroundProbeBudget(time.Now()) {
+				break
+			}
 			auth := s.poolCandidates[authID]
 			if auth == nil {
 				continue
@@ -1436,6 +1472,9 @@ func (s *Service) runActiveProbeCycle(ctx context.Context, now time.Time) {
 	healthy := 0
 	unhealthy := 0
 	for _, authID := range s.poolManager.DueActiveProbeIDs(now, interval) {
+		if !s.consumeBackgroundProbeBudget(now) {
+			break
+		}
 		sampled++
 		auth, ok := s.coreManager.GetByID(authID)
 		if !ok || auth == nil {
@@ -1505,6 +1544,9 @@ func (s *Service) runActiveQuotaRefreshCycle(ctx context.Context, now time.Time)
 	healthy := 0
 	unhealthy := 0
 	for _, authID := range s.poolManager.DueActiveQuotaProbeIDs(now, interval, sampleSize) {
+		if !s.consumeBackgroundProbeBudget(now) {
+			break
+		}
 		sampled++
 		auth, ok := s.coreManager.GetByID(authID)
 		if !ok || auth == nil {
@@ -1580,6 +1622,9 @@ func (s *Service) runReserveProbeCycle(ctx context.Context, now time.Time) {
 	unhealthy := 0
 	skipped := 0
 	for _, authID := range s.poolManager.DueReserveProbeIDs(now, interval, sampleSize) {
+		if !s.consumeBackgroundProbeBudget(now) {
+			break
+		}
 		sampled++
 		auth := s.poolCandidates[authID]
 		if auth == nil {
@@ -1644,6 +1689,9 @@ func (s *Service) runLimitProbeCycle(ctx context.Context, now time.Time) {
 	stillLimited := 0
 	skipped := 0
 	for _, authID := range s.poolManager.DueLimitProbeIDs(now, interval) {
+		if !s.consumeBackgroundProbeBudget(now) {
+			break
+		}
 		sampled++
 		auth := s.poolCandidates[authID]
 		if auth == nil {
