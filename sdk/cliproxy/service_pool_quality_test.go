@@ -1,12 +1,15 @@
 package cliproxy
 
 import (
+	"bytes"
 	"context"
+	"strings"
 	"testing"
 	"time"
 
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
+	log "github.com/sirupsen/logrus"
 )
 
 func testCodexAuthWithRemaining(id string, remainingPercent int) *coreauth.Auth {
@@ -371,5 +374,49 @@ func TestRunPoolRebalanceNow_PrefersHighQuotaColdCandidatesForReserve(t *testing
 	}
 	if !containsString(snapshot.ActiveIDs, high.ID) && !containsString(snapshot.ReserveIDs, high.ID) {
 		t.Fatalf("expected highest quota cold candidate to be pulled into the warm set, got %+v", snapshot)
+	}
+}
+
+func TestSyncPoolActiveToRuntime_SkipsModifyOnlyPublish(t *testing.T) {
+	var buf bytes.Buffer
+	oldOutput := log.StandardLogger().Out
+	oldFormatter := log.StandardLogger().Formatter
+	oldLevel := log.GetLevel()
+	log.SetOutput(&buf)
+	log.SetFormatter(&log.TextFormatter{DisableTimestamp: true, DisableColors: true})
+	log.SetLevel(log.InfoLevel)
+	t.Cleanup(func() {
+		log.SetOutput(oldOutput)
+		log.SetFormatter(oldFormatter)
+		log.SetLevel(oldLevel)
+	})
+
+	auth := testCodexAuthWithRemaining("a-1", 70)
+	auth.Status = coreauth.StatusActive
+
+	service := &Service{
+		poolManager: NewPoolManager(config.PoolManagerConfig{Size: 1, Provider: "codex"}),
+		poolCandidates: map[string]*coreauth.Auth{
+			auth.ID: auth.Clone(),
+		},
+		publishedActive: map[string]time.Time{},
+	}
+	service.setPoolMemberState(service.poolMemberForAuth(auth, PoolStateActive), PoolStateActive, "seed")
+
+	service.syncPoolActiveToRuntime(context.Background())
+	buf.Reset()
+
+	member, ok := service.poolManager.LastSeenMember(auth.ID)
+	if !ok {
+		t.Fatalf("expected active member %s", auth.ID)
+	}
+	member.LastProbeAt = time.Now().Add(time.Second)
+	service.setPoolMemberState(member, PoolStateActive, "probe_ok")
+
+	service.syncPoolActiveToRuntime(context.Background())
+
+	logOutput := buf.String()
+	if strings.Contains(logOutput, "pool-publish: completed add=0 modify=1 delete=0") {
+		t.Fatalf("expected modify-only sync to be skipped, got %q", logOutput)
 	}
 }
