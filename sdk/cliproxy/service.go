@@ -672,17 +672,52 @@ func (s *Service) poolMemberForAuth(auth *coreauth.Auth, state PoolState) PoolMe
 	return member
 }
 
+func (s *Service) poolMemberForFreshProbe(auth *coreauth.Auth, state PoolState, now time.Time) PoolMember {
+	member := s.poolMemberForAuth(auth, state)
+	if now.IsZero() {
+		now = time.Now()
+	}
+	member.LastProbeAt = now
+	member.LastSuccessAt = now
+	member.LastProbeReason = ""
+	var cfg *config.Config
+	if s != nil {
+		cfg = s.cfg
+	}
+	switch state {
+	case PoolStateActive:
+		if cfg != nil {
+			if interval := time.Duration(cfg.PoolManager.ActiveIdleScanIntervalSeconds) * time.Second; interval > 0 {
+				member.NextProbeAt = now.Add(interval)
+			}
+			if interval := time.Duration(cfg.PoolManager.ActiveQuotaRefreshIntervalSeconds) * time.Second; interval > 0 {
+				member.LastQuotaProbeAt = now
+				member.NextQuotaProbeAt = now.Add(interval)
+				member.LastQuotaProbeReason = ""
+			}
+		}
+	case PoolStateReserve:
+		if cfg != nil {
+			if interval := time.Duration(cfg.PoolManager.ReserveScanIntervalSeconds) * time.Second; interval > 0 {
+				member.NextProbeAt = now.Add(interval)
+			}
+		}
+	}
+	return member
+}
+
 func (s *Service) placeProbedAuth(ctx context.Context, auth *coreauth.Auth, allowFallback bool) bool {
 	if s == nil || s.poolManager == nil || auth == nil || strings.TrimSpace(auth.ID) == "" {
 		return false
 	}
-	member := s.poolMemberForAuth(auth, PoolStateReserve)
+	now := time.Now()
+	member := s.poolMemberForFreshProbe(auth, PoolStateReserve, now)
 	lowQuota := authIsLowQuota(auth, s.poolManager.LowQuotaThresholdPercent())
 	snapshot := s.poolManager.Snapshot()
 
 	if lowQuota {
 		if allowFallback && snapshot.ActiveCount < snapshot.TargetSize {
-			member.PoolState = PoolStateActive
+			member = s.poolMemberForFreshProbe(auth, PoolStateActive, now)
 			s.setPoolMemberState(member, PoolStateActive, "fallback_active")
 			s.applyCoreAuthAddOrUpdate(ctx, auth)
 			log.Infof("pool-manager: fallback active auth=%s remaining_percent=%d threshold=%d", auth.ID, mustWeeklyRemainingPercent(auth), s.poolManager.LowQuotaThresholdPercent())
@@ -695,13 +730,12 @@ func (s *Service) placeProbedAuth(ctx context.Context, auth *coreauth.Auth, allo
 	}
 
 	if snapshot.ActiveCount < snapshot.TargetSize {
-		member.PoolState = PoolStateActive
+		member = s.poolMemberForFreshProbe(auth, PoolStateActive, now)
 		s.setPoolMemberState(member, PoolStateActive, "fill_active")
 		s.applyCoreAuthAddOrUpdate(ctx, auth)
 		return true
 	}
 	if snapshot.ReserveCount < s.poolManager.ReserveTargetSize() {
-		member.PoolState = PoolStateReserve
 		s.setPoolMemberState(member, PoolStateReserve, "fill_reserve")
 		return true
 	}
@@ -717,7 +751,7 @@ func (s *Service) replaceFallbackActive(ctx context.Context, auth *coreauth.Auth
 	}
 	threshold := s.poolManager.LowQuotaThresholdPercent()
 	fallbacks := s.poolManager.ActiveFallbackIDs(threshold)
-	candidateMember := s.poolMemberForAuth(auth, PoolStateActive)
+	candidateMember := s.poolMemberForFreshProbe(auth, PoolStateActive, time.Now())
 	candidateRemaining := candidateMember.RemainingPercent
 	candidateKnown := candidateRemaining >= 0 && candidateRemaining <= 100
 
