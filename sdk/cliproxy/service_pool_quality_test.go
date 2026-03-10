@@ -239,3 +239,78 @@ func TestSyncPoolActiveToRuntime_TrimsOverflowActiveToTarget(t *testing.T) {
 		t.Fatalf("expected %s to move to reserve, got reserve=%v", low.ID, reserveIDs)
 	}
 }
+
+func TestRunActiveQuotaRefreshCycle_ReplacesDegradedActiveWithBetterReserve(t *testing.T) {
+	originalProbe := poolProbeAuthFunc
+	poolProbeAuthFunc = func(ctx context.Context, cfg *config.Config, auth *coreauth.Auth) (*coreauth.Auth, coreauth.Result) {
+		if auth == nil {
+			return nil, coreauth.Result{Provider: "codex", Success: false}
+		}
+		auth = auth.Clone()
+		if auth.Metadata == nil {
+			auth.Metadata = make(map[string]any)
+		}
+		switch auth.ID {
+		case "a-1":
+			auth.Metadata[poolQuotaWeeklyRemainingPercentKey] = 35
+		case "r-1":
+			auth.Metadata[poolQuotaWeeklyRemainingPercentKey] = 80
+		}
+		return auth, coreauth.Result{
+			AuthID:   auth.ID,
+			Provider: "codex",
+			Model:    "gpt-5",
+			Success:  true,
+		}
+	}
+	t.Cleanup(func() { poolProbeAuthFunc = originalProbe })
+
+	cfg := &config.Config{
+		PoolManager: config.PoolManagerConfig{
+			Size:                              1,
+			Provider:                          "codex",
+			LowQuotaThresholdPercent:          20,
+			ActiveQuotaRefreshIntervalSeconds: 60,
+			ActiveQuotaRefreshSampleSize:      1,
+		},
+	}
+
+	coreManager := coreauth.NewManager(nil, &coreauth.RoundRobinSelector{}, nil)
+	coreManager.SetConfig(cfg)
+
+	activeAuth := testCodexAuthWithRemaining("a-1", 70)
+	activeAuth.Status = coreauth.StatusActive
+	reserveAuth := testCodexAuthWithRemaining("r-1", 80)
+	reserveAuth.Status = coreauth.StatusActive
+	for _, auth := range []*coreauth.Auth{activeAuth, reserveAuth} {
+		if _, err := coreManager.Register(coreauth.WithSkipPersist(context.Background()), auth); err != nil {
+			t.Fatalf("register auth %s: %v", auth.ID, err)
+		}
+	}
+
+	service := &Service{
+		cfg:         cfg,
+		coreManager: coreManager,
+		poolManager: NewPoolManager(cfg.PoolManager),
+		poolCandidates: map[string]*coreauth.Auth{
+			activeAuth.ID:  activeAuth.Clone(),
+			reserveAuth.ID: reserveAuth.Clone(),
+		},
+	}
+	service.setPoolMemberState(service.poolMemberForAuth(activeAuth, PoolStateActive), PoolStateActive, "seed")
+	service.setPoolMemberState(service.poolMemberForAuth(reserveAuth, PoolStateReserve), PoolStateReserve, "seed")
+
+	now := time.Unix(1_700_000_200, 0).UTC()
+	service.runActiveQuotaRefreshCycle(context.Background(), now)
+
+	if !service.poolManager.IsActive(reserveAuth.ID) {
+		t.Fatalf("expected reserve auth %s to replace degraded active", reserveAuth.ID)
+	}
+	if service.poolManager.IsActive(activeAuth.ID) {
+		t.Fatalf("expected degraded active auth %s to leave active", activeAuth.ID)
+	}
+	reserveIDs := service.poolManager.ReserveIDs()
+	if !containsString(reserveIDs, activeAuth.ID) {
+		t.Fatalf("expected degraded active auth %s to move to reserve, got reserve=%v", activeAuth.ID, reserveIDs)
+	}
+}

@@ -748,6 +748,90 @@ func (s *Service) replaceFallbackActive(ctx context.Context, auth *coreauth.Auth
 	return true
 }
 
+func (s *Service) replaceLowQualityActiveFromReserve(ctx context.Context, maxReplacements int) int {
+	if s == nil || s.poolManager == nil || maxReplacements <= 0 {
+		return 0
+	}
+
+	replaced := 0
+	for replaced < maxReplacements {
+		snapshot := s.poolManager.Snapshot()
+		if snapshot.ActiveCount < snapshot.TargetSize || snapshot.ReserveCount == 0 {
+			break
+		}
+
+		now := time.Now()
+		bestReserveID := ""
+		bestReserveRemaining := -1
+		for _, authID := range snapshot.ReserveIDs {
+			member, ok := s.poolManager.LastSeenMember(authID)
+			if !ok {
+				continue
+			}
+			if member.InFlightCount > 0 {
+				continue
+			}
+			if !member.ProtectedUntil.IsZero() && member.ProtectedUntil.After(now) {
+				continue
+			}
+			remaining := member.RemainingPercent
+			if remaining < 0 || remaining > 100 {
+				continue
+			}
+			if bestReserveID == "" || remaining > bestReserveRemaining || (remaining == bestReserveRemaining && member.AuthID < bestReserveID) {
+				bestReserveID = member.AuthID
+				bestReserveRemaining = remaining
+			}
+		}
+		if bestReserveID == "" {
+			break
+		}
+
+		auth := s.poolCandidates[bestReserveID]
+		if auth == nil {
+			s.removePoolMember(bestReserveID, "", "reserve_missing")
+			break
+		}
+
+		probeCtx := coreauth.WithDispositionSource(ctx, "pool_probe")
+		beforeProbe := auth.Clone()
+		probedAuth, result := poolProbeAuthFunc(probeCtx, s.cfg, auth.Clone())
+		if probedAuth != nil {
+			s.storePoolCandidate(probedAuth)
+		}
+		s.recordPoolProbe(PoolStateReserve, beforeProbe, probedAuth, result, "")
+
+		reason := ""
+		if result.Error != nil {
+			reason = result.Error.Code
+		}
+		reserveInterval := time.Duration(s.cfg.PoolManager.ReserveScanIntervalSeconds) * time.Second
+		if reserveInterval <= 0 {
+			reserveInterval = time.Minute
+		}
+		s.poolManager.MarkProbe(bestReserveID, now, now.Add(reserveInterval), result.Success, reason)
+
+		if !result.Success {
+			s.handlePoolProbeResult(bestReserveID, auth.Provider, result)
+			break
+		}
+		if probedAuth == nil {
+			break
+		}
+		if authIsLowQuota(probedAuth, s.poolManager.LowQuotaThresholdPercent()) {
+			s.setPoolMemberState(s.poolMemberForAuth(probedAuth, PoolStateLowQuota), PoolStateLowQuota, "reserve_probe_low_quota")
+			log.Infof("pool-manager: low quota auth=%s remaining_percent=%d threshold=%d", probedAuth.ID, mustWeeklyRemainingPercent(probedAuth), s.poolManager.LowQuotaThresholdPercent())
+			continue
+		}
+		if !s.replaceFallbackActive(ctx, probedAuth) {
+			break
+		}
+		replaced++
+	}
+
+	return replaced
+}
+
 func (s *Service) nextColdCandidateIDs(limit int) []string {
 	if s == nil || limit <= 0 {
 		return nil
@@ -1368,6 +1452,7 @@ func (s *Service) runActiveQuotaRefreshCycle(ctx context.Context, now time.Time)
 	}
 
 	if sampled > 0 {
+		s.replaceLowQualityActiveFromReserve(ctx, sampleSize)
 		log.Infof("pool-manager: active quota refresh sampled=%d healthy=%d unhealthy=%d", sampled, healthy, unhealthy)
 	}
 	if s.poolNeedsRebalance() {
