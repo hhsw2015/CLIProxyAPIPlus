@@ -8,6 +8,37 @@
 
 该 Plus 版本的主线功能与主线功能强制同步。
 
+## 池子调优建议
+
+如果你在 Codex 场景下使用大量文件型账号，一个已经验证过的基线配置如下：
+
+```yaml
+archive-failed-auth: true
+
+pool-manager:
+  size: 100
+  provider: "codex"
+  active-idle-scan-interval-seconds: 1800
+  active-quota-refresh-interval-seconds: 60
+  active-quota-refresh-sample-size: 10
+  background-probe-budget-window-seconds: 10
+  background-probe-budget-max: 2
+  reserve-scan-interval-seconds: 300
+  limit-scan-interval-seconds: 21600
+  reserve-sample-size: 20
+  reserve-refill-low-ratio: 0.25
+  reserve-refill-high-ratio: 0.50
+  cold-batch-load-ratio: 0.05
+  low-quota-threshold-percent: 20
+```
+
+说明：
+- 这个配置会保持 `active=100`，并把 `reserve` 补到大约 `50`，同时避免把整个 cold 池长期常驻在内存里。
+- 当 `auth-dir` 里的文件型账号很多时，建议开启这些 ratio 参数。
+- `archive-failed-auth: true` 适合你确实希望把真正不可恢复的账号删除，或者把额度耗尽的账号移到 `auth-dir/limit` 的场景。
+- 普通 `401` 不再直接视为死号；只有像 `refresh_token_reused` 这种明确不可恢复的 refresh 失败才会被删除。
+- 以上配置已经在 2 vCPU / 8 GB 的 VPS 上验证过，常驻 RSS 相比最初的全量常驻方案明显下降。
+
 ## 贡献
 
 该项目仅接受第三方供应商支持的 Pull Request。任何非第三方供应商支持的 Pull Request 都将被拒绝。
