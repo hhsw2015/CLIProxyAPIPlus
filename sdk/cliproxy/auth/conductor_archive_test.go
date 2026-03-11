@@ -13,15 +13,28 @@ import (
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 )
 
-func TestClassifyFailedAuthArchiveUsesDeleteForInvalidCredential(t *testing.T) {
+func TestClassifyFailedAuthArchiveSkipsGenericUnauthorized(t *testing.T) {
+	t.Parallel()
+
+	_, ok := classifyFailedAuthArchive(&Error{
+		HTTPStatus: http.StatusUnauthorized,
+		Message:    "unauthorized",
+	})
+	if ok {
+		t.Fatal("did not expect generic unauthorized to be classified as archive-worthy")
+	}
+}
+
+func TestClassifyFailedAuthArchiveUsesDeleteForRefreshTokenReused(t *testing.T) {
 	t.Parallel()
 
 	kind, ok := classifyFailedAuthArchive(&Error{
 		HTTPStatus: http.StatusUnauthorized,
-		Message:    "unauthorized",
+		Code:       "refresh_token_reused",
+		Message:    "refresh token reused",
 	})
 	if !ok {
-		t.Fatal("expected invalid credential to be classified")
+		t.Fatal("expected refresh_token_reused to be classified")
 	}
 	if kind != util.FailedAuthArchiveDelete {
 		t.Fatalf("archive kind = %q, want %q", kind, util.FailedAuthArchiveDelete)
@@ -69,7 +82,7 @@ func waitForCondition(t *testing.T, timeout time.Duration, condition func() bool
 	t.Fatalf("timeout waiting for %s", description)
 }
 
-func TestMarkResultDeletesInvalidAuthFile(t *testing.T) {
+func TestMarkResultDoesNotDeleteGenericUnauthorizedAuthFile(t *testing.T) {
 	tmpDir := t.TempDir()
 	sourcePath := filepath.Join(tmpDir, "claude.json")
 	if err := os.WriteFile(sourcePath, []byte(`{"type":"claude","email":"demo@example.com"}`), 0o600); err != nil {
@@ -96,11 +109,44 @@ func TestMarkResultDeletesInvalidAuthFile(t *testing.T) {
 		},
 	})
 
+	if _, ok := m.GetByID("claude.json"); !ok {
+		t.Fatal("expected generic unauthorized auth to remain in manager")
+	}
+	if _, err := os.Stat(sourcePath); err != nil {
+		t.Fatalf("expected source auth file to remain, err=%v", err)
+	}
+}
+
+func TestMarkResultDeletesRefreshTokenReusedAuthFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	sourcePath := filepath.Join(tmpDir, "claude.json")
+	if err := os.WriteFile(sourcePath, []byte(`{"type":"claude","email":"demo@example.com"}`), 0o600); err != nil {
+		t.Fatalf("write auth file: %v", err)
+	}
+
+	m := NewManager(nil, nil, nil)
+	m.SetConfig(&internalconfig.Config{AuthDir: tmpDir, ArchiveFailedAuth: true})
+	if _, err := m.Register(context.Background(), &Auth{
+		ID:         "claude.json",
+		Provider:   "claude",
+		Metadata:   map[string]any{"type": "claude"},
+		Attributes: map[string]string{"path": sourcePath},
+	}); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+
+	m.MarkResult(context.Background(), Result{
+		AuthID:  "claude.json",
+		Success: false,
+		Error: &Error{
+			HTTPStatus: 401,
+			Code:       "refresh_token_reused",
+			Message:    "refresh token reused",
+		},
+	})
+
 	if _, ok := m.GetByID("claude.json"); ok {
 		t.Fatal("expected invalid auth to be removed from manager")
-	}
-	if _, err := os.Stat(filepath.Join(tmpDir, "invalid", "claude.json")); !os.IsNotExist(err) {
-		t.Fatalf("expected no invalid archive file, got err=%v", err)
 	}
 	waitForCondition(t, 2*time.Second, func() bool {
 		_, err := os.Stat(sourcePath)
