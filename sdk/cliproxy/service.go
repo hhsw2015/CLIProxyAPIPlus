@@ -109,8 +109,10 @@ type Service struct {
 	// publishedActive tracks auth IDs currently exposed to runtime routing in pool mode.
 	publishedActive map[string]time.Time
 
-	// poolCandidates stores auth snapshots known to the pool manager for promotion publishing.
+	// poolCandidates stores hot auth snapshots needed immediately by active/reserve workflows.
 	poolCandidates map[string]*coreauth.Auth
+	// poolCandidateIndex stores lightweight metadata for the full known candidate universe.
+	poolCandidateIndex map[string]*poolCandidateRef
 
 	// poolCandidateOrder stores the cold-candidate iteration order for background scanning.
 	poolCandidateOrder []string
@@ -291,6 +293,23 @@ func (s *Service) emitAuthUpdate(ctx context.Context, update watcher.AuthUpdate)
 			log.Debugf("auth update queue saturated, applying inline action=%v id=%s", update.Action, update.ID)
 		}
 	}
+	if s.poolManager != nil {
+		switch update.Action {
+		case watcher.AuthUpdateActionAdd, watcher.AuthUpdateActionModify:
+			if update.Auth != nil {
+				s.applyCoreAuthAddOrUpdate(ctx, update.Auth)
+			}
+		case watcher.AuthUpdateActionDelete:
+			id := update.ID
+			if id == "" && update.Auth != nil {
+				id = update.Auth.ID
+			}
+			if id != "" {
+				s.applyCoreAuthRemoval(ctx, id)
+			}
+		}
+		return
+	}
 	s.handleAuthUpdate(ctx, update)
 }
 
@@ -362,18 +381,27 @@ func (s *Service) bootstrapPoolSnapshot(ctx context.Context, watcherWrapper *Wat
 		ctx = context.Background()
 	}
 	ctx = coreauth.WithSkipPersist(ctx)
-	s.poolCandidates = make(map[string]*coreauth.Auth, len(rootAuths)+len(limitAuths))
+	s.poolCandidates = make(map[string]*coreauth.Auth, pm.TargetSize()+pm.ReserveTargetSize())
+	s.poolCandidateIndex = make(map[string]*poolCandidateRef, len(rootAuths)+len(limitAuths))
 	for _, auth := range rootAuths {
 		if auth == nil || strings.TrimSpace(auth.ID) == "" {
 			continue
 		}
-		s.storePoolCandidate(auth)
+		if poolCandidatePath(auth) == "" {
+			s.storePoolCandidate(auth)
+		} else {
+			s.indexPoolCandidate(auth)
+		}
 	}
 	for _, auth := range limitAuths {
 		if auth == nil || strings.TrimSpace(auth.ID) == "" {
 			continue
 		}
-		s.storePoolCandidate(auth)
+		if poolCandidatePath(auth) == "" {
+			s.storePoolCandidate(auth)
+		} else {
+			s.indexPoolCandidate(auth)
+		}
 	}
 	rootAuths = sortAuthCandidatesByRemaining(rootAuths)
 	s.resetPoolCandidateOrder(rootAuths)
@@ -482,10 +510,17 @@ func (s *Service) poolCandidate(authID string) *coreauth.Auth {
 		return nil
 	}
 	s.poolCandidateMu.RLock()
-	defer s.poolCandidateMu.RUnlock()
 	auth := s.poolCandidates[authID]
+	var ref *poolCandidateRef
+	if auth == nil && s.poolCandidateIndex != nil {
+		if candidateRef := s.poolCandidateIndex[authID]; candidateRef != nil {
+			copyRef := *candidateRef
+			ref = &copyRef
+		}
+	}
+	s.poolCandidateMu.RUnlock()
 	if auth == nil {
-		return nil
+		return s.loadPoolCandidateByRef(authID, ref)
 	}
 	return auth.Clone()
 }
@@ -501,6 +536,7 @@ func (s *Service) deletePoolCandidate(authID string) {
 	s.poolCandidateMu.Lock()
 	defer s.poolCandidateMu.Unlock()
 	delete(s.poolCandidates, authID)
+	delete(s.poolCandidateIndex, authID)
 }
 
 func (s *Service) storePoolCandidate(auth *coreauth.Auth) {
@@ -512,8 +548,14 @@ func (s *Service) storePoolCandidate(auth *coreauth.Auth) {
 	if s.poolCandidates == nil {
 		s.poolCandidates = make(map[string]*coreauth.Auth)
 	}
+	if s.poolCandidateIndex == nil {
+		s.poolCandidateIndex = make(map[string]*poolCandidateRef)
+	}
 	id := strings.TrimSpace(auth.ID)
 	s.poolCandidates[id] = auth.Clone()
+	if ref := newPoolCandidateRef(auth); ref != nil {
+		s.poolCandidateIndex[id] = ref
+	}
 	for _, existing := range s.poolCandidateOrder {
 		if existing == id {
 			return
@@ -532,10 +574,22 @@ func (s *Service) resortPoolCandidateOrder() {
 		return
 	}
 	sort.SliceStable(s.poolCandidateOrder, func(i, j int) bool {
-		left := s.poolCandidates[s.poolCandidateOrder[i]]
-		right := s.poolCandidates[s.poolCandidateOrder[j]]
-		leftRemaining, leftKnown := authWeeklyRemainingPercent(left)
-		rightRemaining, rightKnown := authWeeklyRemainingPercent(right)
+		leftRef := s.poolCandidateIndex[s.poolCandidateOrder[i]]
+		rightRef := s.poolCandidateIndex[s.poolCandidateOrder[j]]
+		leftRemaining, leftKnown := -1, false
+		rightRemaining, rightKnown := -1, false
+		if leftRef != nil {
+			leftRemaining, leftKnown = leftRef.RemainingPercent, leftRef.RemainingKnown
+		}
+		if rightRef != nil {
+			rightRemaining, rightKnown = rightRef.RemainingPercent, rightRef.RemainingKnown
+		}
+		if !leftKnown {
+			leftRemaining, leftKnown = authWeeklyRemainingPercent(s.poolCandidates[s.poolCandidateOrder[i]])
+		}
+		if !rightKnown {
+			rightRemaining, rightKnown = authWeeklyRemainingPercent(s.poolCandidates[s.poolCandidateOrder[j]])
+		}
 		if leftKnown != rightKnown {
 			return leftKnown
 		}
@@ -552,11 +606,18 @@ func (s *Service) poolCandidateCounts() (candidateCount, coldCandidateCount int)
 	}
 	s.poolCandidateMu.RLock()
 	defer s.poolCandidateMu.RUnlock()
-	candidateCount = len(s.poolCandidates)
+	seen := make(map[string]struct{}, len(s.poolCandidateIndex)+len(s.poolCandidates))
+	for id := range s.poolCandidateIndex {
+		seen[id] = struct{}{}
+	}
+	for id := range s.poolCandidates {
+		seen[id] = struct{}{}
+	}
+	candidateCount = len(seen)
 	if candidateCount == 0 || s.poolManager == nil {
 		return candidateCount, candidateCount
 	}
-	for id := range s.poolCandidates {
+	for id := range seen {
 		if !s.poolManager.HasTrackedState(id) {
 			coldCandidateCount++
 		}
@@ -590,6 +651,9 @@ func (s *Service) poolObservedState(authID string) string {
 	}
 	s.poolCandidateMu.RLock()
 	defer s.poolCandidateMu.RUnlock()
+	if _, ok := s.poolCandidateIndex[authID]; ok {
+		return poolStateCold
+	}
 	if _, ok := s.poolCandidates[authID]; ok {
 		return poolStateCold
 	}
@@ -634,6 +698,9 @@ func (s *Service) setPoolMemberState(member PoolMember, state PoolState, reason 
 		s.poolManager.SetActive(member)
 	}
 	s.logPoolTransition(member.AuthID, member.Provider, fromState, string(state), reason, member.RemainingPercent)
+	if state == PoolStateLimit || state == PoolStateLowQuota {
+		s.evictPoolCandidateIfIndexed(member.AuthID)
+	}
 }
 
 func (s *Service) removePoolMember(authID, provider, reason string) {
@@ -647,6 +714,22 @@ func (s *Service) removePoolMember(authID, provider, reason string) {
 	fromState := s.poolObservedState(authID)
 	s.poolManager.Remove(authID)
 	s.logPoolTransition(authID, provider, fromState, poolStateDeleted, reason, -1)
+	s.evictPoolCandidateIfIndexed(authID)
+}
+
+func (s *Service) keepPoolCandidateHot(authID string) bool {
+	if s == nil || s.poolManager == nil {
+		return false
+	}
+	authID = strings.TrimSpace(authID)
+	if authID == "" {
+		return false
+	}
+	member, ok := s.poolManager.LastSeenMember(authID)
+	if !ok {
+		return false
+	}
+	return member.PoolState == PoolStateActive || member.PoolState == PoolStateReserve
 }
 
 func (s *Service) trimActiveOverflow() int {
@@ -1004,7 +1087,7 @@ func (s *Service) nextColdCandidateIDs(limit int) []string {
 		if id == "" || s.poolManager.HasTrackedState(id) {
 			continue
 		}
-		if _, ok := s.poolCandidates[id]; !ok {
+		if _, ok := s.poolCandidateIndex[id]; !ok && s.poolCandidates[id] == nil {
 			continue
 		}
 		ids = append(ids, id)
@@ -1217,7 +1300,51 @@ func (s *Service) fillActiveFromReserve(ctx context.Context) {
 	s.clearPoolUnderfilled(time.Now())
 }
 
-func (s *Service) poolNeedsRebalance() bool {
+func (s *Service) reserveRefillLowWatermark() int {
+	if s == nil || s.poolManager == nil {
+		return 0
+	}
+	var cfg config.PoolManagerConfig
+	if s.cfg != nil {
+		cfg = s.cfg.PoolManager
+	}
+	return reserveRefillLowWatermark(cfg, s.poolManager.ReserveTargetSize())
+}
+
+func (s *Service) reserveRefillHighWatermark() int {
+	if s == nil || s.poolManager == nil {
+		return 0
+	}
+	var cfg config.PoolManagerConfig
+	if s.cfg != nil {
+		cfg = s.cfg.PoolManager
+	}
+	return reserveRefillHighWatermark(cfg, s.poolManager.ReserveTargetSize())
+}
+
+func (s *Service) coldBatchLoadSize() int {
+	if s == nil || s.poolManager == nil {
+		return 0
+	}
+	var cfg config.PoolManagerConfig
+	if s.cfg != nil {
+		cfg = s.cfg.PoolManager
+	}
+	return coldBatchLoadSize(cfg, s.poolManager.TargetSize())
+}
+
+func (s *Service) activeQuotaRefreshSampleSize() int {
+	if s == nil || s.poolManager == nil {
+		return 0
+	}
+	var cfg config.PoolManagerConfig
+	if s.cfg != nil {
+		cfg = s.cfg.PoolManager
+	}
+	return activeQuotaRefreshSampleSize(cfg, s.poolManager.TargetSize())
+}
+
+func (s *Service) poolNeedsRebalanceAtReserveThreshold(reserveThreshold int) bool {
 	if s == nil || s.poolManager == nil {
 		return false
 	}
@@ -1225,10 +1352,14 @@ func (s *Service) poolNeedsRebalance() bool {
 	if snapshot.ActiveCount < snapshot.TargetSize {
 		return true
 	}
-	if snapshot.ReserveCount < s.poolManager.ReserveTargetSize() {
+	if reserveThreshold > 0 && snapshot.ReserveCount < reserveThreshold {
 		return true
 	}
 	return len(s.poolManager.ActiveFallbackIDs(s.poolManager.LowQuotaThresholdPercent())) > 0
+}
+
+func (s *Service) poolNeedsRebalance() bool {
+	return s.poolNeedsRebalanceAtReserveThreshold(s.reserveRefillLowWatermark())
 }
 
 func (s *Service) shouldDemoteLowQuotaActive() bool {
@@ -1260,17 +1391,19 @@ func (s *Service) fillWarmReserveFromColdCandidates(ctx context.Context) {
 	if activeDeficit < 0 {
 		activeDeficit = 0
 	}
-	reserveDeficit := s.poolManager.ReserveTargetSize() - snapshot.ReserveCount
+	reserveLowWatermark := s.reserveRefillLowWatermark()
+	reserveTarget := s.reserveRefillHighWatermark()
+	reserveDeficit := reserveTarget - snapshot.ReserveCount
 	if reserveDeficit < 0 {
 		reserveDeficit = 0
 	}
 	fallbackCount := len(s.poolManager.ActiveFallbackIDs(s.poolManager.LowQuotaThresholdPercent()))
-	budget := s.cfg.PoolManager.ReserveSampleSize
+	budget := s.coldBatchLoadSize()
 	if budget <= 0 {
 		budget = 20
 	}
 	maxBudget := budget
-	if activeDeficit > 0 || fallbackCount > 0 {
+	if activeDeficit > 0 || (reserveTarget > reserveLowWatermark && reserveDeficit > 0) || fallbackCount > 0 {
 		budget += activeDeficit + reserveDeficit + fallbackCount
 		maxBudget = budget * 5
 		if maxBudget < budget {
@@ -1281,8 +1414,8 @@ func (s *Service) fillWarmReserveFromColdCandidates(ctx context.Context) {
 	sampled := 0
 	healthy := 0
 	unhealthy := 0
-	for sampled < maxBudget && s.poolNeedsRebalance() {
-		batchLimit := s.cfg.PoolManager.ReserveSampleSize
+	for sampled < maxBudget && s.poolNeedsRebalanceAtReserveThreshold(reserveTarget) {
+		batchLimit := s.coldBatchLoadSize()
 		if batchLimit <= 0 {
 			batchLimit = 20
 		}
@@ -1324,7 +1457,7 @@ func (s *Service) fillWarmReserveFromColdCandidates(ctx context.Context) {
 					}
 				}
 			}
-			if !s.poolNeedsRebalance() || sampled >= maxBudget {
+			if !s.poolNeedsRebalanceAtReserveThreshold(reserveTarget) || sampled >= maxBudget {
 				break
 			}
 		}
@@ -1432,7 +1565,7 @@ func (s *Service) startPoolProbeLoops(parent context.Context) {
 		}
 	}()
 
-	if interval := time.Duration(s.cfg.PoolManager.ActiveQuotaRefreshIntervalSeconds) * time.Second; interval > 0 && s.cfg.PoolManager.ActiveQuotaRefreshSampleSize > 0 {
+	if interval := time.Duration(s.cfg.PoolManager.ActiveQuotaRefreshIntervalSeconds) * time.Second; interval > 0 && s.activeQuotaRefreshSampleSize() > 0 {
 		go func() {
 			ticker := time.NewTicker(interval)
 			defer ticker.Stop()
@@ -1568,7 +1701,7 @@ func (s *Service) runActiveQuotaRefreshCycle(ctx context.Context, now time.Time)
 	if interval <= 0 {
 		return
 	}
-	sampleSize := s.cfg.PoolManager.ActiveQuotaRefreshSampleSize
+	sampleSize := s.activeQuotaRefreshSampleSize()
 	if sampleSize <= 0 {
 		return
 	}
@@ -2087,6 +2220,18 @@ func (s *Service) handleAuthUpdate(ctx context.Context, update watcher.AuthUpdat
 		if update.Auth == nil || update.Auth.ID == "" {
 			return
 		}
+		if s.poolManager != nil {
+			s.indexPoolCandidate(update.Auth)
+			if s.keepPoolCandidateHot(update.Auth.ID) {
+				s.storePoolCandidate(update.Auth)
+			} else {
+				s.evictPoolCandidateIfIndexed(update.Auth.ID)
+			}
+			if s.poolManager.IsActive(update.Auth.ID) {
+				s.applyCoreAuthAddOrUpdate(ctx, update.Auth)
+			}
+			return
+		}
 		s.applyCoreAuthAddOrUpdate(ctx, update.Auth)
 	case watcher.AuthUpdateActionDelete:
 		id := update.ID
@@ -2094,6 +2239,24 @@ func (s *Service) handleAuthUpdate(ctx context.Context, update watcher.AuthUpdat
 			id = update.Auth.ID
 		}
 		if id == "" {
+			return
+		}
+		if s.poolManager != nil {
+			provider := ""
+			if member, ok := s.poolManager.LastSeenMember(id); ok {
+				provider = member.Provider
+			}
+			wasActive := s.poolManager.IsActive(id)
+			if s.poolManager.HasTrackedState(id) {
+				s.removePoolMember(id, provider, "file_delete")
+			}
+			s.deletePoolCandidate(id)
+			if wasActive {
+				s.applyCoreAuthRemoval(ctx, id)
+			}
+			if s.poolRebalanceQueue != nil && s.poolNeedsRebalance() {
+				s.schedulePoolRebalance()
+			}
 			return
 		}
 		s.applyCoreAuthRemoval(ctx, id)

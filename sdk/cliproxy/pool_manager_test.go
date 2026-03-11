@@ -233,3 +233,49 @@ func TestPoolManager_DueLimitProbeIDs(t *testing.T) {
 		t.Fatalf("DueLimitProbeIDs() = %#v, want [l-1]", got)
 	}
 }
+
+func TestPoolManagerRatioThresholdHelpers(t *testing.T) {
+	cfg := config.PoolManagerConfig{
+		Size:                          200,
+		ReserveRefillLowRatio:         0.35,
+		ReserveRefillHighRatio:        0.85,
+		ColdBatchLoadRatio:            0.10,
+		ActiveQuotaRefreshSampleRatio: 0.12,
+	}
+
+	if got := reserveRefillLowWatermark(cfg, 100); got != 35 {
+		t.Fatalf("reserveRefillLowWatermark() = %d, want 35", got)
+	}
+	if got := reserveRefillHighWatermark(cfg, 100); got != 85 {
+		t.Fatalf("reserveRefillHighWatermark() = %d, want 85", got)
+	}
+	if got := coldBatchLoadSize(cfg, 200); got != 20 {
+		t.Fatalf("coldBatchLoadSize() = %d, want 20", got)
+	}
+	if got := activeQuotaRefreshSampleSize(cfg, 100); got != 12 {
+		t.Fatalf("activeQuotaRefreshSampleSize() = %d, want 12", got)
+	}
+}
+
+func TestPoolManagerRatioThresholdHelpersClampMinimums(t *testing.T) {
+	cfg := config.PoolManagerConfig{
+		Size:                          3,
+		ReserveRefillLowRatio:         0.01,
+		ReserveRefillHighRatio:        0.02,
+		ColdBatchLoadRatio:            0.01,
+		ActiveQuotaRefreshSampleRatio: 0.01,
+	}
+
+	if got := reserveRefillLowWatermark(cfg, 3); got != 1 {
+		t.Fatalf("reserveRefillLowWatermark() = %d, want 1", got)
+	}
+	if got := reserveRefillHighWatermark(cfg, 3); got != 1 {
+		t.Fatalf("reserveRefillHighWatermark() = %d, want 1", got)
+	}
+	if got := coldBatchLoadSize(cfg, 3); got != 1 {
+		t.Fatalf("coldBatchLoadSize() = %d, want 1", got)
+	}
+	if got := activeQuotaRefreshSampleSize(cfg, 3); got != 1 {
+		t.Fatalf("activeQuotaRefreshSampleSize() = %d, want 1", got)
+	}
+}

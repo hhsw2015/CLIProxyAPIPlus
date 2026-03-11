@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/watcher"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
 	log "github.com/sirupsen/logrus"
@@ -208,6 +209,61 @@ func TestRunActiveQuotaRefreshCycle_ProbesEvenWhenLastSuccessFresh(t *testing.T)
 	service.runActiveQuotaRefreshCycle(context.Background(), now.Add(10*time.Second))
 	if probeCalls != 1 {
 		t.Fatalf("second refresh should be throttled, probeCalls=%d, want 1", probeCalls)
+	}
+}
+
+func TestRunActiveQuotaRefreshCycle_UsesRatioWhenSampleSizeUnset(t *testing.T) {
+	originalProbe := poolProbeAuthFunc
+	probeCalls := 0
+	poolProbeAuthFunc = func(ctx context.Context, cfg *config.Config, auth *coreauth.Auth) (*coreauth.Auth, coreauth.Result) {
+		probeCalls++
+		if auth == nil {
+			return nil, coreauth.Result{Provider: "codex", Success: false}
+		}
+		return auth.Clone(), coreauth.Result{
+			AuthID:   auth.ID,
+			Provider: "codex",
+			Model:    "gpt-5",
+			Success:  true,
+		}
+	}
+	t.Cleanup(func() { poolProbeAuthFunc = originalProbe })
+
+	cfg := &config.Config{
+		PoolManager: config.PoolManagerConfig{
+			Size:                              4,
+			Provider:                          "codex",
+			LowQuotaThresholdPercent:          20,
+			ActiveQuotaRefreshIntervalSeconds: 60,
+			ActiveQuotaRefreshSampleRatio:     0.50,
+		},
+	}
+
+	coreManager := coreauth.NewManager(nil, &coreauth.RoundRobinSelector{}, nil)
+	coreManager.SetConfig(cfg)
+
+	service := &Service{
+		cfg:            cfg,
+		coreManager:    coreManager,
+		poolManager:    NewPoolManager(cfg.PoolManager),
+		poolMetrics:    NewPoolMetrics(cfg.PoolManager),
+		poolCandidates: map[string]*coreauth.Auth{},
+	}
+	for i := 0; i < 4; i++ {
+		auth := testCodexAuthWithRemaining("a-"+string(rune('1'+i)), 80)
+		auth.Status = coreauth.StatusActive
+		if _, err := coreManager.Register(coreauth.WithSkipPersist(context.Background()), auth); err != nil {
+			t.Fatalf("register auth %s: %v", auth.ID, err)
+		}
+		service.storePoolCandidate(auth)
+		service.setPoolMemberState(service.poolMemberForAuth(auth, PoolStateActive), PoolStateActive, "seed")
+	}
+
+	now := time.Unix(1_700_000_120, 0).UTC()
+	service.runActiveQuotaRefreshCycle(context.Background(), now)
+
+	if probeCalls != 2 {
+		t.Fatalf("probeCalls=%d, want 2", probeCalls)
 	}
 }
 
@@ -472,6 +528,299 @@ func TestFillWarmReserveFromColdCandidates_CapsReserveOnlyBurst(t *testing.T) {
 
 	if probeCalls != 1 {
 		t.Fatalf("expected reserve-only refill to honor configured sample size, probeCalls=%d", probeCalls)
+	}
+}
+
+func TestFillWarmReserveFromColdCandidates_SkipsWhenReserveAtLowWatermark(t *testing.T) {
+	originalProbe := poolProbeAuthFunc
+	probeCalls := 0
+	poolProbeAuthFunc = func(ctx context.Context, cfg *config.Config, auth *coreauth.Auth) (*coreauth.Auth, coreauth.Result) {
+		probeCalls++
+		if auth == nil {
+			return nil, coreauth.Result{Provider: "codex", Success: false}
+		}
+		return auth.Clone(), coreauth.Result{
+			AuthID:   auth.ID,
+			Provider: "codex",
+			Model:    "gpt-5",
+			Success:  true,
+		}
+	}
+	t.Cleanup(func() { poolProbeAuthFunc = originalProbe })
+
+	cfg := &config.Config{
+		PoolManager: config.PoolManagerConfig{
+			Size:                     10,
+			Provider:                 "codex",
+			ReserveRefillLowRatio:    0.35,
+			ReserveRefillHighRatio:   1.0,
+			ReserveSampleSize:        1,
+			LowQuotaThresholdPercent: 20,
+		},
+	}
+
+	service := &Service{
+		cfg:         cfg,
+		poolManager: NewPoolManager(cfg.PoolManager),
+		poolMetrics: NewPoolMetrics(cfg.PoolManager),
+		poolCandidates: map[string]*coreauth.Auth{
+			"cold-1": testCodexAuthWithRemaining("cold-1", 80),
+		},
+	}
+
+	for i := 0; i < 10; i++ {
+		authID := "active-" + string(rune('a'+i))
+		auth := testCodexAuthWithRemaining(authID, 99)
+		service.storePoolCandidate(auth)
+		service.setPoolMemberState(service.poolMemberForAuth(auth, PoolStateActive), PoolStateActive, "seed")
+	}
+	for i := 0; i < 4; i++ {
+		authID := "reserve-" + string(rune('a'+i))
+		auth := testCodexAuthWithRemaining(authID, 70)
+		service.storePoolCandidate(auth)
+		service.setPoolMemberState(service.poolMemberForAuth(auth, PoolStateReserve), PoolStateReserve, "seed")
+	}
+	service.poolCandidateOrder = []string{"cold-1"}
+
+	service.fillWarmReserveFromColdCandidates(context.Background())
+
+	if probeCalls != 0 {
+		t.Fatalf("probeCalls=%d, want 0 when reserve is at low watermark", probeCalls)
+	}
+}
+
+func TestFillWarmReserveFromColdCandidates_StopsAtHighWatermark(t *testing.T) {
+	originalProbe := poolProbeAuthFunc
+	probeCalls := 0
+	poolProbeAuthFunc = func(ctx context.Context, cfg *config.Config, auth *coreauth.Auth) (*coreauth.Auth, coreauth.Result) {
+		probeCalls++
+		if auth == nil {
+			return nil, coreauth.Result{Provider: "codex", Success: false}
+		}
+		return auth.Clone(), coreauth.Result{
+			AuthID:   auth.ID,
+			Provider: "codex",
+			Model:    "gpt-5",
+			Success:  true,
+		}
+	}
+	t.Cleanup(func() { poolProbeAuthFunc = originalProbe })
+
+	cfg := &config.Config{
+		PoolManager: config.PoolManagerConfig{
+			Size:                     10,
+			Provider:                 "codex",
+			ReserveRefillLowRatio:    0.35,
+			ReserveRefillHighRatio:   0.50,
+			ReserveSampleSize:        1,
+			LowQuotaThresholdPercent: 20,
+		},
+	}
+
+	service := &Service{
+		cfg:            cfg,
+		poolManager:    NewPoolManager(cfg.PoolManager),
+		poolMetrics:    NewPoolMetrics(cfg.PoolManager),
+		poolCandidates: map[string]*coreauth.Auth{},
+	}
+
+	for i := 0; i < 10; i++ {
+		authID := "active-" + string(rune('a'+i))
+		auth := testCodexAuthWithRemaining(authID, 99)
+		service.storePoolCandidate(auth)
+		service.setPoolMemberState(service.poolMemberForAuth(auth, PoolStateActive), PoolStateActive, "seed")
+	}
+	for i := 0; i < 2; i++ {
+		authID := "reserve-" + string(rune('a'+i))
+		auth := testCodexAuthWithRemaining(authID, 80)
+		service.storePoolCandidate(auth)
+		service.setPoolMemberState(service.poolMemberForAuth(auth, PoolStateReserve), PoolStateReserve, "seed")
+	}
+	coldIDs := []string{"cold-1", "cold-2", "cold-3", "cold-4", "cold-5", "cold-6"}
+	for _, authID := range coldIDs {
+		auth := testCodexAuthWithRemaining(authID, 80)
+		service.storePoolCandidate(auth)
+	}
+	service.poolCandidateOrder = append([]string(nil), coldIDs...)
+
+	service.fillWarmReserveFromColdCandidates(context.Background())
+
+	snapshot := service.poolManager.Snapshot()
+	if snapshot.ReserveCount != 5 {
+		t.Fatalf("ReserveCount=%d, want 5", snapshot.ReserveCount)
+	}
+	if probeCalls != 4 {
+		t.Fatalf("probeCalls=%d, want 4 (3 cold refills + 1 reserve quality check)", probeCalls)
+	}
+}
+
+func TestSetPoolMemberState_EvictsIndexedColdStatesFromHotMap(t *testing.T) {
+	service := &Service{
+		poolManager:        NewPoolManager(config.PoolManagerConfig{Size: 1, Provider: "codex"}),
+		poolCandidates:     map[string]*coreauth.Auth{},
+		poolCandidateIndex: map[string]*poolCandidateRef{},
+	}
+
+	auth := &coreauth.Auth{
+		ID:       "indexed-auth",
+		Provider: "codex",
+		Attributes: map[string]string{
+			"path": "/tmp/indexed-auth.json",
+		},
+	}
+	service.storePoolCandidate(auth)
+
+	if _, ok := service.poolCandidates[auth.ID]; !ok {
+		t.Fatalf("expected %s to start hot", auth.ID)
+	}
+
+	service.setPoolMemberState(PoolMember{AuthID: auth.ID, Provider: "codex"}, PoolStateLowQuota, "low_quota")
+
+	if _, ok := service.poolCandidates[auth.ID]; ok {
+		t.Fatalf("expected %s to be evicted from hot map after low_quota", auth.ID)
+	}
+	if _, ok := service.poolCandidateIndex[auth.ID]; !ok {
+		t.Fatalf("expected %s to remain in candidate index", auth.ID)
+	}
+}
+
+func TestHandleAuthUpdate_PoolModeKeepsColdAuthIndexedOnly(t *testing.T) {
+	cfg := &config.Config{
+		AuthDir: t.TempDir(),
+		PoolManager: config.PoolManagerConfig{
+			Size:     1,
+			Provider: "codex",
+		},
+	}
+
+	coreManager := coreauth.NewManager(nil, &coreauth.RoundRobinSelector{}, nil)
+	coreManager.SetConfig(cfg)
+
+	service := &Service{
+		cfg:                cfg,
+		coreManager:        coreManager,
+		poolManager:        NewPoolManager(cfg.PoolManager),
+		poolCandidates:     map[string]*coreauth.Auth{},
+		poolCandidateIndex: map[string]*poolCandidateRef{},
+	}
+
+	auth := &coreauth.Auth{
+		ID:       "cold-auth",
+		Provider: "codex",
+		Status:   coreauth.StatusActive,
+		Attributes: map[string]string{
+			"path":     "/tmp/cold-auth.json",
+			"api_key":  "cold-key",
+			"base_url": "https://example.com/v1",
+		},
+	}
+
+	service.handleAuthUpdate(context.Background(), watcher.AuthUpdate{
+		Action: watcher.AuthUpdateActionAdd,
+		Auth:   auth,
+	})
+
+	if _, ok := service.poolCandidateIndex[auth.ID]; !ok {
+		t.Fatalf("expected %s to be indexed", auth.ID)
+	}
+	if _, ok := service.poolCandidates[auth.ID]; ok {
+		t.Fatalf("did not expect %s to be kept hot", auth.ID)
+	}
+	if _, ok := coreManager.GetByID(auth.ID); ok {
+		t.Fatalf("did not expect cold auth %s to be registered in core manager", auth.ID)
+	}
+}
+
+func TestHandleAuthUpdate_PoolModeUpdatesActiveRuntimeAuth(t *testing.T) {
+	cfg := &config.Config{
+		AuthDir: t.TempDir(),
+		PoolManager: config.PoolManagerConfig{
+			Size:     1,
+			Provider: "codex",
+		},
+	}
+
+	coreManager := coreauth.NewManager(nil, &coreauth.RoundRobinSelector{}, nil)
+	coreManager.SetConfig(cfg)
+
+	service := &Service{
+		cfg:                cfg,
+		coreManager:        coreManager,
+		poolManager:        NewPoolManager(cfg.PoolManager),
+		poolCandidates:     map[string]*coreauth.Auth{},
+		poolCandidateIndex: map[string]*poolCandidateRef{},
+	}
+
+	auth := &coreauth.Auth{
+		ID:       "active-auth",
+		Provider: "codex",
+		Status:   coreauth.StatusActive,
+		Attributes: map[string]string{
+			"path":     "/tmp/active-auth.json",
+			"api_key":  "active-key",
+			"base_url": "https://example.com/v1",
+		},
+	}
+	service.setPoolMemberState(service.poolMemberForAuth(auth, PoolStateActive), PoolStateActive, "seed")
+
+	service.handleAuthUpdate(context.Background(), watcher.AuthUpdate{
+		Action: watcher.AuthUpdateActionModify,
+		Auth:   auth,
+	})
+
+	if _, ok := service.poolCandidates[auth.ID]; !ok {
+		t.Fatalf("expected %s to remain hot", auth.ID)
+	}
+	if _, ok := coreManager.GetByID(auth.ID); !ok {
+		t.Fatalf("expected active auth %s to be registered in core manager", auth.ID)
+	}
+}
+
+func TestHandleAuthUpdate_PoolModeDeleteRemovesTrackedReserve(t *testing.T) {
+	cfg := &config.Config{
+		AuthDir: t.TempDir(),
+		PoolManager: config.PoolManagerConfig{
+			Size:     1,
+			Provider: "codex",
+		},
+	}
+
+	service := &Service{
+		cfg:                cfg,
+		coreManager:        coreauth.NewManager(nil, &coreauth.RoundRobinSelector{}, nil),
+		poolManager:        NewPoolManager(cfg.PoolManager),
+		poolCandidates:     map[string]*coreauth.Auth{},
+		poolCandidateIndex: map[string]*poolCandidateRef{},
+	}
+	service.coreManager.SetConfig(cfg)
+
+	auth := &coreauth.Auth{
+		ID:       "reserve-auth",
+		Provider: "codex",
+		Status:   coreauth.StatusActive,
+		Attributes: map[string]string{
+			"path":     "/tmp/reserve-auth.json",
+			"api_key":  "reserve-key",
+			"base_url": "https://example.com/v1",
+		},
+	}
+	service.storePoolCandidate(auth)
+	service.setPoolMemberState(service.poolMemberForAuth(auth, PoolStateReserve), PoolStateReserve, "seed")
+
+	service.handleAuthUpdate(context.Background(), watcher.AuthUpdate{
+		Action: watcher.AuthUpdateActionDelete,
+		ID:     auth.ID,
+	})
+
+	snapshot := service.poolManager.Snapshot()
+	if snapshot.ReserveCount != 0 {
+		t.Fatalf("expected reserve auth to be removed, got %+v", snapshot)
+	}
+	if _, ok := service.poolCandidates[auth.ID]; ok {
+		t.Fatalf("expected %s to be removed from hot map", auth.ID)
+	}
+	if _, ok := service.poolCandidateIndex[auth.ID]; ok {
+		t.Fatalf("expected %s to be removed from candidate index", auth.ID)
 	}
 }
 
