@@ -160,6 +160,96 @@ func TestMarkResultArchivesLimitAuthAndSiblingEntries(t *testing.T) {
 	}, "archived limit auth file")
 }
 
+func TestMarkResultPoolProbeDoesNotDeleteInvalidAuthFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	sourcePath := filepath.Join(tmpDir, "codex.json")
+	if err := os.WriteFile(sourcePath, []byte(`{"type":"codex","email":"demo@example.com"}`), 0o600); err != nil {
+		t.Fatalf("write auth file: %v", err)
+	}
+
+	hook := &captureDispositionHook{}
+	m := NewManager(nil, nil, hook)
+	m.SetConfig(&internalconfig.Config{AuthDir: tmpDir, ArchiveFailedAuth: true})
+	if _, err := m.Register(context.Background(), &Auth{
+		ID:         "codex.json",
+		Provider:   "codex",
+		Metadata:   map[string]any{"type": "codex"},
+		Attributes: map[string]string{"path": sourcePath},
+	}); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+
+	m.MarkResult(WithDispositionSource(context.Background(), "pool_probe"), Result{
+		AuthID:  "codex.json",
+		Success: false,
+		Error: &Error{
+			HTTPStatus: 401,
+			Message:    "unauthorized",
+		},
+	})
+
+	if _, ok := m.GetByID("codex.json"); !ok {
+		t.Fatal("expected auth to remain in manager for pool probe failure")
+	}
+	if _, err := os.Stat(sourcePath); err != nil {
+		t.Fatalf("expected auth file to remain after pool probe failure, err=%v", err)
+	}
+	if len(hook.dispositions) != 1 {
+		t.Fatalf("expected 1 disposition, got %d", len(hook.dispositions))
+	}
+	if hook.dispositions[0].Deleted {
+		t.Fatalf("expected pool_probe disposition to avoid Deleted=true, got %+v", hook.dispositions[0])
+	}
+	if hook.dispositions[0].PoolEligible {
+		t.Fatalf("expected pool_probe disposition to mark auth ineligible, got %+v", hook.dispositions[0])
+	}
+}
+
+func TestMarkResultPoolProbeDoesNotArchiveLimitFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	sourcePath := filepath.Join(tmpDir, "gemini.json")
+	if err := os.WriteFile(sourcePath, []byte(`{"type":"gemini","email":"demo@example.com"}`), 0o600); err != nil {
+		t.Fatalf("write auth file: %v", err)
+	}
+
+	hook := &captureDispositionHook{}
+	m := NewManager(nil, nil, hook)
+	m.SetConfig(&internalconfig.Config{AuthDir: tmpDir, ArchiveFailedAuth: true})
+	if _, err := m.Register(context.Background(), &Auth{
+		ID:         "gemini.json",
+		Provider:   "gemini-cli",
+		Metadata:   map[string]any{"type": "gemini"},
+		Attributes: map[string]string{"path": sourcePath},
+	}); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+
+	m.MarkResult(WithDispositionSource(context.Background(), "pool_probe"), Result{
+		AuthID:  "gemini.json",
+		Success: false,
+		Error: &Error{
+			HTTPStatus: 429,
+			Message:    "quota exceeded",
+		},
+	})
+
+	if _, ok := m.GetByID("gemini.json"); !ok {
+		t.Fatal("expected auth to remain in manager for pool probe quota failure")
+	}
+	if _, err := os.Stat(sourcePath); err != nil {
+		t.Fatalf("expected source auth file to remain after pool probe quota failure, err=%v", err)
+	}
+	if _, err := os.Stat(filepath.Join(tmpDir, "limit", "gemini.json")); !os.IsNotExist(err) {
+		t.Fatalf("expected no limit archive for pool probe failure, err=%v", err)
+	}
+	if len(hook.dispositions) != 1 {
+		t.Fatalf("expected 1 disposition, got %d", len(hook.dispositions))
+	}
+	if hook.dispositions[0].MovedToLimit {
+		t.Fatalf("expected pool_probe disposition to avoid MovedToLimit=true, got %+v", hook.dispositions[0])
+	}
+}
+
 func TestMarkResult_ArchivesAsyncAfterDisposition(t *testing.T) {
 	tmpDir := t.TempDir()
 	sourcePath := filepath.Join(tmpDir, "gemini.json")
