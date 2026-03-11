@@ -1982,19 +1982,11 @@ func isInvalidArchiveFailure(status int, message string) bool {
 		"invalid api key",
 		"invalid_api_key",
 		"api key is invalid",
-		"session expired",
-		"token expired",
 		"token revoked",
-		"unauthorized",
 	) {
 		return true
 	}
-	switch status {
-	case http.StatusUnauthorized, http.StatusForbidden:
-		return true
-	default:
-		return false
-	}
+	return false
 }
 
 func containsAnyFold(value string, targets ...string) bool {
