@@ -118,7 +118,7 @@ type Service struct {
 	// poolCandidateCursor tracks the next cold candidate scan position.
 	poolCandidateCursor int
 
-	poolCandidateMu sync.Mutex
+	poolCandidateMu sync.RWMutex
 
 	// poolMetrics stores pool observability counters.
 	poolMetrics *PoolMetrics
@@ -473,18 +473,47 @@ func sortAuthCandidatesByRemaining(auths []*coreauth.Auth) []*coreauth.Auth {
 	return sorted
 }
 
+func (s *Service) poolCandidate(authID string) *coreauth.Auth {
+	if s == nil {
+		return nil
+	}
+	authID = strings.TrimSpace(authID)
+	if authID == "" {
+		return nil
+	}
+	s.poolCandidateMu.RLock()
+	defer s.poolCandidateMu.RUnlock()
+	auth := s.poolCandidates[authID]
+	if auth == nil {
+		return nil
+	}
+	return auth.Clone()
+}
+
+func (s *Service) deletePoolCandidate(authID string) {
+	if s == nil {
+		return
+	}
+	authID = strings.TrimSpace(authID)
+	if authID == "" {
+		return
+	}
+	s.poolCandidateMu.Lock()
+	defer s.poolCandidateMu.Unlock()
+	delete(s.poolCandidates, authID)
+}
+
 func (s *Service) storePoolCandidate(auth *coreauth.Auth) {
 	if s == nil || auth == nil || strings.TrimSpace(auth.ID) == "" {
 		return
 	}
+	s.poolCandidateMu.Lock()
+	defer s.poolCandidateMu.Unlock()
 	if s.poolCandidates == nil {
 		s.poolCandidates = make(map[string]*coreauth.Auth)
 	}
 	id := strings.TrimSpace(auth.ID)
 	s.poolCandidates[id] = auth.Clone()
-
-	s.poolCandidateMu.Lock()
-	defer s.poolCandidateMu.Unlock()
 	for _, existing := range s.poolCandidateOrder {
 		if existing == id {
 			return
@@ -521,6 +550,8 @@ func (s *Service) poolCandidateCounts() (candidateCount, coldCandidateCount int)
 	if s == nil {
 		return 0, 0
 	}
+	s.poolCandidateMu.RLock()
+	defer s.poolCandidateMu.RUnlock()
 	candidateCount = len(s.poolCandidates)
 	if candidateCount == 0 || s.poolManager == nil {
 		return candidateCount, candidateCount
@@ -557,6 +588,8 @@ func (s *Service) poolObservedState(authID string) string {
 			}
 		}
 	}
+	s.poolCandidateMu.RLock()
+	defer s.poolCandidateMu.RUnlock()
 	if _, ok := s.poolCandidates[authID]; ok {
 		return poolStateCold
 	}
@@ -905,7 +938,7 @@ func (s *Service) replaceLowQualityActiveFromReserve(ctx context.Context, maxRep
 			break
 		}
 
-		auth := s.poolCandidates[bestReserveID]
+		auth := s.poolCandidate(bestReserveID)
 		if auth == nil {
 			s.removePoolMember(bestReserveID, "", "reserve_missing")
 			break
@@ -1023,12 +1056,12 @@ func (s *Service) syncPoolActiveToRuntime(ctx context.Context) {
 	added, modified, removed := s.poolManager.ActiveDiff(s.publishedActive)
 	modified = nil
 	for _, id := range added {
-		if auth := s.poolCandidates[id]; auth != nil {
+		if auth := s.poolCandidate(id); auth != nil {
 			log.Infof("pool-publish: add auth=%s provider=%s", id, auth.Provider)
 			s.emitAuthUpdate(ctx, watcher.AuthUpdate{
 				Action: watcher.AuthUpdateActionAdd,
 				ID:     id,
-				Auth:   auth.Clone(),
+				Auth:   auth,
 			})
 		}
 	}
@@ -1100,7 +1133,7 @@ func (s *Service) handleAuthDisposition(ctx context.Context, disposition coreaut
 			s.poolMetrics.RecordDeleted()
 		}
 		s.removePoolMember(authID, disposition.Provider, "deleted")
-		delete(s.poolCandidates, authID)
+		s.deletePoolCandidate(authID)
 	} else if disposition.MovedToLimit || !disposition.PoolEligible {
 		reason := "ineligible"
 		if disposition.MovedToLimit {
@@ -1147,7 +1180,7 @@ func (s *Service) fillActiveFromReserve(ctx context.Context) {
 			if !s.consumeBackgroundProbeBudget(time.Now()) {
 				return
 			}
-			auth := s.poolCandidates[authID]
+			auth := s.poolCandidate(authID)
 			if auth == nil {
 				s.removePoolMember(authID, "", "reserve_missing")
 				continue
@@ -1265,7 +1298,7 @@ func (s *Service) fillWarmReserveFromColdCandidates(ctx context.Context) {
 			if !s.consumeBackgroundProbeBudget(time.Now()) {
 				break
 			}
-			auth := s.poolCandidates[authID]
+			auth := s.poolCandidate(authID)
 			if auth == nil {
 				continue
 			}
@@ -1485,7 +1518,7 @@ func (s *Service) runActiveProbeCycle(ctx context.Context, now time.Time) {
 		beforeProbe := auth.Clone()
 		probedAuth, result := poolProbeAuthFunc(probeCtx, s.cfg, auth)
 		if probedAuth != nil {
-			s.poolCandidates[probedAuth.ID] = probedAuth.Clone()
+			s.storePoolCandidate(probedAuth)
 			if result.Success {
 				s.applyCoreAuthAddOrUpdate(coreauth.WithSkipPersist(probeCtx), probedAuth)
 			}
@@ -1561,7 +1594,7 @@ func (s *Service) runActiveQuotaRefreshCycle(ctx context.Context, now time.Time)
 		beforeProbe := auth.Clone()
 		probedAuth, result := poolProbeAuthFunc(probeCtx, s.cfg, auth)
 		if probedAuth != nil {
-			s.poolCandidates[probedAuth.ID] = probedAuth.Clone()
+			s.storePoolCandidate(probedAuth)
 			if result.Success {
 				s.applyCoreAuthAddOrUpdate(coreauth.WithSkipPersist(probeCtx), probedAuth)
 			}
@@ -1626,9 +1659,9 @@ func (s *Service) runReserveProbeCycle(ctx context.Context, now time.Time) {
 			break
 		}
 		sampled++
-		auth := s.poolCandidates[authID]
+		auth := s.poolCandidate(authID)
 		if auth == nil {
-			s.removePoolMember(authID, auth.Provider, "reserve_missing")
+			s.removePoolMember(authID, "", "reserve_missing")
 			skipped++
 			continue
 		}
@@ -1693,9 +1726,9 @@ func (s *Service) runLimitProbeCycle(ctx context.Context, now time.Time) {
 			break
 		}
 		sampled++
-		auth := s.poolCandidates[authID]
+		auth := s.poolCandidate(authID)
 		if auth == nil {
-			s.removePoolMember(authID, auth.Provider, "limit_missing")
+			s.removePoolMember(authID, "", "limit_missing")
 			skipped++
 			continue
 		}
