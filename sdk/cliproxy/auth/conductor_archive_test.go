@@ -11,6 +11,7 @@ import (
 	"time"
 
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	log "github.com/sirupsen/logrus"
@@ -456,7 +457,7 @@ func TestArchiveAuthFileAsyncLogsDeletionReason(t *testing.T) {
 	oldFormatter := log.StandardLogger().Formatter
 	oldLevel := log.GetLevel()
 	log.SetOutput(&buf)
-	log.SetFormatter(&log.TextFormatter{DisableTimestamp: true, DisableColors: true})
+	log.SetFormatter(&logging.LogFormatter{})
 	log.SetLevel(log.InfoLevel)
 	t.Cleanup(func() {
 		log.SetOutput(oldOutput)
@@ -474,10 +475,10 @@ func TestArchiveAuthFileAsyncLogsDeletionReason(t *testing.T) {
 	})
 
 	logOutput := buf.String()
-	if !strings.Contains(logOutput, "refresh_token_reused") {
-		t.Fatalf("expected log to include error code, got %q", logOutput)
+	if !strings.Contains(logOutput, "code=refresh_token_reused") {
+		t.Fatalf("expected log to include error code in message, got %q", logOutput)
 	}
-	if !strings.Contains(logOutput, "access token invalid") {
-		t.Fatalf("expected log to include error message, got %q", logOutput)
+	if !strings.Contains(logOutput, "message=refresh token reused and access token invalid") {
+		t.Fatalf("expected log to include error message in message body, got %q", logOutput)
 	}
 }

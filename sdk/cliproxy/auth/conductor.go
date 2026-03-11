@@ -1834,24 +1834,29 @@ func (m *Manager) archiveAuthFileAsync(ctx context.Context, authID, archivePath 
 		return
 	}
 	entry := logEntryWithRequestID(ctx)
+	reasonSuffix := ""
 	if resultErr != nil {
+		parts := make([]string, 0, 2)
 		if code := strings.TrimSpace(resultErr.Code); code != "" {
-			entry = entry.WithField("error_code", code)
+			parts = append(parts, "code="+code)
 		}
 		if message := strings.TrimSpace(resultErr.Message); message != "" {
-			entry = entry.WithField("error_message", message)
+			parts = append(parts, "message="+message)
+		}
+		if len(parts) > 0 {
+			reasonSuffix = " (" + strings.Join(parts, " ") + ")"
 		}
 	}
 	targetPath, err := archiveAuthFileFunc(m, archivePath, archiveKind)
 	if err != nil {
-		entry.WithError(err).Warnf("failed to handle auth %s after %s failure", authID, archiveKind)
+		entry.WithError(err).Warnf("failed to handle auth %s after %s failure%s", authID, archiveKind, reasonSuffix)
 		return
 	}
 	if archiveKind == util.FailedAuthArchiveDelete {
-		entry.Infof("deleted auth %s after %s failure", authID, archiveKind)
+		entry.Infof("deleted auth %s after %s failure%s", authID, archiveKind, reasonSuffix)
 		return
 	}
-	entry.Infof("archived auth %s to %s after %s failure", authID, targetPath, archiveKind)
+	entry.Infof("archived auth %s to %s after %s failure%s", authID, targetPath, archiveKind, reasonSuffix)
 }
 
 func buildAuthDisposition(auth *Auth, result Result, source string) AuthDisposition {
