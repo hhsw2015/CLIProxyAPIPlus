@@ -1,16 +1,19 @@
 package auth
 
 import (
+	"bytes"
 	"context"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
+	log "github.com/sirupsen/logrus"
 )
 
 func TestClassifyFailedAuthArchiveSkipsGenericUnauthorized(t *testing.T) {
@@ -439,4 +442,42 @@ func TestRefreshAuthDeletesInvalidAuthFileWhenRefreshReportsReusedAndCredentialI
 		_, err := os.Stat(sourcePath)
 		return os.IsNotExist(err)
 	}, "source auth file removal after refresh failure")
+}
+
+func TestArchiveAuthFileAsyncLogsDeletionReason(t *testing.T) {
+	tmpDir := t.TempDir()
+	sourcePath := filepath.Join(tmpDir, "codex.json")
+	if err := os.WriteFile(sourcePath, []byte(`{"type":"codex","email":"demo@example.com"}`), 0o600); err != nil {
+		t.Fatalf("write auth file: %v", err)
+	}
+
+	var buf bytes.Buffer
+	oldOutput := log.StandardLogger().Out
+	oldFormatter := log.StandardLogger().Formatter
+	oldLevel := log.GetLevel()
+	log.SetOutput(&buf)
+	log.SetFormatter(&log.TextFormatter{DisableTimestamp: true, DisableColors: true})
+	log.SetLevel(log.InfoLevel)
+	t.Cleanup(func() {
+		log.SetOutput(oldOutput)
+		log.SetFormatter(oldFormatter)
+		log.SetLevel(oldLevel)
+	})
+
+	m := NewManager(nil, nil, nil)
+	m.SetConfig(&internalconfig.Config{AuthDir: tmpDir, ArchiveFailedAuth: true})
+
+	m.archiveAuthFileAsync(context.Background(), "codex.json", sourcePath, util.FailedAuthArchiveDelete, &Error{
+		Code:       "refresh_token_reused",
+		Message:    "refresh token reused and access token invalid",
+		HTTPStatus: 401,
+	})
+
+	logOutput := buf.String()
+	if !strings.Contains(logOutput, "refresh_token_reused") {
+		t.Fatalf("expected log to include error code, got %q", logOutput)
+	}
+	if !strings.Contains(logOutput, "access token invalid") {
+		t.Fatalf("expected log to include error message, got %q", logOutput)
+	}
 }

@@ -1807,7 +1807,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 		if emitDisposition {
 			m.hook.OnAuthDisposition(ctx, disposition)
 		}
-		go m.archiveAuthFileAsync(ctx, result.AuthID, archivePath, archiveKind)
+		go m.archiveAuthFileAsync(ctx, result.AuthID, archivePath, archiveKind, result.Error)
 		return
 	}
 
@@ -1829,11 +1829,19 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	}
 }
 
-func (m *Manager) archiveAuthFileAsync(ctx context.Context, authID, archivePath string, archiveKind util.FailedAuthArchiveKind) {
+func (m *Manager) archiveAuthFileAsync(ctx context.Context, authID, archivePath string, archiveKind util.FailedAuthArchiveKind, resultErr *Error) {
 	if m == nil {
 		return
 	}
 	entry := logEntryWithRequestID(ctx)
+	if resultErr != nil {
+		if code := strings.TrimSpace(resultErr.Code); code != "" {
+			entry = entry.WithField("error_code", code)
+		}
+		if message := strings.TrimSpace(resultErr.Message); message != "" {
+			entry = entry.WithField("error_message", message)
+		}
+	}
 	targetPath, err := archiveAuthFileFunc(m, archivePath, archiveKind)
 	if err != nil {
 		entry.WithError(err).Warnf("failed to handle auth %s after %s failure", authID, archiveKind)
