@@ -1744,7 +1744,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 				applyAuthFailureState(auth, result.Error, result.RetryAfter, now)
 			}
 
-			if kind, sourcePath, ids, okArchive := m.failedAuthArchiveDecisionLocked(auth, result); okArchive {
+			if kind, sourcePath, ids, okArchive := m.failedAuthArchiveDecisionLocked(auth, result, disposition.Source); okArchive {
 				archiveAuth = true
 				archiveKind = kind
 				archivePath = sourcePath
@@ -1891,8 +1891,11 @@ func DispositionSource(ctx context.Context) string {
 	return "request"
 }
 
-func (m *Manager) failedAuthArchiveDecisionLocked(auth *Auth, result Result) (util.FailedAuthArchiveKind, string, []string, bool) {
+func (m *Manager) failedAuthArchiveDecisionLocked(auth *Auth, result Result, source string) (util.FailedAuthArchiveKind, string, []string, bool) {
 	if m == nil || auth == nil || result.Success {
+		return "", "", nil, false
+	}
+	if strings.EqualFold(strings.TrimSpace(source), "pool_probe") {
 		return "", "", nil, false
 	}
 	cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)

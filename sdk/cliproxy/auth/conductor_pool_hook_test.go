@@ -19,7 +19,7 @@ func (h *captureDispositionHook) OnAuthDisposition(_ context.Context, dispositio
 	h.dispositions = append(h.dispositions, disposition)
 }
 
-func TestMarkResultEmitsDeletedDisposition(t *testing.T) {
+func TestMarkResultPoolProbeEmitsIneligibleDispositionWithoutDelete(t *testing.T) {
 	t.Parallel()
 
 	tmpDir := t.TempDir()
@@ -54,8 +54,8 @@ func TestMarkResultEmitsDeletedDisposition(t *testing.T) {
 		t.Fatalf("expected 1 disposition, got %d", len(hook.dispositions))
 	}
 	got := hook.dispositions[0]
-	if !got.Deleted {
-		t.Fatalf("expected Deleted=true, got %+v", got)
+	if got.Deleted {
+		t.Fatalf("expected Deleted=false for pool_probe, got %+v", got)
 	}
 	if got.Source != "pool_probe" {
 		t.Fatalf("expected Source=pool_probe, got %q", got.Source)
@@ -63,11 +63,13 @@ func TestMarkResultEmitsDeletedDisposition(t *testing.T) {
 	if got.PoolEligible {
 		t.Fatalf("expected PoolEligible=false, got %+v", got)
 	}
+	if got.MovedToLimit {
+		t.Fatalf("expected MovedToLimit=false for pool_probe, got %+v", got)
+	}
 
-	waitForCondition(t, 2*time.Second, func() bool {
-		_, err := os.Stat(sourcePath)
-		return os.IsNotExist(err)
-	}, "source auth file removal after deleted disposition")
+	if _, err := os.Stat(sourcePath); err != nil {
+		t.Fatalf("expected source auth file to remain for pool_probe, err=%v", err)
+	}
 }
 
 func TestMarkResultEmitsLimitDisposition(t *testing.T) {
