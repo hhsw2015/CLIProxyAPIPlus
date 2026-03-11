@@ -282,6 +282,7 @@ func (s *Service) emitAuthUpdate(ctx context.Context, update watcher.AuthUpdate)
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	update.Runtime = true
 	if s.watcher != nil && s.watcher.DispatchRuntimeAuthUpdate(update) {
 		return
 	}
@@ -2213,6 +2214,27 @@ func (s *Service) handleAuthUpdate(ctx context.Context, update watcher.AuthUpdat
 	cfg := s.cfg
 	s.cfgMu.RUnlock()
 	if cfg == nil || s.coreManager == nil {
+		return
+	}
+	if update.Runtime {
+		switch update.Action {
+		case watcher.AuthUpdateActionAdd, watcher.AuthUpdateActionModify:
+			if update.Auth == nil || update.Auth.ID == "" {
+				return
+			}
+			s.applyCoreAuthAddOrUpdate(ctx, update.Auth)
+		case watcher.AuthUpdateActionDelete:
+			id := update.ID
+			if id == "" && update.Auth != nil {
+				id = update.Auth.ID
+			}
+			if id == "" {
+				return
+			}
+			s.applyCoreAuthRemoval(ctx, id)
+		default:
+			log.Debugf("received unknown runtime auth update action: %v", update.Action)
+		}
 		return
 	}
 	switch update.Action {

@@ -121,11 +121,11 @@ pool-manager:
 	if cfg.PoolManager.ReserveRefillHighRatio != 1.0 {
 		t.Fatalf("PoolManager.ReserveRefillHighRatio = %v, want 1.0", cfg.PoolManager.ReserveRefillHighRatio)
 	}
-	if cfg.PoolManager.ColdBatchLoadRatio != 0.20 {
-		t.Fatalf("PoolManager.ColdBatchLoadRatio = %v, want 0.20", cfg.PoolManager.ColdBatchLoadRatio)
+	if cfg.PoolManager.ColdBatchLoadRatio != 0 {
+		t.Fatalf("PoolManager.ColdBatchLoadRatio = %v, want 0", cfg.PoolManager.ColdBatchLoadRatio)
 	}
-	if cfg.PoolManager.ActiveQuotaRefreshSampleRatio != 0.10 {
-		t.Fatalf("PoolManager.ActiveQuotaRefreshSampleRatio = %v, want 0.10", cfg.PoolManager.ActiveQuotaRefreshSampleRatio)
+	if cfg.PoolManager.ActiveQuotaRefreshSampleRatio != 0 {
+		t.Fatalf("PoolManager.ActiveQuotaRefreshSampleRatio = %v, want 0", cfg.PoolManager.ActiveQuotaRefreshSampleRatio)
 	}
 }
 
@@ -158,10 +158,10 @@ pool-manager:
 	if cfg.PoolManager.ReserveRefillHighRatio != 1.0 {
 		t.Fatalf("PoolManager.ReserveRefillHighRatio = %v, want 1.0", cfg.PoolManager.ReserveRefillHighRatio)
 	}
-	if cfg.PoolManager.ColdBatchLoadRatio != 0.20 {
-		t.Fatalf("PoolManager.ColdBatchLoadRatio = %v, want 0.20", cfg.PoolManager.ColdBatchLoadRatio)
+	if cfg.PoolManager.ColdBatchLoadRatio != 0 {
+		t.Fatalf("PoolManager.ColdBatchLoadRatio = %v, want 0", cfg.PoolManager.ColdBatchLoadRatio)
 	}
-	if cfg.PoolManager.ActiveQuotaRefreshSampleRatio != 0.10 {
-		t.Fatalf("PoolManager.ActiveQuotaRefreshSampleRatio = %v, want 0.10", cfg.PoolManager.ActiveQuotaRefreshSampleRatio)
+	if cfg.PoolManager.ActiveQuotaRefreshSampleRatio != 0 {
+		t.Fatalf("PoolManager.ActiveQuotaRefreshSampleRatio = %v, want 0", cfg.PoolManager.ActiveQuotaRefreshSampleRatio)
 	}
 }

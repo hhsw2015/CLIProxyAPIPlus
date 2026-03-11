@@ -43,6 +43,7 @@ func (w *Watcher) dispatchRuntimeAuthUpdate(update AuthUpdate) bool {
 	if w == nil {
 		return false
 	}
+	update.Runtime = true
 	w.clientsMutex.Lock()
 	if w.runtimeAuths == nil {
 		w.runtimeAuths = make(map[string]*coreauth.Auth)
