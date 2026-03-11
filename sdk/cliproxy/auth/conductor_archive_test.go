@@ -296,6 +296,45 @@ func TestMarkResultPoolProbeDoesNotArchiveLimitFile(t *testing.T) {
 	}
 }
 
+func TestMarkResultPoolProbeDeletesAfterRepeatedUnauthorizedFailures(t *testing.T) {
+	tmpDir := t.TempDir()
+	sourcePath := filepath.Join(tmpDir, "codex.json")
+	if err := os.WriteFile(sourcePath, []byte(`{"type":"codex","email":"demo@example.com"}`), 0o600); err != nil {
+		t.Fatalf("write auth file: %v", err)
+	}
+
+	m := NewManager(nil, nil, nil)
+	m.SetConfig(&internalconfig.Config{AuthDir: tmpDir, ArchiveFailedAuth: true})
+	if _, err := m.Register(context.Background(), &Auth{
+		ID:         "codex.json",
+		Provider:   "codex",
+		Metadata:   map[string]any{"type": "codex"},
+		Attributes: map[string]string{"path": sourcePath},
+	}); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+
+	ctx := WithDispositionSource(context.Background(), "pool_probe")
+	for i := 0; i < 3; i++ {
+		m.MarkResult(ctx, Result{
+			AuthID:  "codex.json",
+			Success: false,
+			Error: &Error{
+				HTTPStatus: 401,
+				Message:    "unauthorized",
+			},
+		})
+	}
+
+	if _, ok := m.GetByID("codex.json"); ok {
+		t.Fatal("expected auth to be removed after repeated unauthorized pool probe failures")
+	}
+	waitForCondition(t, 2*time.Second, func() bool {
+		_, err := os.Stat(sourcePath)
+		return os.IsNotExist(err)
+	}, "source auth file removal after repeated pool probe failures")
+}
+
 func TestMarkResult_ArchivesAsyncAfterDisposition(t *testing.T) {
 	tmpDir := t.TempDir()
 	sourcePath := filepath.Join(tmpDir, "gemini.json")

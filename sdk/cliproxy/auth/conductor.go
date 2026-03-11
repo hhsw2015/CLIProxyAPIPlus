@@ -26,6 +26,9 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
+const invalidArchiveStrikeThreshold = 3
+const invalidArchiveStrikeMetadataKey = "invalid_archive_strikes"
+
 // ProviderExecutor defines the contract required by Manager to execute provider calls.
 type ProviderExecutor interface {
 	// Identifier returns the provider key handled by this executor.
@@ -1743,6 +1746,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 			} else {
 				applyAuthFailureState(auth, result.Error, result.RetryAfter, now)
 			}
+			recordInvalidArchiveStrike(auth, result.Error)
 
 			if kind, sourcePath, ids, okArchive := m.failedAuthArchiveDecisionLocked(auth, result, disposition.Source); okArchive {
 				archiveAuth = true
@@ -1895,9 +1899,6 @@ func (m *Manager) failedAuthArchiveDecisionLocked(auth *Auth, result Result, sou
 	if m == nil || auth == nil || result.Success {
 		return "", "", nil, false
 	}
-	if strings.EqualFold(strings.TrimSpace(source), "pool_probe") {
-		return "", "", nil, false
-	}
 	cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
 	if cfg == nil || !cfg.ArchiveFailedAuth {
 		return "", "", nil, false
@@ -1914,14 +1915,26 @@ func (m *Manager) failedAuthArchiveDecisionLocked(auth *Auth, result Result, sou
 		return "", "", nil, false
 	}
 	kind, ok := classifyFailedAuthArchive(result.Error)
-	if !ok {
-		return "", "", nil, false
+	if ok {
+		if strings.EqualFold(strings.TrimSpace(source), "pool_probe") && kind == util.FailedAuthArchiveLimit {
+			return "", "", nil, false
+		}
+		ids := m.authIDsForSourcePathLocked(sourcePath)
+		if len(ids) == 0 {
+			ids = []string{auth.ID}
+		}
+		return kind, sourcePath, ids, true
 	}
-	ids := m.authIDsForSourcePathLocked(sourcePath)
-	if len(ids) == 0 {
-		ids = []string{auth.ID}
+	message := strings.ToLower(strings.TrimSpace(failedAuthArchiveText(result.Error)))
+	if isGenericInvalidArchiveCandidate(statusCodeFromResult(result.Error), message) &&
+		invalidArchiveStrikeCount(auth) >= invalidArchiveStrikeThreshold {
+		ids := m.authIDsForSourcePathLocked(sourcePath)
+		if len(ids) == 0 {
+			ids = []string{auth.ID}
+		}
+		return util.FailedAuthArchiveDelete, sourcePath, ids, true
 	}
-	return kind, sourcePath, ids, true
+	return "", "", nil, false
 }
 
 func classifyFailedAuthArchive(resultErr *Error) (util.FailedAuthArchiveKind, bool) {
@@ -1948,6 +1961,58 @@ func failedAuthArchiveText(resultErr *Error) string {
 		parts = append(parts, msg)
 	}
 	return strings.Join(parts, " ")
+}
+
+func invalidArchiveStrikeCount(auth *Auth) int {
+	if auth == nil || auth.Metadata == nil {
+		return 0
+	}
+	raw, ok := auth.Metadata[invalidArchiveStrikeMetadataKey]
+	if !ok || raw == nil {
+		return 0
+	}
+	switch typed := raw.(type) {
+	case int:
+		return typed
+	case int64:
+		return int(typed)
+	case float64:
+		return int(typed)
+	case string:
+		if value, err := strconv.Atoi(strings.TrimSpace(typed)); err == nil {
+			return value
+		}
+	}
+	return 0
+}
+
+func setInvalidArchiveStrikeCount(auth *Auth, count int) {
+	if auth == nil {
+		return
+	}
+	if count <= 0 {
+		if auth.Metadata != nil {
+			delete(auth.Metadata, invalidArchiveStrikeMetadataKey)
+		}
+		return
+	}
+	if auth.Metadata == nil {
+		auth.Metadata = make(map[string]any)
+	}
+	auth.Metadata[invalidArchiveStrikeMetadataKey] = count
+}
+
+func recordInvalidArchiveStrike(auth *Auth, resultErr *Error) int {
+	if auth == nil {
+		return 0
+	}
+	if !isGenericInvalidArchiveCandidate(statusCodeFromResult(resultErr), strings.ToLower(strings.TrimSpace(failedAuthArchiveText(resultErr)))) {
+		setInvalidArchiveStrikeCount(auth, 0)
+		return 0
+	}
+	strikes := invalidArchiveStrikeCount(auth) + 1
+	setInvalidArchiveStrikeCount(auth, strikes)
+	return strikes
 }
 
 func isQuotaArchiveFailure(status int, message string) bool {
@@ -1987,6 +2052,24 @@ func isInvalidArchiveFailure(status int, message string) bool {
 		return true
 	}
 	return false
+}
+
+func isGenericInvalidArchiveCandidate(status int, message string) bool {
+	if containsAnyFold(message,
+		"unauthorized",
+		"session expired",
+		"token expired",
+		"payment_required",
+		"payment required",
+	) {
+		return true
+	}
+	switch status {
+	case http.StatusUnauthorized, http.StatusForbidden:
+		return true
+	default:
+		return false
+	}
 }
 
 func containsAnyFold(value string, targets ...string) bool {
@@ -2177,6 +2260,7 @@ func clearAuthStateOnSuccess(auth *Auth, now time.Time) {
 	auth.LastError = nil
 	auth.NextRetryAfter = time.Time{}
 	auth.UpdatedAt = now
+	setInvalidArchiveStrikeCount(auth, 0)
 }
 
 func cloneError(err *Error) *Error {
