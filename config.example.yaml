@@ -104,10 +104,15 @@ archive-failed-auth: false
 #   # Shared budget across all background probes (active / reserve / limit / cold scan).
 #   # Use this to cap CPU on small machines without affecting request-time routing.
 #   background-probe-budget-window-seconds: 10
-#   background-probe-budget-max: 4
+#   background-probe-budget-max: 2
 #   reserve-scan-interval-seconds: 300
 #   limit-scan-interval-seconds: 21600
 #   reserve-sample-size: 20
+#   # Recommended when auth-dir contains a large number of file-based auths.
+#   # Keeps reserve between roughly 25% and 50% of pool size and limits cold-batch loading.
+#   reserve-refill-low-ratio: 0.25
+#   reserve-refill-high-ratio: 0.50
+#   cold-batch-load-ratio: 0.05
 #   low-quota-threshold-percent: 20
 
 # Quota exceeded behavior
