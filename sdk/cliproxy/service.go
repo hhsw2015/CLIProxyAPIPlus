@@ -321,6 +321,7 @@ func (s *Service) bootstrapAuthSnapshot(ctx context.Context, watcherWrapper *Wat
 	}
 	if s.cfg != nil && s.cfg.PoolManager.Size > 0 {
 		s.bootstrapPoolSnapshot(ctx, watcherWrapper)
+		s.bootstrapNonPoolSnapshotAuths(ctx, watcherWrapper)
 		return
 	}
 	auths := watcherWrapper.SnapshotAuths()
@@ -333,6 +334,32 @@ func (s *Service) bootstrapAuthSnapshot(ctx context.Context, watcherWrapper *Wat
 	ctx = coreauth.WithSkipPersist(ctx)
 	for _, auth := range auths {
 		if auth == nil || auth.ID == "" {
+			continue
+		}
+		s.applyCoreAuthAddOrUpdate(ctx, auth)
+	}
+}
+
+func (s *Service) bootstrapNonPoolSnapshotAuths(ctx context.Context, watcherWrapper *WatcherWrapper) {
+	if s == nil || watcherWrapper == nil {
+		return
+	}
+	auths := watcherWrapper.SnapshotAuths()
+	if len(auths) == 0 {
+		return
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ctx = coreauth.WithSkipPersist(ctx)
+	for _, auth := range auths {
+		if auth == nil || strings.TrimSpace(auth.ID) == "" {
+			continue
+		}
+		if s.poolManager != nil && s.poolManager.HasTrackedState(auth.ID) {
+			continue
+		}
+		if s.poolCandidateRef(auth.ID) != nil {
 			continue
 		}
 		s.applyCoreAuthAddOrUpdate(ctx, auth)
