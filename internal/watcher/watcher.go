@@ -72,9 +72,10 @@ const (
 
 // AuthUpdate describes an incremental change to auth configuration.
 type AuthUpdate struct {
-	Action AuthUpdateAction
-	ID     string
-	Auth   *coreauth.Auth
+	Action  AuthUpdateAction
+	ID      string
+	Auth    *coreauth.Auth
+	Runtime bool
 }
 
 const (

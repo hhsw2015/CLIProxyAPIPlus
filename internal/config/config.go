@@ -819,9 +819,6 @@ func (cfg *Config) SanitizePoolManager() {
 	if pm.ReserveRefillHighRatio == 0 {
 		pm.ReserveRefillHighRatio = 1.0
 	}
-	if pm.ColdBatchLoadRatio == 0 {
-		pm.ColdBatchLoadRatio = 0.20
-	}
 	if pm.ReserveRefillHighRatio < pm.ReserveRefillLowRatio {
 		pm.ReserveRefillHighRatio = pm.ReserveRefillLowRatio
 	}
@@ -839,9 +836,6 @@ func (cfg *Config) SanitizePoolManager() {
 	}
 	if pm.LowQuotaThresholdPercent == 0 {
 		pm.LowQuotaThresholdPercent = 20
-	}
-	if pm.ActiveQuotaRefreshSampleRatio == 0 {
-		pm.ActiveQuotaRefreshSampleRatio = 0.10
 	}
 }
 
