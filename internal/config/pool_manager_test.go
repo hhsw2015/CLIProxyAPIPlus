@@ -95,3 +95,73 @@ pool-manager:
 		t.Fatalf("PoolManager.LowQuotaThresholdPercent = %d, want 100", cfg.PoolManager.LowQuotaThresholdPercent)
 	}
 }
+
+func TestLoadConfigOptional_PoolManagerRatioDefaults(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.yaml")
+	content := `
+port: 8080
+pool-manager:
+  size: 100
+`
+	if err := os.WriteFile(configPath, []byte(content), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cfg, err := LoadConfigOptional(configPath, false)
+	if err != nil {
+		t.Fatalf("LoadConfigOptional() error = %v", err)
+	}
+
+	if cfg.PoolManager.ReserveRefillLowRatio != 0.35 {
+		t.Fatalf("PoolManager.ReserveRefillLowRatio = %v, want 0.35", cfg.PoolManager.ReserveRefillLowRatio)
+	}
+	if cfg.PoolManager.ReserveRefillHighRatio != 1.0 {
+		t.Fatalf("PoolManager.ReserveRefillHighRatio = %v, want 1.0", cfg.PoolManager.ReserveRefillHighRatio)
+	}
+	if cfg.PoolManager.ColdBatchLoadRatio != 0.20 {
+		t.Fatalf("PoolManager.ColdBatchLoadRatio = %v, want 0.20", cfg.PoolManager.ColdBatchLoadRatio)
+	}
+	if cfg.PoolManager.ActiveQuotaRefreshSampleRatio != 0.10 {
+		t.Fatalf("PoolManager.ActiveQuotaRefreshSampleRatio = %v, want 0.10", cfg.PoolManager.ActiveQuotaRefreshSampleRatio)
+	}
+}
+
+func TestLoadConfigOptional_PoolManagerRatioSanitizesInvalidValues(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.yaml")
+	content := `
+port: 8080
+pool-manager:
+  size: 100
+  reserve-refill-low-ratio: -1
+  reserve-refill-high-ratio: 2
+  cold-batch-load-ratio: 9
+  active-quota-refresh-sample-ratio: -3
+`
+	if err := os.WriteFile(configPath, []byte(content), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cfg, err := LoadConfigOptional(configPath, false)
+	if err != nil {
+		t.Fatalf("LoadConfigOptional() error = %v", err)
+	}
+
+	if cfg.PoolManager.ReserveRefillLowRatio != 0.35 {
+		t.Fatalf("PoolManager.ReserveRefillLowRatio = %v, want 0.35", cfg.PoolManager.ReserveRefillLowRatio)
+	}
+	if cfg.PoolManager.ReserveRefillHighRatio != 1.0 {
+		t.Fatalf("PoolManager.ReserveRefillHighRatio = %v, want 1.0", cfg.PoolManager.ReserveRefillHighRatio)
+	}
+	if cfg.PoolManager.ColdBatchLoadRatio != 0.20 {
+		t.Fatalf("PoolManager.ColdBatchLoadRatio = %v, want 0.20", cfg.PoolManager.ColdBatchLoadRatio)
+	}
+	if cfg.PoolManager.ActiveQuotaRefreshSampleRatio != 0.10 {
+		t.Fatalf("PoolManager.ActiveQuotaRefreshSampleRatio = %v, want 0.10", cfg.PoolManager.ActiveQuotaRefreshSampleRatio)
+	}
+}

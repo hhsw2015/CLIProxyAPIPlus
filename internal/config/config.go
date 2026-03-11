@@ -212,6 +212,12 @@ type PoolManagerConfig struct {
 	Size int `yaml:"size,omitempty" json:"size,omitempty"`
 	// Provider limits pool mode to a single provider. V1 defaults to "codex".
 	Provider string `yaml:"provider,omitempty" json:"provider,omitempty"`
+	// ReserveRefillLowRatio starts cold refill when reserve size falls below this share of reserve target.
+	ReserveRefillLowRatio float64 `yaml:"reserve-refill-low-ratio,omitempty" json:"reserve-refill-low-ratio,omitempty"`
+	// ReserveRefillHighRatio stops cold refill when reserve size reaches this share of reserve target.
+	ReserveRefillHighRatio float64 `yaml:"reserve-refill-high-ratio,omitempty" json:"reserve-refill-high-ratio,omitempty"`
+	// ColdBatchLoadRatio controls how much cold inventory to materialize per refill batch, relative to pool size.
+	ColdBatchLoadRatio float64 `yaml:"cold-batch-load-ratio,omitempty" json:"cold-batch-load-ratio,omitempty"`
 	// ActiveIdleScanIntervalSeconds controls how often idle active auths are probed.
 	ActiveIdleScanIntervalSeconds int `yaml:"active-idle-scan-interval-seconds,omitempty" json:"active-idle-scan-interval-seconds,omitempty"`
 	// ReserveScanIntervalSeconds controls how often reserve auths are sampled.
@@ -224,6 +230,8 @@ type PoolManagerConfig struct {
 	LowQuotaThresholdPercent int `yaml:"low-quota-threshold-percent,omitempty" json:"low-quota-threshold-percent,omitempty"`
 	// ActiveQuotaRefreshIntervalSeconds controls how often active auths are sampled for quota refresh.
 	ActiveQuotaRefreshIntervalSeconds int `yaml:"active-quota-refresh-interval-seconds,omitempty" json:"active-quota-refresh-interval-seconds,omitempty"`
+	// ActiveQuotaRefreshSampleRatio controls how many active auths are sampled per quota refresh cycle, relative to pool size.
+	ActiveQuotaRefreshSampleRatio float64 `yaml:"active-quota-refresh-sample-ratio,omitempty" json:"active-quota-refresh-sample-ratio,omitempty"`
 	// ActiveQuotaRefreshSampleSize controls how many active auths are sampled per quota refresh cycle.
 	ActiveQuotaRefreshSampleSize int `yaml:"active-quota-refresh-sample-size,omitempty" json:"active-quota-refresh-sample-size,omitempty"`
 	// BackgroundProbeBudgetWindowSeconds controls the shared budgeting window for all background probes.
@@ -783,15 +791,39 @@ func (cfg *Config) SanitizePoolManager() {
 	if pm.ReserveSampleSize < 0 {
 		pm.ReserveSampleSize = 0
 	}
+	if pm.ReserveRefillLowRatio < 0 || pm.ReserveRefillLowRatio > 1 {
+		pm.ReserveRefillLowRatio = 0
+	}
+	if pm.ReserveRefillHighRatio < 0 || pm.ReserveRefillHighRatio > 1 {
+		pm.ReserveRefillHighRatio = 0
+	}
+	if pm.ColdBatchLoadRatio < 0 || pm.ColdBatchLoadRatio > 1 {
+		pm.ColdBatchLoadRatio = 0
+	}
 	if pm.LowQuotaThresholdPercent < 0 {
 		pm.LowQuotaThresholdPercent = 0
 	}
 	if pm.LowQuotaThresholdPercent > 100 {
 		pm.LowQuotaThresholdPercent = 100
 	}
+	if pm.ActiveQuotaRefreshSampleRatio < 0 || pm.ActiveQuotaRefreshSampleRatio > 1 {
+		pm.ActiveQuotaRefreshSampleRatio = 0
+	}
 
 	if pm.Size <= 0 {
 		return
+	}
+	if pm.ReserveRefillLowRatio == 0 {
+		pm.ReserveRefillLowRatio = 0.35
+	}
+	if pm.ReserveRefillHighRatio == 0 {
+		pm.ReserveRefillHighRatio = 1.0
+	}
+	if pm.ColdBatchLoadRatio == 0 {
+		pm.ColdBatchLoadRatio = 0.20
+	}
+	if pm.ReserveRefillHighRatio < pm.ReserveRefillLowRatio {
+		pm.ReserveRefillHighRatio = pm.ReserveRefillLowRatio
 	}
 	if pm.ActiveIdleScanIntervalSeconds == 0 {
 		pm.ActiveIdleScanIntervalSeconds = 1800
@@ -807,6 +839,9 @@ func (cfg *Config) SanitizePoolManager() {
 	}
 	if pm.LowQuotaThresholdPercent == 0 {
 		pm.LowQuotaThresholdPercent = 20
+	}
+	if pm.ActiveQuotaRefreshSampleRatio == 0 {
+		pm.ActiveQuotaRefreshSampleRatio = 0.10
 	}
 }
 

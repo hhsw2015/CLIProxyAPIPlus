@@ -455,6 +455,107 @@ func TestServiceRunBootstrapsPoolStartupFromRootCandidatesOnly(t *testing.T) {
 	}
 }
 
+func TestBootstrapPoolSnapshot_IndexesColdCandidatesWithoutRetainingHotCopies(t *testing.T) {
+	authDir := t.TempDir()
+	activePath := filepath.Join(authDir, "pool-active-auth.json")
+	reservePath := filepath.Join(authDir, "pool-reserve-auth.json")
+	limitDir := filepath.Join(authDir, "limit")
+	if err := os.MkdirAll(limitDir, 0o755); err != nil {
+		t.Fatalf("mkdir limit dir: %v", err)
+	}
+	limitPath := filepath.Join(limitDir, "pool-limit-auth.json")
+
+	for path, content := range map[string]string{
+		activePath:  `{"type":"codex","email":"active@example.com","api_key":"active","base_url":"https://example.com/v1"}`,
+		reservePath: `{"type":"codex","email":"reserve@example.com","api_key":"reserve","base_url":"https://example.com/v1"}`,
+		limitPath:   `{"type":"codex","email":"limit@example.com","api_key":"limit","base_url":"https://example.com/v1"}`,
+	} {
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			t.Fatalf("write auth file %s: %v", path, err)
+		}
+	}
+
+	activeAuth := &coreauth.Auth{
+		ID:       "pool-active-auth.json",
+		Provider: "codex",
+		Status:   coreauth.StatusActive,
+		Attributes: map[string]string{
+			"path": activePath,
+		},
+		Metadata: map[string]any{
+			poolQuotaWeeklyRemainingPercentKey: 95,
+		},
+	}
+	reserveAuth := &coreauth.Auth{
+		ID:       "pool-reserve-auth.json",
+		Provider: "codex",
+		Status:   coreauth.StatusActive,
+		Attributes: map[string]string{
+			"path": reservePath,
+		},
+		Metadata: map[string]any{
+			poolQuotaWeeklyRemainingPercentKey: 80,
+		},
+	}
+	limitAuth := &coreauth.Auth{
+		ID:       "limit/pool-limit-auth.json",
+		Provider: "codex",
+		Status:   coreauth.StatusActive,
+		Attributes: map[string]string{
+			"path": limitPath,
+		},
+	}
+
+	originalProbe := poolProbeAuthFunc
+	poolProbeAuthFunc = func(ctx context.Context, cfg *config.Config, auth *coreauth.Auth) (*coreauth.Auth, coreauth.Result) {
+		return auth, coreauth.Result{
+			AuthID:   auth.ID,
+			Provider: "codex",
+			Model:    "gpt-5",
+			Success:  true,
+		}
+	}
+	t.Cleanup(func() { poolProbeAuthFunc = originalProbe })
+
+	service := &Service{
+		cfg: &config.Config{
+			AuthDir: authDir,
+			PoolManager: config.PoolManagerConfig{
+				Size:     1,
+				Provider: "codex",
+			},
+		},
+	}
+
+	service.bootstrapPoolSnapshot(context.Background(), &WatcherWrapper{
+		snapshotRootFileAuths: func() []*coreauth.Auth {
+			return []*coreauth.Auth{activeAuth.Clone(), reserveAuth.Clone()}
+		},
+		snapshotLimitAuths: func() []*coreauth.Auth {
+			return []*coreauth.Auth{limitAuth.Clone()}
+		},
+	})
+
+	if len(service.poolCandidateIndex) != 3 {
+		t.Fatalf("poolCandidateIndex len = %d, want 3", len(service.poolCandidateIndex))
+	}
+	if len(service.poolCandidates) != 1 {
+		t.Fatalf("poolCandidates len = %d, want 1 hot auth", len(service.poolCandidates))
+	}
+	if _, ok := service.poolCandidates[activeAuth.ID]; !ok {
+		t.Fatalf("expected active auth %s to be kept hot", activeAuth.ID)
+	}
+	if _, ok := service.poolCandidates[reserveAuth.ID]; ok {
+		t.Fatalf("did not expect cold reserve auth %s to stay hot", reserveAuth.ID)
+	}
+	if _, ok := service.poolCandidates[limitAuth.ID]; ok {
+		t.Fatalf("did not expect limit auth %s to stay hot", limitAuth.ID)
+	}
+	if got := service.poolCandidate(reserveAuth.ID); got == nil || got.ID != reserveAuth.ID {
+		t.Fatalf("expected lazy load for reserve auth %s, got %+v", reserveAuth.ID, got)
+	}
+}
+
 func TestServiceRunBootstrapsPoolStartupSkipsUnhealthyRootCandidate(t *testing.T) {
 	firstAuthID := "pool-first-unhealthy"
 	secondAuthID := "pool-second-healthy"
