@@ -38,7 +38,6 @@ pool-manager:
 - `archive-failed-auth: true` 适合你确实希望把真正不可恢复的账号删除，或者把额度耗尽的账号移到 `auth-dir/limit` 的场景。
 - 普通 `401` 不再直接视为死号；只有像 `refresh_token_reused` 这种明确不可恢复的 refresh 失败才会被删除。
 - 以上配置已经在 2 vCPU / 8 GB 的 VPS 上验证过，常驻 RSS 相比最初的全量常驻方案明显下降。
-
 ## 贡献
 
 该项目仅接受第三方供应商支持的 Pull Request。任何非第三方供应商支持的 Pull Request 都将被拒绝。
