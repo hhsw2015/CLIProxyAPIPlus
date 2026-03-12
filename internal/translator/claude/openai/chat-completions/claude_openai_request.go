@@ -335,7 +335,7 @@ func convertOpenAIContentPartToClaudePart(part gjson.Result) string {
 		return textPart
 
 	case "image_url":
-		return convertOpenAIImageURLToClaudePart(part.Get("image_url.url").String())
+		return ConvertOpenAIImageURLToClaudePart(part.Get("image_url.url").String())
 
 	case "file":
 		fileData := part.Get("file.file_data").String()
@@ -356,7 +356,7 @@ func convertOpenAIContentPartToClaudePart(part gjson.Result) string {
 	return ""
 }
 
-func convertOpenAIImageURLToClaudePart(imageURL string) string {
+func ConvertOpenAIImageURLToClaudePart(imageURL string) string {
 	if imageURL == "" {
 		return ""
 	}

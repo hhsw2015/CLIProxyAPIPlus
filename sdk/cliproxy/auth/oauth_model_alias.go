@@ -130,8 +130,13 @@ func resolveModelAliasPoolFromConfigModels(requestedModel string, models []model
 	for i := range models {
 		name := strings.TrimSpace(models[i].GetName())
 		alias := strings.TrimSpace(models[i].GetAlias())
+		implicitAlias := internalconfig.ImplicitOpenAICompatAlias(name, alias)
 		for _, candidate := range candidates {
-			if candidate == "" || alias == "" || !strings.EqualFold(alias, candidate) {
+			if candidate == "" {
+				continue
+			}
+			matchedAlias := alias != "" && strings.EqualFold(alias, candidate)
+			if !matchedAlias && (implicitAlias == "" || !strings.EqualFold(implicitAlias, candidate)) {
 				continue
 			}
 			resolved := candidate
