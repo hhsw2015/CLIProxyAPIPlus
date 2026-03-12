@@ -17,6 +17,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/api"
 	kiroauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/kiro"
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor"
 	internalusage "github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
@@ -320,8 +321,8 @@ func (s *Service) bootstrapAuthSnapshot(ctx context.Context, watcherWrapper *Wat
 		return
 	}
 	if s.cfg != nil && s.cfg.PoolManager.Size > 0 {
-		s.bootstrapPoolSnapshot(ctx, watcherWrapper)
 		s.bootstrapNonPoolSnapshotAuths(ctx, watcherWrapper)
+		s.bootstrapPoolSnapshot(ctx, watcherWrapper)
 		return
 	}
 	auths := watcherWrapper.SnapshotAuths()
@@ -3074,6 +3075,7 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 					isCompatAuth = true
 					// Convert compatibility models to registry models
 					ms := make([]*ModelInfo, 0, len(compat.Models))
+					seenModelIDs := make(map[string]struct{}, len(compat.Models)*2)
 					for j := range compat.Models {
 						m := compat.Models[j]
 						// Use alias as model ID, fallback to name if alias is empty
@@ -3081,15 +3083,28 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 						if modelID == "" {
 							modelID = m.Name
 						}
-						ms = append(ms, &ModelInfo{
-							ID:          modelID,
-							Object:      "model",
-							Created:     time.Now().Unix(),
-							OwnedBy:     compat.Name,
-							Type:        "openai-compatibility",
-							DisplayName: modelID,
-							UserDefined: true,
-						})
+						for _, candidateID := range []string{
+							strings.TrimSpace(modelID),
+							internalconfig.ImplicitOpenAICompatAlias(m.Name, m.Alias),
+						} {
+							if candidateID == "" {
+								continue
+							}
+							key := strings.ToLower(candidateID)
+							if _, exists := seenModelIDs[key]; exists {
+								continue
+							}
+							seenModelIDs[key] = struct{}{}
+							ms = append(ms, &ModelInfo{
+								ID:          candidateID,
+								Object:      "model",
+								Created:     time.Now().Unix(),
+								OwnedBy:     compat.Name,
+								Type:        "openai-compatibility",
+								DisplayName: candidateID,
+								UserDefined: true,
+							})
+						}
 					}
 					// Register and return
 					if len(ms) > 0 {

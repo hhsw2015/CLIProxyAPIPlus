@@ -369,16 +369,19 @@ func isAPIKeyAuth(auth *Auth) bool {
 }
 
 func isOpenAICompatAPIKeyAuth(auth *Auth) bool {
-	if !isAPIKeyAuth(auth) {
+	if auth == nil {
 		return false
 	}
 	if strings.EqualFold(strings.TrimSpace(auth.Provider), "openai-compatibility") {
 		return true
 	}
 	if auth.Attributes == nil {
-		return false
+		return isAPIKeyAuth(auth)
 	}
-	return strings.TrimSpace(auth.Attributes["compat_name"]) != ""
+	if strings.TrimSpace(auth.Attributes["compat_name"]) != "" || strings.TrimSpace(auth.Attributes["provider_key"]) != "" {
+		return true
+	}
+	return isAPIKeyAuth(auth)
 }
 
 func openAICompatProviderKey(auth *Auth) string {

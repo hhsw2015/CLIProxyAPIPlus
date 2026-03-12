@@ -62,6 +62,38 @@ type ToolCallAccumulator struct {
 	Arguments strings.Builder
 }
 
+func ensureToolUseBlockStarted(param *ConvertOpenAIResponseToAnthropicParams, index int, accumulator *ToolCallAccumulator, results *[]string) bool {
+	if param == nil || accumulator == nil {
+		return false
+	}
+	if strings.TrimSpace(accumulator.ID) == "" || strings.TrimSpace(accumulator.Name) == "" {
+		return false
+	}
+	if _, exists := param.ToolCallBlockIndexes[index]; exists {
+		return true
+	}
+
+	stopThinkingContentBlock(param, results)
+	stopTextContentBlock(param, results)
+
+	blockIndex := param.toolContentBlockIndex(index)
+	contentBlockStartJSON := `{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"","name":"","input":{}}}`
+	contentBlockStartJSON, _ = sjson.Set(contentBlockStartJSON, "index", blockIndex)
+	contentBlockStartJSON, _ = sjson.Set(contentBlockStartJSON, "content_block.id", util.SanitizeClaudeToolID(accumulator.ID))
+	contentBlockStartJSON, _ = sjson.Set(contentBlockStartJSON, "content_block.name", accumulator.Name)
+	*results = append(*results, "event: content_block_start\ndata: "+contentBlockStartJSON+"\n\n")
+	return true
+}
+
+func streamedToolCallIndex(choice, toolCall gjson.Result) int {
+	choiceIndex := int(choice.Get("index").Int())
+	toolIndex := int(toolCall.Get("index").Int())
+	if choice.Get("index").Exists() {
+		return choiceIndex*1000 + toolIndex
+	}
+	return toolIndex
+}
+
 // ConvertOpenAIResponseToClaude converts OpenAI streaming response format to Anthropic API format.
 // This function processes OpenAI streaming chunks and transforms them into Anthropic-compatible JSON responses.
 // It handles text content, tool calls, and usage metadata, outputting responses that match the Anthropic API format.
@@ -145,9 +177,10 @@ func convertOpenAIStreamingChunkToAnthropic(rawJSON []byte, param *ConvertOpenAI
 		param.CreatedAt = root.Get("created").Int()
 	}
 
+	choice := root.Get("choices.0")
 	// Emit message_start on the very first chunk, regardless of whether it has a role field.
-	// Some providers (like Copilot) may send tool_calls in the first chunk without a role field.
-	if delta := root.Get("choices.0.delta"); delta.Exists() {
+	// Some providers may send tool_calls in the first chunk without a role field.
+	if delta := choice.Get("delta"); delta.Exists() {
 		if !param.MessageStarted {
 			// Send message_start event
 			messageStartJSON := `{"type":"message_start","message":{"id":"","type":"message","role":"assistant","model":"","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":0,"output_tokens":0}}}`
@@ -215,9 +248,7 @@ func convertOpenAIStreamingChunkToAnthropic(rawJSON []byte, param *ConvertOpenAI
 			}
 
 			toolCalls.ForEach(func(_, toolCall gjson.Result) bool {
-				param.SawToolCall = true
-				index := int(toolCall.Get("index").Int())
-				blockIndex := param.toolContentBlockIndex(index)
+				index := streamedToolCallIndex(choice, toolCall)
 
 				// Initialize accumulator if needed
 				if _, exists := param.ToolCallsAccumulator[index]; !exists {
@@ -228,24 +259,18 @@ func convertOpenAIStreamingChunkToAnthropic(rawJSON []byte, param *ConvertOpenAI
 
 				// Handle tool call ID
 				if id := toolCall.Get("id"); id.Exists() {
-					accumulator.ID = id.String()
+					if toolID := strings.TrimSpace(id.String()); toolID != "" {
+						accumulator.ID = toolID
+					}
 				}
 
 				// Handle function name
 				if function := toolCall.Get("function"); function.Exists() {
 					if name := function.Get("name"); name.Exists() {
-						accumulator.Name = util.MapToolName(param.ToolNameMap, name.String())
-
-						stopThinkingContentBlock(param, &results)
-
-						stopTextContentBlock(param, &results)
-
-						// Send content_block_start for tool_use
-						contentBlockStartJSON := `{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"","name":"","input":{}}}`
-						contentBlockStartJSON, _ = sjson.Set(contentBlockStartJSON, "index", blockIndex)
-						contentBlockStartJSON, _ = sjson.Set(contentBlockStartJSON, "content_block.id", util.SanitizeClaudeToolID(accumulator.ID))
-						contentBlockStartJSON, _ = sjson.Set(contentBlockStartJSON, "content_block.name", accumulator.Name)
-						results = append(results, "event: content_block_start\ndata: "+contentBlockStartJSON+"\n\n")
+						mappedName := strings.TrimSpace(util.MapToolName(param.ToolNameMap, name.String()))
+						if mappedName != "" {
+							accumulator.Name = mappedName
+						}
 					}
 
 					// Handle function arguments
@@ -256,14 +281,21 @@ func convertOpenAIStreamingChunkToAnthropic(rawJSON []byte, param *ConvertOpenAI
 						}
 					}
 				}
+				if ensureToolUseBlockStarted(param, index, accumulator, &results) {
+					param.SawToolCall = true
+				}
 
 				return true
 			})
 		}
 	}
 
+	finishReason := root.Get("choices.0.finish_reason")
+	if !finishReason.Exists() || finishReason.String() == "" {
+		finishReason = root.Get("finish_reason")
+	}
 	// Handle finish_reason (but don't send message_delta/message_stop yet)
-	if finishReason := root.Get("choices.0.finish_reason"); finishReason.Exists() && finishReason.String() != "" {
+	if finishReason.Exists() && finishReason.String() != "" {
 		reason := finishReason.String()
 		if param.SawToolCall {
 			param.FinishReason = "tool_calls"
@@ -287,6 +319,10 @@ func convertOpenAIStreamingChunkToAnthropic(rawJSON []byte, param *ConvertOpenAI
 		if !param.ContentBlocksStopped {
 			for index := range param.ToolCallsAccumulator {
 				accumulator := param.ToolCallsAccumulator[index]
+				if !ensureToolUseBlockStarted(param, index, accumulator, &results) {
+					delete(param.ToolCallBlockIndexes, index)
+					continue
+				}
 				blockIndex := param.toolContentBlockIndex(index)
 
 				// Send complete input_json_delta with all accumulated arguments
@@ -351,6 +387,10 @@ func convertOpenAIDoneToAnthropic(param *ConvertOpenAIResponseToAnthropicParams)
 	if !param.ContentBlocksStopped {
 		for index := range param.ToolCallsAccumulator {
 			accumulator := param.ToolCallsAccumulator[index]
+			if !ensureToolUseBlockStarted(param, index, accumulator, &results) {
+				delete(param.ToolCallBlockIndexes, index)
+				continue
+			}
 			blockIndex := param.toolContentBlockIndex(index)
 
 			if accumulator.Arguments.Len() > 0 {

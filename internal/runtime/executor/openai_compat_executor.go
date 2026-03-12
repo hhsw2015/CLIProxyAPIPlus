@@ -4,19 +4,24 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
+	chatcompletions "github.com/router-for-me/CLIProxyAPI/v6/internal/translator/claude/openai/chat-completions"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
 	log "github.com/sirupsen/logrus"
+	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
 
@@ -97,6 +102,7 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	translated := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, opts.Stream)
 	requestedModel := payloadRequestedModel(opts, req.Model)
 	translated = applyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", translated, originalTranslated, requestedModel)
+	translated = e.adaptCompatPayload(auth, translated)
 	if opts.Alt == "responses/compact" {
 		if updated, errDelete := sjson.DeleteBytes(translated, "stream"); errDelete == nil {
 			translated = updated
@@ -199,6 +205,10 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	translated := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, true)
 	requestedModel := payloadRequestedModel(opts, req.Model)
 	translated = applyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", translated, originalTranslated, requestedModel)
+	translated = e.adaptCompatPayload(auth, translated)
+	if streamResult, webErr := e.handleMaybeInterceptedWebSearchStream(ctx, auth, req, opts, originalPayload); streamResult != nil || webErr != nil {
+		return streamResult, webErr
+	}
 
 	translated, err = thinking.ApplyThinking(translated, req.Model, from.String(), to.String(), e.Identifier())
 	if err != nil {
@@ -271,6 +281,12 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		for scanner.Scan() {
 			line := scanner.Bytes()
 			appendAPIResponseChunk(ctx, e.cfg, line)
+			if streamErr := parseOpenAICompatStreamError(line); streamErr != nil {
+				recordAPIResponseError(ctx, e.cfg, streamErr)
+				reporter.publishFailure(ctx)
+				out <- cliproxyexecutor.StreamChunk{Err: streamErr}
+				return
+			}
 			if detail, ok := parseOpenAIStreamUsage(line); ok {
 				reporter.publish(ctx, detail)
 			}
@@ -298,6 +314,67 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		reporter.ensurePublished(ctx)
 	}()
 	return &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: out}, nil
+}
+
+func (e *OpenAICompatExecutor) handleMaybeInterceptedWebSearchStream(
+	ctx context.Context,
+	auth *cliproxyauth.Auth,
+	req cliproxyexecutor.Request,
+	opts cliproxyexecutor.Options,
+	originalPayload []byte,
+) (*cliproxyexecutor.StreamResult, error) {
+	if !e.shouldInterceptWebSearch(auth, opts, originalPayload) {
+		return nil, nil
+	}
+	return e.handleInterceptedWebSearchStream(ctx, auth, req, opts, originalPayload)
+}
+
+var statusCodePattern = regexp.MustCompile(`StatusCode:\s*([0-9]{3})`)
+
+func parseOpenAICompatStreamError(line []byte) error {
+	trimmed := bytes.TrimSpace(line)
+	if len(trimmed) == 0 {
+		return nil
+	}
+	if bytes.HasPrefix(trimmed, []byte("data:")) {
+		trimmed = bytes.TrimSpace(trimmed[len("data:"):])
+	}
+	for {
+		switch {
+		case bytes.HasSuffix(trimmed, []byte(`\n`)):
+			trimmed = bytes.TrimSpace(trimmed[:len(trimmed)-2])
+		case bytes.HasSuffix(trimmed, []byte(`\r`)):
+			trimmed = bytes.TrimSpace(trimmed[:len(trimmed)-2])
+		default:
+			goto normalized
+		}
+	}
+normalized:
+	if len(trimmed) == 0 || trimmed[0] != '{' || !json.Valid(trimmed) {
+		return nil
+	}
+	root := gjson.ParseBytes(trimmed)
+	if root.Get("type").String() != "error" {
+		return nil
+	}
+	message := strings.TrimSpace(root.Get("error.message").String())
+	if message == "" {
+		message = strings.TrimSpace(root.Get("message").String())
+	}
+	if message == "" {
+		message = string(trimmed)
+	}
+	code := http.StatusBadGateway
+	switch strings.TrimSpace(root.Get("error.type").String()) {
+	case "invalid_request_error":
+		code = http.StatusBadRequest
+	}
+	if matches := statusCodePattern.FindStringSubmatch(message); len(matches) == 2 {
+		if parsed, err := strconv.Atoi(matches[1]); err == nil && parsed >= 100 && parsed <= 599 {
+			code = parsed
+		}
+	}
+	return statusErr{code: code, msg: message}
 }
 
 func (e *OpenAICompatExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
@@ -372,6 +449,59 @@ func (e *OpenAICompatExecutor) resolveCompatConfig(auth *cliproxyauth.Auth) *con
 		}
 	}
 	return nil
+}
+
+func (e *OpenAICompatExecutor) adaptCompatPayload(auth *cliproxyauth.Auth, payload []byte) []byte {
+	if len(payload) == 0 || !e.requiresAnthropicImageContent(auth) {
+		return payload
+	}
+	return rewriteOpenAIImageURLPartsToAnthropicImages(payload)
+}
+
+func (e *OpenAICompatExecutor) requiresAnthropicImageContent(auth *cliproxyauth.Auth) bool {
+	if auth == nil {
+		return false
+	}
+	baseURL, _ := e.resolveCredentials(auth)
+	if strings.Contains(strings.ToLower(strings.TrimSpace(baseURL)), "desktop-llm.skywork.ai") {
+		return true
+	}
+	if compat := e.resolveCompatConfig(auth); compat != nil && strings.EqualFold(strings.TrimSpace(compat.Name), "skywork") {
+		return true
+	}
+	return strings.EqualFold(strings.TrimSpace(auth.Provider), "skywork")
+}
+
+func rewriteOpenAIImageURLPartsToAnthropicImages(payload []byte) []byte {
+	messages := gjson.GetBytes(payload, "messages")
+	if !messages.Exists() || !messages.IsArray() {
+		return payload
+	}
+
+	out := payload
+	messages.ForEach(func(messageKey, message gjson.Result) bool {
+		content := message.Get("content")
+		if !content.Exists() || !content.IsArray() {
+			return true
+		}
+		content.ForEach(func(contentKey, part gjson.Result) bool {
+			if part.Get("type").String() != "image_url" {
+				return true
+			}
+			url := part.Get("image_url.url").String()
+			replacement := chatcompletions.ConvertOpenAIImageURLToClaudePart(url)
+			if replacement == "" {
+				return true
+			}
+			path := fmt.Sprintf("messages.%s.content.%s", messageKey.String(), contentKey.String())
+			if updated, err := sjson.SetRawBytes(out, path, []byte(replacement)); err == nil {
+				out = updated
+			}
+			return true
+		})
+		return true
+	})
+	return out
 }
 
 func (e *OpenAICompatExecutor) overrideModel(payload []byte, model string) []byte {

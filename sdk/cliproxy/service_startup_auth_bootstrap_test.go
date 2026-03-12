@@ -277,6 +277,164 @@ func TestServiceRunBootstrapsSnapshotAuthsWithPoolModeEnabled(t *testing.T) {
 	t.Fatal("expected config-backed skywork auth to be registered even when pool mode is enabled")
 }
 
+func TestBootstrapAuthSnapshotWithRealWatcherRegistersOpenAICompatInPoolMode(t *testing.T) {
+	authDir := t.TempDir()
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	cfgYAML := `
+host: 127.0.0.1
+port: 0
+api-keys:
+  - test-key
+openai-compatibility:
+  - name: skywork
+    prefix: skywork
+    base-url: https://desktop-llm.skywork.ai/skycowork_llm/v1/proxy
+    api-key-entries:
+      - api-key: ""
+    headers:
+      x-skywork-cookies: token=test
+    models:
+      - name: claude-opus-4.5
+        alias: ""
+pool-manager:
+  size: 1
+  provider: codex
+`
+	if err := os.WriteFile(configPath, []byte(cfgYAML), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cfg, err := config.LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	cfg.AuthDir = authDir
+
+	service, err := NewBuilder().
+		WithConfig(cfg).
+		WithConfigPath(configPath).
+		Build()
+	if err != nil {
+		t.Fatalf("build service: %v", err)
+	}
+
+	watcherWrapper, err := defaultWatcherFactory(configPath, authDir, func(*config.Config) {})
+	if err != nil {
+		t.Fatalf("create watcher: %v", err)
+	}
+	watcherWrapper.SetConfig(cfg)
+	t.Cleanup(func() {
+		_ = watcherWrapper.Stop()
+	})
+
+	authID := ""
+	for _, auth := range watcherWrapper.SnapshotAuths() {
+		if auth != nil && auth.Provider == "skywork" {
+			authID = auth.ID
+			break
+		}
+	}
+	if authID == "" {
+		t.Fatal("expected real watcher to synthesize skywork auth")
+	}
+
+	reg := GlobalModelRegistry()
+	reg.UnregisterClient(authID)
+	t.Cleanup(func() {
+		reg.UnregisterClient(authID)
+	})
+
+	service.bootstrapAuthSnapshot(context.Background(), watcherWrapper)
+
+	if !reg.ClientSupportsModel(authID, "skywork/claude-opus-4.5") {
+		t.Fatalf("expected skywork model to register from real watcher snapshot, authID=%s", authID)
+	}
+}
+
+func TestServiceRunWithPoolModeShowsOpenAICompatModelsInV1Models(t *testing.T) {
+	authDir := t.TempDir()
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	cfgYAML := `
+host: 127.0.0.1
+port: 0
+api-keys:
+  - test-key
+openai-compatibility:
+  - name: skywork
+    prefix: skywork
+    base-url: https://desktop-llm.skywork.ai/skycowork_llm/v1/proxy
+    api-key-entries:
+      - api-key: ""
+    headers:
+      x-skywork-cookies: token=test
+    models:
+      - name: claude-opus-4.5
+        alias: ""
+pool-manager:
+  size: 1
+  provider: codex
+`
+	if err := os.WriteFile(configPath, []byte(cfgYAML), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cfg, err := config.LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	cfg.AuthDir = authDir
+
+	service, err := NewBuilder().
+		WithConfig(cfg).
+		WithConfigPath(configPath).
+		Build()
+	if err != nil {
+		t.Fatalf("build service: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- service.Run(ctx)
+	}()
+	defer func() {
+		cancel()
+		select {
+		case errRun := <-done:
+			if errRun != nil && errRun != context.Canceled {
+				t.Fatalf("service run returned error: %v", errRun)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("service did not stop after cancel")
+		}
+	}()
+
+	reg := GlobalModelRegistry()
+	authID := ""
+	watcherWrapper, err := defaultWatcherFactory(configPath, authDir, func(*config.Config) {})
+	if err != nil {
+		t.Fatalf("create watcher: %v", err)
+	}
+	watcherWrapper.SetConfig(cfg)
+	for _, auth := range watcherWrapper.SnapshotAuths() {
+		if auth != nil && auth.Provider == "skywork" {
+			authID = auth.ID
+			break
+		}
+	}
+	if authID == "" {
+		t.Fatal("expected real watcher to synthesize skywork auth")
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if reg.ClientSupportsModel(authID, "skywork/claude-opus-4.5") {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("expected skywork/claude-opus-4.5 to be registered for auth %s", authID)
+}
+
 func TestServiceRunSeedsLoadedCoreAuthModelsWithoutWatcherSnapshot(t *testing.T) {
 	authID := "loaded-codex-startup"
 	reg := GlobalModelRegistry()

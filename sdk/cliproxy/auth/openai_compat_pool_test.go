@@ -192,6 +192,23 @@ func TestResolveModelAliasPoolFromConfigModels(t *testing.T) {
 	}
 }
 
+func TestResolveModelAliasPoolFromConfigModels_ImplicitClaudeHyphenAlias(t *testing.T) {
+	models := []modelAliasEntry{
+		internalconfig.OpenAICompatibilityModel{Name: "claude-opus-4.5"},
+	}
+
+	got := resolveModelAliasPoolFromConfigModels("claude-opus-4-5(8192)", models)
+	want := []string{"claude-opus-4.5(8192)"}
+	if len(got) != len(want) {
+		t.Fatalf("pool len = %d, want %d (%v)", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("pool[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
 func TestManagerExecute_OpenAICompatAliasPoolRotatesWithinAuth(t *testing.T) {
 	alias := "claude-opus-4.66"
 	executor := &openAICompatPoolExecutor{id: "pool"}
@@ -212,6 +229,57 @@ func TestManagerExecute_OpenAICompatAliasPoolRotatesWithinAuth(t *testing.T) {
 
 	got := executor.ExecuteModels()
 	want := []string{"qwen3.5-plus", "glm-5", "qwen3.5-plus"}
+	if len(got) != len(want) {
+		t.Fatalf("execute calls = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("execute call %d model = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+func TestManagerExecute_OpenAICompatAliasPoolWithoutAPIKeyStillResolvesAlias(t *testing.T) {
+	cfg := &internalconfig.Config{
+		OpenAICompatibility: []internalconfig.OpenAICompatibility{{
+			Name: "skywork",
+			Models: []internalconfig.OpenAICompatibilityModel{{
+				Name: "claude-opus-4.5",
+			}},
+		}},
+	}
+	executor := &openAICompatPoolExecutor{id: "skywork"}
+	m := NewManager(nil, nil, nil)
+	m.SetConfig(cfg)
+	m.RegisterExecutor(executor)
+
+	auth := &Auth{
+		ID:       "skywork-no-api-key",
+		Provider: "skywork",
+		Status:   StatusActive,
+		Attributes: map[string]string{
+			"compat_name":  "skywork",
+			"provider_key": "skywork",
+		},
+	}
+	if _, err := m.Register(context.Background(), auth); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(auth.ID, "skywork", []*registry.ModelInfo{{ID: "claude-opus-4-5"}})
+	t.Cleanup(func() {
+		reg.UnregisterClient(auth.ID)
+	})
+
+	if _, err := m.Execute(context.Background(), []string{"skywork"}, cliproxyexecutor.Request{
+		Model: "claude-opus-4-5",
+	}, cliproxyexecutor.Options{}); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+
+	got := executor.ExecuteModels()
+	want := []string{"claude-opus-4.5"}
 	if len(got) != len(want) {
 		t.Fatalf("execute calls = %v, want %v", got, want)
 	}

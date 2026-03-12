@@ -1,6 +1,7 @@
 package claude
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/tidwall/gjson"
@@ -694,5 +695,47 @@ func TestConvertClaudeRequestToOpenAI_AssistantThinkingToolUseThinkingSplit(t *t
 	// Should have combined reasoning_content from both thinking blocks
 	if got := assistantMsg.Get("reasoning_content").String(); got != "t1\n\nt2" {
 		t.Fatalf("Expected reasoning_content %q, got %q", "t1\n\nt2", got)
+	}
+}
+
+func TestConvertClaudeRequestToOpenAI_DropsOrphanedToolResultWhenToolUseIsInvalid(t *testing.T) {
+	inputJSON := `{
+		"model": "claude-3-opus",
+		"messages": [
+			{
+				"role": "assistant",
+				"content": [
+					{"type": "tool_use", "id": "toolu_bad_1", "name": "", "input": {}}
+				]
+			},
+			{
+				"role": "user",
+				"content": [
+					{"type": "tool_result", "tool_use_id": "toolu_bad_1", "content": [{"type":"text","text":"tool failed"}]},
+					{"type": "text", "text": "please continue"}
+				]
+			}
+		]
+	}`
+
+	result := ConvertClaudeRequestToOpenAI("test-model", []byte(inputJSON), false)
+	resultJSON := gjson.ParseBytes(result)
+	messages := resultJSON.Get("messages").Array()
+
+	if len(messages) != 1 {
+		t.Fatalf("Expected 1 message after dropping invalid tool trace, got %d. Messages: %s", len(messages), resultJSON.Get("messages").Raw)
+	}
+
+	if got := messages[0].Get("role").String(); got != "user" {
+		t.Fatalf("Expected remaining message role %q, got %q", "user", got)
+	}
+	if got := messages[0].Get("content.0.text").String(); got != "please continue" {
+		t.Fatalf("Expected preserved user text %q, got %q", "please continue", got)
+	}
+	if resultJSON.Get("messages.0.tool_calls").Exists() {
+		t.Fatal("Did not expect tool_calls for invalid tool_use")
+	}
+	if strings.Contains(resultJSON.Get("messages").Raw, "toolu_bad_1") {
+		t.Fatalf("Did not expect orphaned tool trace to remain in payload: %s", resultJSON.Get("messages").Raw)
 	}
 }
