@@ -8,11 +8,13 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/textproto"
 	"regexp"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
 	chatcompletions "github.com/router-for-me/CLIProxyAPI/v6/internal/translator/claude/openai/chat-completions"
@@ -102,6 +104,7 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	translated := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, opts.Stream)
 	requestedModel := payloadRequestedModel(opts, req.Model)
 	translated = applyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", translated, originalTranslated, requestedModel)
+	translated, extraBetas := prepareOpenAICompatAnthropicPassthrough(originalPayload, translated)
 	translated = e.adaptCompatPayload(auth, translated)
 	if opts.Alt == "responses/compact" {
 		if updated, errDelete := sjson.DeleteBytes(translated, "stream"); errDelete == nil {
@@ -129,6 +132,7 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 		attrs = auth.Attributes
 	}
 	util.ApplyCustomHeadersFromAttrs(httpReq, attrs)
+	applyOpenAICompatAnthropicPassthroughHeaders(httpReq, ctx, extraBetas)
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
 		authID = auth.ID
@@ -205,6 +209,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	translated := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, true)
 	requestedModel := payloadRequestedModel(opts, req.Model)
 	translated = applyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", translated, originalTranslated, requestedModel)
+	translated, extraBetas := prepareOpenAICompatAnthropicPassthrough(originalPayload, translated)
 	translated = e.adaptCompatPayload(auth, translated)
 	if streamResult, webErr := e.handleMaybeInterceptedWebSearchStream(ctx, auth, req, opts, originalPayload); streamResult != nil || webErr != nil {
 		return streamResult, webErr
@@ -230,6 +235,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		attrs = auth.Attributes
 	}
 	util.ApplyCustomHeadersFromAttrs(httpReq, attrs)
+	applyOpenAICompatAnthropicPassthroughHeaders(httpReq, ctx, extraBetas)
 	httpReq.Header.Set("Accept", "text/event-stream")
 	httpReq.Header.Set("Cache-Control", "no-cache")
 	var authID, authLabel, authType, authValue string
@@ -449,6 +455,97 @@ func (e *OpenAICompatExecutor) resolveCompatConfig(auth *cliproxyauth.Auth) *con
 		}
 	}
 	return nil
+}
+
+func prepareOpenAICompatAnthropicPassthrough(originalPayload, translated []byte) ([]byte, []string) {
+	originalBetas, _ := extractAndRemoveBetas(originalPayload)
+	translatedBetas, translated := extractAndRemoveBetas(translated)
+	translated = restoreOpenAICompatPassThroughBodyField(originalPayload, translated, "speed")
+	return translated, splitHeaderValues(mergeUniqueCSV("", originalBetas, translatedBetas))
+}
+
+func restoreOpenAICompatPassThroughBodyField(originalPayload, translated []byte, field string) []byte {
+	if len(originalPayload) == 0 || len(translated) == 0 || strings.TrimSpace(field) == "" {
+		return translated
+	}
+	value := gjson.GetBytes(originalPayload, field)
+	if !value.Exists() || strings.TrimSpace(value.Raw) == "" {
+		return translated
+	}
+	if updated, err := sjson.SetRawBytes(translated, field, []byte(value.Raw)); err == nil {
+		return updated
+	}
+	return translated
+}
+
+func applyOpenAICompatAnthropicPassthroughHeaders(r *http.Request, ctx context.Context, extraBetas []string) {
+	if r == nil {
+		return
+	}
+	headers := inboundRequestHeaders(ctx)
+	merged := ""
+	if headers != nil {
+		merged = mergeUniqueCSV(merged, splitHeaderValues(headers.Get("Anthropic-Beta")))
+		merged = mergeUniqueCSV(merged, extraBetas)
+		if _, ok := headers[textproto.CanonicalMIMEHeaderKey("X-CPA-CLAUDE-1M")]; ok {
+			merged = mergeUniqueCSV(merged, []string{"context-1m-2025-08-07"})
+		}
+	} else {
+		merged = mergeUniqueCSV(merged, extraBetas)
+	}
+	merged = mergeUniqueCSV(merged, splitHeaderValues(r.Header.Get("Anthropic-Beta")))
+	if strings.TrimSpace(merged) != "" {
+		r.Header.Set("Anthropic-Beta", merged)
+	}
+}
+
+func inboundRequestHeaders(ctx context.Context) http.Header {
+	if ctx == nil {
+		return nil
+	}
+	ginCtx, ok := ctx.Value("gin").(*gin.Context)
+	if !ok || ginCtx == nil || ginCtx.Request == nil {
+		return nil
+	}
+	return ginCtx.Request.Header
+}
+
+func mergeUniqueCSV(base string, groups ...[]string) string {
+	seen := make(map[string]struct{})
+	merged := make([]string, 0)
+	appendValues := func(values []string) {
+		for _, value := range values {
+			value = strings.TrimSpace(value)
+			if value == "" {
+				continue
+			}
+			if _, ok := seen[value]; ok {
+				continue
+			}
+			seen[value] = struct{}{}
+			merged = append(merged, value)
+		}
+	}
+
+	appendValues(splitHeaderValues(base))
+	for _, group := range groups {
+		appendValues(group)
+	}
+	return strings.Join(merged, ",")
+}
+
+func splitHeaderValues(raw string) []string {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if value := strings.TrimSpace(part); value != "" {
+			out = append(out, value)
+		}
+	}
+	return out
 }
 
 func (e *OpenAICompatExecutor) adaptCompatPayload(auth *cliproxyauth.Auth, payload []byte) []byte {
