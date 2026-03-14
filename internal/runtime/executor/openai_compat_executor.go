@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/textproto"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -116,8 +117,15 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	if err != nil {
 		return resp, err
 	}
+	if e.usesSingularityTransport(auth) {
+		if opts.Alt != "" {
+			return resp, statusErr{code: http.StatusBadRequest, msg: "singularity provider does not support " + opts.Alt}
+		}
+		translated = adaptSingularityPayload(translated)
+		return e.executeSingularityNonStream(ctx, auth, req, opts, translated, to, baseURL, apiKey, extraBetas, reporter)
+	}
 
-	url := strings.TrimSuffix(baseURL, "/") + endpoint
+	url := openAICompatRequestURL(baseURL, endpoint)
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(translated))
 	if err != nil {
 		return resp, err
@@ -133,6 +141,7 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	}
 	util.ApplyCustomHeadersFromAttrs(httpReq, attrs)
 	applyOpenAICompatAnthropicPassthroughHeaders(httpReq, ctx, extraBetas)
+	applySingularityHeaders(httpReq, auth, apiKey, false)
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
 		authID = auth.ID
@@ -176,6 +185,10 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 		return resp, err
 	}
 	appendAPIResponseChunk(ctx, e.cfg, body)
+	if wrappedErr := parseOpenAICompatWrappedErrorPayload(body); wrappedErr != nil {
+		recordAPIResponseError(ctx, e.cfg, wrappedErr)
+		return resp, wrappedErr
+	}
 	reporter.publish(ctx, parseOpenAIUsage(body))
 	// Ensure we at least record the request even if upstream doesn't return usage
 	reporter.ensurePublished(ctx)
@@ -219,8 +232,11 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	if err != nil {
 		return nil, err
 	}
+	if e.usesSingularityTransport(auth) {
+		translated = adaptSingularityPayload(translated)
+	}
 
-	url := strings.TrimSuffix(baseURL, "/") + "/chat/completions"
+	url := openAICompatRequestURL(baseURL, "/chat/completions")
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(translated))
 	if err != nil {
 		return nil, err
@@ -236,6 +252,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	}
 	util.ApplyCustomHeadersFromAttrs(httpReq, attrs)
 	applyOpenAICompatAnthropicPassthroughHeaders(httpReq, ctx, extraBetas)
+	applySingularityHeaders(httpReq, auth, apiKey, true)
 	httpReq.Header.Set("Accept", "text/event-stream")
 	httpReq.Header.Set("Cache-Control", "no-cache")
 	var authID, authLabel, authType, authValue string
@@ -273,6 +290,21 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
 		return nil, err
 	}
+	if strings.Contains(strings.ToLower(strings.TrimSpace(httpResp.Header.Get("Content-Type"))), "application/json") {
+		body, readErr := io.ReadAll(httpResp.Body)
+		if readErr != nil {
+			recordAPIResponseError(ctx, e.cfg, readErr)
+			return nil, readErr
+		}
+		appendAPIResponseChunk(ctx, e.cfg, body)
+		if wrappedErr := parseOpenAICompatWrappedErrorPayload(body); wrappedErr != nil {
+			recordAPIResponseError(ctx, e.cfg, wrappedErr)
+			return nil, wrappedErr
+		}
+		err = statusErr{code: http.StatusBadGateway, msg: "unexpected JSON response for stream request"}
+		recordAPIResponseError(ctx, e.cfg, err)
+		return nil, err
+	}
 	out := make(chan cliproxyexecutor.StreamChunk)
 	go func() {
 		defer close(out)
@@ -284,6 +316,8 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		scanner := bufio.NewScanner(httpResp.Body)
 		scanner.Buffer(nil, 52_428_800) // 50MB
 		var param any
+		var nonData bytes.Buffer
+		sawData := false
 		for scanner.Scan() {
 			line := scanner.Bytes()
 			appendAPIResponseChunk(ctx, e.cfg, line)
@@ -301,8 +335,10 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 			}
 
 			if !bytes.HasPrefix(line, []byte("data:")) {
+				nonData.Write(bytes.TrimSpace(line))
 				continue
 			}
+			sawData = true
 
 			// OpenAI-compatible streams are SSE: lines typically prefixed with "data: ".
 			// Pass through translator; it yields one or more chunks for the target schema.
@@ -315,6 +351,20 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 			recordAPIResponseError(ctx, e.cfg, errScan)
 			reporter.publishFailure(ctx)
 			out <- cliproxyexecutor.StreamChunk{Err: errScan}
+			return
+		}
+		if !sawData && nonData.Len() > 0 {
+			if wrappedErr := parseOpenAICompatWrappedErrorPayload(nonData.Bytes()); wrappedErr != nil {
+				recordAPIResponseError(ctx, e.cfg, wrappedErr)
+				reporter.publishFailure(ctx)
+				out <- cliproxyexecutor.StreamChunk{Err: wrappedErr}
+				return
+			}
+			unexpectedErr := statusErr{code: http.StatusBadGateway, msg: "unexpected non-SSE stream response"}
+			recordAPIResponseError(ctx, e.cfg, unexpectedErr)
+			reporter.publishFailure(ctx)
+			out <- cliproxyexecutor.StreamChunk{Err: unexpectedErr}
+			return
 		}
 		// Ensure we record the request if no usage chunk was ever seen
 		reporter.ensurePublished(ctx)
@@ -381,6 +431,82 @@ normalized:
 		}
 	}
 	return statusErr{code: code, msg: message}
+}
+
+func parseOpenAICompatWrappedErrorPayload(payload []byte) error {
+	trimmed := bytes.TrimSpace(payload)
+	if len(trimmed) == 0 || !json.Valid(trimmed) {
+		return nil
+	}
+	if streamErr := parseOpenAICompatStreamError(trimmed); streamErr != nil {
+		return streamErr
+	}
+	root := gjson.ParseBytes(trimmed)
+	if errNode := root.Get("error"); errNode.Exists() {
+		code := http.StatusBadRequest
+		if rawCode := int(errNode.Get("code").Int()); rawCode >= 100 && rawCode <= 599 {
+			code = rawCode
+		}
+		message := strings.TrimSpace(errNode.Get("message").String())
+		if raw := strings.TrimSpace(errNode.Get("metadata.raw").String()); raw != "" {
+			if nestedCode, nestedMessage := parseWrappedProviderRaw(raw); nestedMessage != "" {
+				message = nestedMessage
+				if nestedCode != 0 {
+					code = nestedCode
+				}
+			}
+		}
+		if message != "" {
+			return statusErr{code: code, msg: message}
+		}
+	}
+	rawCode := int(root.Get("code").Int())
+	if rawCode == 0 {
+		return nil
+	}
+	message := strings.TrimSpace(root.Get("data.error_message").String())
+	if message == "" {
+		message = strings.TrimSpace(root.Get("code_msg").String())
+	}
+	if message == "" {
+		message = strings.TrimSpace(root.Get("message").String())
+	}
+	if message == "" {
+		message = string(trimmed)
+	}
+	return statusErr{code: normalizeWrappedErrorHTTPStatus(rawCode, message), msg: message}
+}
+
+func parseWrappedProviderRaw(raw string) (int, string) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" || !json.Valid([]byte(raw)) {
+		return 0, ""
+	}
+	root := gjson.Parse(raw)
+	code := int(root.Get("error.code").Int())
+	if code < 100 || code > 599 {
+		code = 0
+	}
+	message := strings.TrimSpace(root.Get("error.message").String())
+	if message == "" {
+		message = strings.TrimSpace(root.Get("message").String())
+	}
+	return code, message
+}
+
+func normalizeWrappedErrorHTTPStatus(rawCode int, message string) int {
+	if rawCode >= 100 && rawCode <= 599 {
+		return rawCode
+	}
+	lower := strings.ToLower(strings.TrimSpace(message))
+	switch {
+	case strings.Contains(lower, "quota"), strings.Contains(lower, "limit"):
+		return http.StatusTooManyRequests
+	case strings.Contains(lower, "auth"), strings.Contains(lower, "author"), strings.Contains(lower, "token"), strings.Contains(message, "验证"):
+		return http.StatusUnauthorized
+	default:
+		return http.StatusBadRequest
+	}
 }
 
 func (e *OpenAICompatExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
@@ -455,6 +581,27 @@ func (e *OpenAICompatExecutor) resolveCompatConfig(auth *cliproxyauth.Auth) *con
 		}
 	}
 	return nil
+}
+
+func (e *OpenAICompatExecutor) usesSingularityTransport(auth *cliproxyauth.Auth) bool {
+	if auth == nil {
+		return false
+	}
+	candidates := []string{
+		strings.TrimSpace(auth.Provider),
+	}
+	if auth.Attributes != nil {
+		candidates = append(candidates,
+			strings.TrimSpace(auth.Attributes["provider_key"]),
+			strings.TrimSpace(auth.Attributes["compat_name"]),
+		)
+	}
+	for _, candidate := range candidates {
+		if strings.EqualFold(candidate, "singularity") {
+			return true
+		}
+	}
+	return false
 }
 
 func prepareOpenAICompatAnthropicPassthrough(originalPayload, translated []byte) ([]byte, []string) {
@@ -546,6 +693,287 @@ func splitHeaderValues(raw string) []string {
 		}
 	}
 	return out
+}
+
+func openAICompatRequestURL(baseURL, endpoint string) string {
+	baseURL = strings.TrimSpace(baseURL)
+	endpoint = strings.TrimSpace(endpoint)
+	if baseURL == "" {
+		return endpoint
+	}
+	if endpoint == "" {
+		return strings.TrimSuffix(baseURL, "/")
+	}
+	trimmedBase := strings.TrimSuffix(baseURL, "/")
+	trimmedEndpoint := strings.TrimPrefix(endpoint, "/")
+	if strings.EqualFold(trimmedBase, endpoint) || strings.HasSuffix(strings.ToLower(trimmedBase), "/"+strings.ToLower(trimmedEndpoint)) {
+		return trimmedBase
+	}
+	return trimmedBase + "/" + trimmedEndpoint
+}
+
+func applySingularityHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string, stream bool) {
+	if r == nil || !isSingularityAuth(auth) {
+		return
+	}
+	r.Header.Del("Authorization")
+	if strings.TrimSpace(r.Header.Get("X-Skywork-Cookies")) == "" && strings.TrimSpace(apiKey) != "" {
+		r.Header.Set("X-Skywork-Cookies", "token="+strings.TrimSpace(apiKey))
+	}
+	if strings.TrimSpace(r.Header.Get("X-Skywork-Billing-Source")) == "" {
+		r.Header.Set("X-Skywork-Billing-Source", "skybot")
+	}
+	if stream {
+		r.Header.Set("Accept", "text/event-stream")
+		r.Header.Set("Cache-Control", "no-cache")
+	}
+}
+
+func isSingularityAuth(auth *cliproxyauth.Auth) bool {
+	if auth == nil {
+		return false
+	}
+	if strings.EqualFold(strings.TrimSpace(auth.Provider), "singularity") {
+		return true
+	}
+	if auth.Attributes == nil {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(auth.Attributes["provider_key"]), "singularity") ||
+		strings.EqualFold(strings.TrimSpace(auth.Attributes["compat_name"]), "singularity")
+}
+
+func adaptSingularityPayload(payload []byte) []byte {
+	if len(payload) == 0 {
+		return payload
+	}
+	payload, _ = sjson.SetBytes(payload, "stream", true)
+	effort := strings.ToLower(strings.TrimSpace(gjson.GetBytes(payload, "reasoning_effort").String()))
+	budgetMap := map[string]int64{
+		"minimal": 256,
+		"low":     1024,
+		"medium":  4096,
+		"high":    16384,
+		"xhigh":   32768,
+		"max":     32768,
+	}
+	if budget, ok := budgetMap[effort]; ok {
+		payload, _ = sjson.SetBytes(payload, "thinking.type", "enabled")
+		payload, _ = sjson.SetBytes(payload, "thinking.budget_tokens", budget)
+		payload, _ = sjson.DeleteBytes(payload, "reasoning_effort")
+	} else if effort == "off" || effort == "none" || effort == "disabled" {
+		payload, _ = sjson.DeleteBytes(payload, "reasoning_effort")
+		payload, _ = sjson.DeleteBytes(payload, "thinking")
+	}
+	return payload
+}
+
+func (e *OpenAICompatExecutor) executeSingularityNonStream(
+	ctx context.Context,
+	auth *cliproxyauth.Auth,
+	req cliproxyexecutor.Request,
+	opts cliproxyexecutor.Options,
+	translated []byte,
+	to sdktranslator.Format,
+	baseURL, apiKey string,
+	extraBetas []string,
+	reporter *usageReporter,
+) (cliproxyexecutor.Response, error) {
+	url := openAICompatRequestURL(baseURL, "/chat/completions")
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(translated))
+	if err != nil {
+		return cliproxyexecutor.Response{}, err
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("User-Agent", "cli-proxy-openai-compat")
+	var attrs map[string]string
+	if auth != nil {
+		attrs = auth.Attributes
+	}
+	util.ApplyCustomHeadersFromAttrs(httpReq, attrs)
+	applyOpenAICompatAnthropicPassthroughHeaders(httpReq, ctx, extraBetas)
+	applySingularityHeaders(httpReq, auth, apiKey, true)
+
+	var authID, authLabel, authType, authValue string
+	if auth != nil {
+		authID = auth.ID
+		authLabel = auth.Label
+		authType, authValue = auth.AccountInfo()
+	}
+	recordAPIRequest(ctx, e.cfg, upstreamRequestLog{
+		URL:       url,
+		Method:    http.MethodPost,
+		Headers:   httpReq.Header.Clone(),
+		Body:      translated,
+		Provider:  e.Identifier(),
+		AuthID:    authID,
+		AuthLabel: authLabel,
+		AuthType:  authType,
+		AuthValue: authValue,
+	})
+
+	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
+	httpResp, err := httpClient.Do(httpReq)
+	if err != nil {
+		recordAPIResponseError(ctx, e.cfg, err)
+		return cliproxyexecutor.Response{}, err
+	}
+	defer func() {
+		if errClose := httpResp.Body.Close(); errClose != nil {
+			log.Errorf("openai compat executor: close response body error: %v", errClose)
+		}
+	}()
+	recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
+		b, _ := io.ReadAll(httpResp.Body)
+		appendAPIResponseChunk(ctx, e.cfg, b)
+		return cliproxyexecutor.Response{}, statusErr{code: httpResp.StatusCode, msg: string(b)}
+	}
+
+	body, err := io.ReadAll(httpResp.Body)
+	if err != nil {
+		recordAPIResponseError(ctx, e.cfg, err)
+		return cliproxyexecutor.Response{}, err
+	}
+	appendAPIResponseChunk(ctx, e.cfg, body)
+	if wrappedErr := parseOpenAICompatWrappedErrorPayload(body); wrappedErr != nil {
+		recordAPIResponseError(ctx, e.cfg, wrappedErr)
+		return cliproxyexecutor.Response{}, wrappedErr
+	}
+	aggregated, aggErr := aggregateOpenAICompatSSE(body)
+	if aggErr != nil {
+		recordAPIResponseError(ctx, e.cfg, aggErr)
+		return cliproxyexecutor.Response{}, aggErr
+	}
+	reporter.publish(ctx, parseOpenAIUsage(aggregated))
+	reporter.ensurePublished(ctx)
+
+	var param any
+	out := sdktranslator.TranslateNonStream(ctx, to, opts.SourceFormat, req.Model, opts.OriginalRequest, translated, aggregated, &param)
+	return cliproxyexecutor.Response{Payload: []byte(out), Headers: httpResp.Header.Clone()}, nil
+}
+
+func aggregateOpenAICompatSSE(body []byte) ([]byte, error) {
+	type toolCallBuilder struct {
+		ID           string
+		Name         string
+		Arguments    string
+		ExtraRawJSON string
+	}
+
+	lines := bytes.Split(body, []byte("\n"))
+	toolCalls := make(map[int]*toolCallBuilder)
+	content := strings.Builder{}
+	var id string
+	var model string
+	var finishReason string
+	var usageRaw string
+	var created int64
+
+	for _, line := range lines {
+		trimmed := bytes.TrimSpace(line)
+		if len(trimmed) == 0 {
+			continue
+		}
+		if streamErr := parseOpenAICompatStreamError(trimmed); streamErr != nil {
+			return nil, streamErr
+		}
+		if !bytes.HasPrefix(trimmed, []byte("data:")) {
+			continue
+		}
+		payload := bytes.TrimSpace(trimmed[len("data:"):])
+		if bytes.Equal(payload, []byte("[DONE]")) || !json.Valid(payload) {
+			continue
+		}
+		root := gjson.ParseBytes(payload)
+		if v := strings.TrimSpace(root.Get("id").String()); v != "" {
+			id = v
+		}
+		if v := strings.TrimSpace(root.Get("model").String()); v != "" {
+			model = v
+		}
+		if v := root.Get("created"); v.Exists() {
+			created = v.Int()
+		}
+		if usage := root.Get("usage"); usage.Exists() {
+			usageRaw = usage.Raw
+		}
+		choice := root.Get("choices.0")
+		if !choice.Exists() {
+			if v := strings.TrimSpace(root.Get("finish_reason").String()); v != "" {
+				finishReason = v
+			}
+			continue
+		}
+		if delta := choice.Get("delta.content"); delta.Exists() {
+			content.WriteString(delta.String())
+		}
+		if v := strings.TrimSpace(choice.Get("finish_reason").String()); v != "" {
+			finishReason = v
+		}
+		for _, call := range choice.Get("delta.tool_calls").Array() {
+			index := int(call.Get("index").Int())
+			builder := toolCalls[index]
+			if builder == nil {
+				builder = &toolCallBuilder{}
+				toolCalls[index] = builder
+			}
+			if v := strings.TrimSpace(call.Get("id").String()); v != "" {
+				builder.ID = v
+			}
+			if v := strings.TrimSpace(call.Get("function.name").String()); v != "" {
+				builder.Name = v
+			}
+			if v := call.Get("function.arguments"); v.Exists() {
+				builder.Arguments += v.String()
+			}
+			if v := call.Get("extra_content"); v.Exists() {
+				builder.ExtraRawJSON = v.Raw
+			}
+		}
+	}
+
+	if id == "" {
+		id = "resp_singularity"
+	}
+	if model == "" {
+		model = "unknown"
+	}
+	if finishReason == "" {
+		finishReason = "stop"
+	}
+
+	out := []byte(`{"id":"","object":"chat.completion","created":0,"model":"","choices":[{"index":0,"message":{"role":"assistant","content":""},"finish_reason":""}]}`)
+	out, _ = sjson.SetBytes(out, "id", id)
+	out, _ = sjson.SetBytes(out, "created", created)
+	out, _ = sjson.SetBytes(out, "model", model)
+	out, _ = sjson.SetBytes(out, "choices.0.message.content", content.String())
+	out, _ = sjson.SetBytes(out, "choices.0.finish_reason", finishReason)
+
+	if len(toolCalls) > 0 {
+		ordered := make([]int, 0, len(toolCalls))
+		for idx := range toolCalls {
+			ordered = append(ordered, idx)
+		}
+		sort.Ints(ordered)
+		toolCallsJSON := "[]"
+		for _, idx := range ordered {
+			builder := toolCalls[idx]
+			node := `{"id":"","type":"function","function":{"name":"","arguments":""}}`
+			node, _ = sjson.Set(node, "id", builder.ID)
+			node, _ = sjson.Set(node, "function.name", builder.Name)
+			node, _ = sjson.Set(node, "function.arguments", builder.Arguments)
+			if strings.TrimSpace(builder.ExtraRawJSON) != "" {
+				node, _ = sjson.SetRaw(node, "extra_content", builder.ExtraRawJSON)
+			}
+			toolCallsJSON, _ = sjson.SetRaw(toolCallsJSON, "-1", node)
+		}
+		out, _ = sjson.SetRawBytes(out, "choices.0.message.tool_calls", []byte(toolCallsJSON))
+	}
+	if strings.TrimSpace(usageRaw) != "" {
+		out, _ = sjson.SetRawBytes(out, "usage", []byte(usageRaw))
+	}
+	return out, nil
 }
 
 func (e *OpenAICompatExecutor) adaptCompatPayload(auth *cliproxyauth.Auth, payload []byte) []byte {
