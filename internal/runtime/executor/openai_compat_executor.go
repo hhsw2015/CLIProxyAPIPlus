@@ -142,23 +142,15 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	util.ApplyCustomHeadersFromAttrs(httpReq, attrs)
 	applyOpenAICompatAnthropicPassthroughHeaders(httpReq, ctx, extraBetas)
 	applySingularityHeaders(httpReq, auth, apiKey, false)
-	var authID, authLabel, authType, authValue string
-	if auth != nil {
-		authID = auth.ID
-		authLabel = auth.Label
-		authType, authValue = auth.AccountInfo()
+	logInfo := upstreamRequestLog{
+		URL:      url,
+		Method:   http.MethodPost,
+		Headers:  httpReq.Header.Clone(),
+		Body:     translated,
+		Provider: e.Identifier(),
 	}
-	recordAPIRequest(ctx, e.cfg, upstreamRequestLog{
-		URL:       url,
-		Method:    http.MethodPost,
-		Headers:   httpReq.Header.Clone(),
-		Body:      translated,
-		Provider:  e.Identifier(),
-		AuthID:    authID,
-		AuthLabel: authLabel,
-		AuthType:  authType,
-		AuthValue: authValue,
-	})
+	fillAuthLogInfo(&logInfo, auth)
+	recordAPIRequest(ctx, e.cfg, logInfo)
 
 	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
 	httpResp, err := httpClient.Do(httpReq)
@@ -255,23 +247,15 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	applySingularityHeaders(httpReq, auth, apiKey, true)
 	httpReq.Header.Set("Accept", "text/event-stream")
 	httpReq.Header.Set("Cache-Control", "no-cache")
-	var authID, authLabel, authType, authValue string
-	if auth != nil {
-		authID = auth.ID
-		authLabel = auth.Label
-		authType, authValue = auth.AccountInfo()
+	logInfo := upstreamRequestLog{
+		URL:      url,
+		Method:   http.MethodPost,
+		Headers:  httpReq.Header.Clone(),
+		Body:     translated,
+		Provider: e.Identifier(),
 	}
-	recordAPIRequest(ctx, e.cfg, upstreamRequestLog{
-		URL:       url,
-		Method:    http.MethodPost,
-		Headers:   httpReq.Header.Clone(),
-		Body:      translated,
-		Provider:  e.Identifier(),
-		AuthID:    authID,
-		AuthLabel: authLabel,
-		AuthType:  authType,
-		AuthValue: authValue,
-	})
+	fillAuthLogInfo(&logInfo, auth)
+	recordAPIRequest(ctx, e.cfg, logInfo)
 
 	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
 	httpResp, err := httpClient.Do(httpReq)
@@ -794,23 +778,15 @@ func (e *OpenAICompatExecutor) executeSingularityNonStream(
 	applyOpenAICompatAnthropicPassthroughHeaders(httpReq, ctx, extraBetas)
 	applySingularityHeaders(httpReq, auth, apiKey, true)
 
-	var authID, authLabel, authType, authValue string
-	if auth != nil {
-		authID = auth.ID
-		authLabel = auth.Label
-		authType, authValue = auth.AccountInfo()
+	logInfo := upstreamRequestLog{
+		URL:      url,
+		Method:   http.MethodPost,
+		Headers:  httpReq.Header.Clone(),
+		Body:     translated,
+		Provider: e.Identifier(),
 	}
-	recordAPIRequest(ctx, e.cfg, upstreamRequestLog{
-		URL:       url,
-		Method:    http.MethodPost,
-		Headers:   httpReq.Header.Clone(),
-		Body:      translated,
-		Provider:  e.Identifier(),
-		AuthID:    authID,
-		AuthLabel: authLabel,
-		AuthType:  authType,
-		AuthValue: authValue,
-	})
+	fillAuthLogInfo(&logInfo, auth)
+	recordAPIRequest(ctx, e.cfg, logInfo)
 
 	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
 	httpResp, err := httpClient.Do(httpReq)

@@ -14,6 +14,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 )
@@ -26,15 +27,18 @@ const (
 
 // upstreamRequestLog captures the outbound upstream request details for logging.
 type upstreamRequestLog struct {
-	URL       string
-	Method    string
-	Headers   http.Header
-	Body      []byte
-	Provider  string
-	AuthID    string
-	AuthLabel string
-	AuthType  string
-	AuthValue string
+	URL         string
+	Method      string
+	Headers     http.Header
+	Body        []byte
+	Provider    string
+	AuthID      string
+	AuthLabel   string
+	AuthIndex   string
+	AuthBaseURL string
+	AuthSource  string
+	AuthType    string
+	AuthValue   string
 }
 
 type upstreamAttempt struct {
@@ -285,6 +289,32 @@ func writeHeaders(builder *strings.Builder, headers http.Header) {
 	}
 }
 
+func fillAuthLogInfo(info *upstreamRequestLog, auth *cliproxyauth.Auth) {
+	if info == nil || auth == nil {
+		return
+	}
+	if trimmed := strings.TrimSpace(auth.ID); trimmed != "" && strings.TrimSpace(info.AuthID) == "" {
+		info.AuthID = trimmed
+	}
+	if trimmed := strings.TrimSpace(auth.Label); trimmed != "" && strings.TrimSpace(info.AuthLabel) == "" {
+		info.AuthLabel = trimmed
+	}
+	if trimmed := auth.EnsureIndex(); trimmed != "" && strings.TrimSpace(info.AuthIndex) == "" {
+		info.AuthIndex = trimmed
+	}
+	if auth.Attributes != nil {
+		if trimmed := strings.TrimSpace(auth.Attributes["base_url"]); trimmed != "" && strings.TrimSpace(info.AuthBaseURL) == "" {
+			info.AuthBaseURL = trimmed
+		}
+		if trimmed := strings.TrimSpace(auth.Attributes["source"]); trimmed != "" && strings.TrimSpace(info.AuthSource) == "" {
+			info.AuthSource = trimmed
+		}
+	}
+	if strings.TrimSpace(info.AuthType) == "" && strings.TrimSpace(info.AuthValue) == "" {
+		info.AuthType, info.AuthValue = auth.AccountInfo()
+	}
+}
+
 func formatAuthInfo(info upstreamRequestLog) string {
 	var parts []string
 	if trimmed := strings.TrimSpace(info.Provider); trimmed != "" {
@@ -295,6 +325,15 @@ func formatAuthInfo(info upstreamRequestLog) string {
 	}
 	if trimmed := strings.TrimSpace(info.AuthLabel); trimmed != "" {
 		parts = append(parts, fmt.Sprintf("label=%s", trimmed))
+	}
+	if trimmed := strings.TrimSpace(info.AuthIndex); trimmed != "" {
+		parts = append(parts, fmt.Sprintf("auth_index=%s", trimmed))
+	}
+	if trimmed := strings.TrimSpace(info.AuthBaseURL); trimmed != "" {
+		parts = append(parts, fmt.Sprintf("base_url=%s", trimmed))
+	}
+	if trimmed := strings.TrimSpace(info.AuthSource); trimmed != "" {
+		parts = append(parts, fmt.Sprintf("source=%s", trimmed))
 	}
 
 	authType := strings.ToLower(strings.TrimSpace(info.AuthType))
