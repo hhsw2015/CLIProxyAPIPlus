@@ -147,6 +147,7 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	util.ApplyCustomHeadersFromAttrs(httpReq, attrs)
 	if isClaudeFamilyModel(baseModel) {
 		applyOpenAICompatAnthropicPassthroughHeaders(httpReq, ctx, extraBetas)
+		ensureSkyworkClaude1MBeta(httpReq, auth, baseModel)
 	}
 	applySingularityHeaders(httpReq, auth, apiKey, false)
 	logInfo := upstreamRequestLog{
@@ -262,6 +263,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	util.ApplyCustomHeadersFromAttrs(httpReq, attrs)
 	if isClaudeFamilyModel(baseModel) {
 		applyOpenAICompatAnthropicPassthroughHeaders(httpReq, ctx, extraBetas)
+		ensureSkyworkClaude1MBeta(httpReq, auth, baseModel)
 	}
 	applySingularityHeaders(httpReq, auth, apiKey, true)
 	httpReq.Header.Set("Accept", "text/event-stream")
@@ -804,6 +806,7 @@ func (e *OpenAICompatExecutor) executeSingularityNonStream(
 	util.ApplyCustomHeadersFromAttrs(httpReq, attrs)
 	if isClaudeFamilyModel(req.Model) {
 		applyOpenAICompatAnthropicPassthroughHeaders(httpReq, ctx, extraBetas)
+		ensureSkyworkClaude1MBeta(httpReq, auth, req.Model)
 	}
 	applySingularityHeaders(httpReq, auth, apiKey, true)
 
@@ -1060,6 +1063,34 @@ func (e statusErr) RetryAfter() *time.Duration { return e.retryAfter }
 // isClaudeFamilyModel returns true if the model name indicates a Claude-family model.
 func isClaudeFamilyModel(model string) bool {
 	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(model)), "claude-")
+}
+
+// skyworkClaude1MModels lists Claude models that support the context-1m beta.
+var skyworkClaude1MModels = map[string]bool{
+	"claude-opus-4.6":   true,
+	"claude-sonnet-4.6": true,
+}
+
+// ensureSkyworkClaude1MBeta automatically injects the context-1m beta header for
+// Skywork Claude 4.6 requests that don't already have it. This ensures all requests
+// (including sub-agents that don't inherit the parent's beta headers) route to
+// Skywork's 1M backend cluster, which is more stable than the non-1M cluster.
+func ensureSkyworkClaude1MBeta(r *http.Request, auth *cliproxyauth.Auth, model string) {
+	if r == nil || !cliproxyauth.IsSkyworkFallbackAuth(auth) {
+		return
+	}
+	if !skyworkClaude1MModels[strings.ToLower(strings.TrimSpace(model))] {
+		return
+	}
+	existing := r.Header.Get("Anthropic-Beta")
+	if strings.Contains(existing, "context-1m") {
+		return
+	}
+	if existing == "" {
+		r.Header.Set("Anthropic-Beta", "context-1m-2025-08-07")
+	} else {
+		r.Header.Set("Anthropic-Beta", existing+",context-1m-2025-08-07")
+	}
 }
 
 // adaptCrossFamilyReasoningEffort adjusts reasoning_effort in the payload when the
