@@ -13,32 +13,57 @@ import (
 // skyworkGlobalCooldown tracks model failures across all Skywork accounts.
 // Since all Skywork accounts share the same upstream domain (desktop-llm.skywork.ai),
 // a model failure on one account means the same model will fail on all accounts.
+// Uses exponential backoff: 2min → 5min → 10min (cap), reset on success.
 var skyworkGlobalCooldown = struct {
-	mu      sync.RWMutex
-	entries map[string]time.Time // model name -> cooldown expiry
+	mu           sync.RWMutex
+	entries      map[string]time.Time // model name -> cooldown expiry
+	failureCounts map[string]int       // model name -> consecutive failure count
 }{
-	entries: make(map[string]time.Time),
+	entries:      make(map[string]time.Time),
+	failureCounts: make(map[string]int),
 }
 
-const skyworkGlobalCooldownDuration = 60 * time.Second
+// skyworkCooldownSteps defines exponential backoff durations.
+// Observed failure windows last 10-20 minutes, so the cap is 10 minutes.
+var skyworkCooldownSteps = []time.Duration{
+	2 * time.Minute,  // 1st failure
+	5 * time.Minute,  // 2nd consecutive failure
+	10 * time.Minute, // 3rd+ consecutive failure (cap)
+}
 
 // MarkSkyworkModelCooldown records that a model has failed and should be
-// skipped across all Skywork accounts for the cooldown duration.
+// skipped across all Skywork accounts. Duration increases with consecutive failures.
 func MarkSkyworkModelCooldown(model string) {
 	skyworkGlobalCooldown.mu.Lock()
-	skyworkGlobalCooldown.entries[model] = time.Now().Add(skyworkGlobalCooldownDuration)
+	count := skyworkGlobalCooldown.failureCounts[model]
+	stepIdx := count
+	if stepIdx >= len(skyworkCooldownSteps) {
+		stepIdx = len(skyworkCooldownSteps) - 1
+	}
+	duration := skyworkCooldownSteps[stepIdx]
+	skyworkGlobalCooldown.entries[model] = time.Now().Add(duration)
+	skyworkGlobalCooldown.failureCounts[model] = count + 1
 	skyworkGlobalCooldown.mu.Unlock()
 	log.WithFields(log.Fields{
-		"event": "skywork-global-cooldown",
-		"model": model,
-		"until": time.Now().Add(skyworkGlobalCooldownDuration).Format(time.RFC3339),
-	}).Infof("[skywork-fallback] %s globally cooled down for %s", model, skyworkGlobalCooldownDuration)
+		"event":          "skywork-global-cooldown",
+		"model":          model,
+		"duration":       duration.String(),
+		"failure_count":  count + 1,
+	}).Infof("[skywork-fallback] %s globally cooled down for %s (failure #%d)", model, duration, count+1)
 }
 
-// ClearSkyworkModelCooldown clears the cooldown for a model after it succeeds.
+// ClearSkyworkModelCooldown clears the cooldown and resets the failure count
+// for a model after it succeeds.
 func ClearSkyworkModelCooldown(model string) {
 	skyworkGlobalCooldown.mu.Lock()
+	if _, had := skyworkGlobalCooldown.entries[model]; had {
+		log.WithFields(log.Fields{
+			"event": "skywork-global-cooldown-cleared",
+			"model": model,
+		}).Infof("[skywork-fallback] %s cooldown cleared (model recovered)", model)
+	}
 	delete(skyworkGlobalCooldown.entries, model)
+	delete(skyworkGlobalCooldown.failureCounts, model)
 	skyworkGlobalCooldown.mu.Unlock()
 }
 
@@ -51,7 +76,7 @@ func IsSkyworkModelCooledDown(model string) bool {
 		return false
 	}
 	if time.Now().After(expiry) {
-		// Expired — clean up lazily.
+		// Expired — clean up lazily but keep failure count for backoff escalation.
 		skyworkGlobalCooldown.mu.Lock()
 		if e, exists := skyworkGlobalCooldown.entries[model]; exists && time.Now().After(e) {
 			delete(skyworkGlobalCooldown.entries, model)
