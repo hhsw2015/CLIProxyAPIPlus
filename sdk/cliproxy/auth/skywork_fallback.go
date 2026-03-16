@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	log "github.com/sirupsen/logrus"
+	"github.com/tidwall/gjson"
 )
 
 // skyworkModelCapability describes a model's capability for Skywork smart fallback.
@@ -53,10 +54,33 @@ func SkyworkModelFamily(model string) string {
 // heavyRequestThreshold is the payload size in bytes above which a request is considered heavy.
 const heavyRequestThreshold = 100 * 1024 // 100KB
 
-// IsHeavySkyworkRequest estimates whether a request payload is heavy (large context).
-// Uses a simple byte-size heuristic — no tokenization.
-func IsHeavySkyworkRequest(payload []byte) bool {
-	return len(payload) > heavyRequestThreshold
+// IsHeavySkyworkRequest estimates whether a request is heavy (large context).
+// A request is considered heavy if:
+// - Payload exceeds the byte-size threshold (100KB), OR
+// - The request uses 1M context mode (detected via Anthropic beta header or betas field)
+func IsHeavySkyworkRequest(payload []byte, originalRequest []byte) bool {
+	if len(payload) > heavyRequestThreshold {
+		return true
+	}
+	// Check for 1M context mode in original request payload.
+	// Claude CLI sends betas in the request body or Anthropic-Beta header.
+	for _, src := range [][]byte{originalRequest, payload} {
+		if len(src) == 0 {
+			continue
+		}
+		betas := strings.ToLower(gjson.GetBytes(src, "betas").String())
+		if strings.Contains(betas, "context-1m") {
+			return true
+		}
+		// Also check anthropic_beta / anthropic-beta fields
+		for _, field := range []string{"anthropic_beta", "anthropic-beta"} {
+			v := strings.ToLower(gjson.GetBytes(src, field).String())
+			if strings.Contains(v, "context-1m") {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // PlanSkyworkFallbackChain returns an ordered list of models to try for a Skywork request.

@@ -195,13 +195,30 @@ func TestCrossFamilyReasoningEffort_SameFamily_NoChange(t *testing.T) {
 
 func TestIsHeavyRequest(t *testing.T) {
 	small := make([]byte, 50*1024) // 50KB
-	if IsHeavySkyworkRequest(small) {
+	if IsHeavySkyworkRequest(small, nil) {
 		t.Error("50KB should not be heavy")
 	}
 
 	large := make([]byte, 200*1024) // 200KB
-	if !IsHeavySkyworkRequest(large) {
+	if !IsHeavySkyworkRequest(large, nil) {
 		t.Error("200KB should be heavy")
+	}
+}
+
+func TestIsHeavyRequest_1MContext(t *testing.T) {
+	// Small payload but with 1M context beta — should be heavy.
+	small := []byte(`{"model":"claude-opus-4.6","messages":[]}`)
+	original := []byte(`{"model":"claude-opus-4.6","betas":["context-1m-2025-08-07"],"messages":[]}`)
+	if !IsHeavySkyworkRequest(small, original) {
+		t.Error("1M context request should be heavy regardless of payload size")
+	}
+}
+
+func TestIsHeavyRequest_No1M(t *testing.T) {
+	small := []byte(`{"model":"claude-opus-4.6","messages":[]}`)
+	original := []byte(`{"model":"claude-opus-4.6","betas":["interleaved-thinking-2025-05-14"],"messages":[]}`)
+	if IsHeavySkyworkRequest(small, original) {
+		t.Error("non-1M small request should not be heavy")
 	}
 }
 

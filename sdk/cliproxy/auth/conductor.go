@@ -477,10 +477,10 @@ func preserveRequestedModelSuffix(requestedModel, resolved string) string {
 }
 
 func (m *Manager) executionModelCandidates(auth *Auth, routeModel string) []string {
-	return m.prepareExecutionModels(auth, routeModel, nil)
+	return m.prepareExecutionModels(auth, routeModel, nil, nil)
 }
 
-func (m *Manager) prepareExecutionModels(auth *Auth, routeModel string, payload []byte) []string {
+func (m *Manager) prepareExecutionModels(auth *Auth, routeModel string, payload []byte, originalRequest []byte) []string {
 	requestedModel := rewriteModelForAuth(routeModel, auth)
 	requestedModel = m.applyOAuthModelAlias(auth, requestedModel)
 
@@ -507,7 +507,7 @@ func (m *Manager) prepareExecutionModels(auth *Auth, routeModel string, payload 
 			primaryModel := primary[0]
 			available := m.skyworkAvailableModels(auth, cfg)
 			if len(available) > 1 {
-				heavy := IsHeavySkyworkRequest(payload)
+				heavy := IsHeavySkyworkRequest(payload, originalRequest)
 				chain := PlanSkyworkFallbackChain(primaryModel, available, heavy)
 				// Merge: keep primary list, then append fallback candidates not already present.
 				seen := make(map[string]bool, len(primary))
@@ -648,7 +648,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 	if executor == nil {
 		return nil, &Error{Code: "executor_not_found", Message: "executor not registered"}
 	}
-	execModels := m.prepareExecutionModels(auth, routeModel, req.Payload)
+	execModels := m.prepareExecutionModels(auth, routeModel, req.Payload, opts.OriginalRequest)
 	var lastErr error
 	for idx, execModel := range execModels {
 		execReq := req
@@ -1128,7 +1128,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			execCtx = context.WithValue(execCtx, "cliproxy.roundtripper", rt)
 		}
 
-		models := m.prepareExecutionModels(auth, routeModel, req.Payload)
+		models := m.prepareExecutionModels(auth, routeModel, req.Payload, opts.OriginalRequest)
 		var authErr error
 		for mi, upstreamModel := range models {
 			execReq := req
@@ -1214,7 +1214,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 			execCtx = context.WithValue(execCtx, "cliproxy.roundtripper", rt)
 		}
 
-		models := m.prepareExecutionModels(auth, routeModel, req.Payload)
+		models := m.prepareExecutionModels(auth, routeModel, req.Payload, opts.OriginalRequest)
 		var authErr error
 		for _, upstreamModel := range models {
 			execReq := req
