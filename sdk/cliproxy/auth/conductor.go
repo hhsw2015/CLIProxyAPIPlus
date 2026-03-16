@@ -668,6 +668,13 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			if isRequestInvalidError(errStream) {
 				return nil, errStream
 			}
+			if len(execModels) > 1 && IsSkyworkFallbackAuth(auth) {
+				if idx < len(execModels)-1 {
+					LogSkyworkFallbackEvent(execModel, execModels[idx+1], provider, auth.ID, rerr.HTTPStatus, errStream.Error())
+				} else {
+					LogSkyworkFallbackExhausted(routeModel, provider, auth.ID, errStream.Error())
+				}
+			}
 			lastErr = errStream
 			continue
 		}
@@ -726,6 +733,9 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			closedCh := make(chan cliproxyexecutor.StreamChunk)
 			close(closedCh)
 			remaining = closedCh
+		}
+		if len(execModels) > 1 && idx > 0 && IsSkyworkFallbackAuth(auth) {
+			LogSkyworkFallbackSuccess(routeModel, execModel, provider, auth.ID)
 		}
 		return m.wrapStreamResult(ctx, auth.Clone(), provider, execModel, streamResult.Headers, buffered, remaining), nil
 	}
@@ -1120,7 +1130,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 
 		models := m.prepareExecutionModels(auth, routeModel, req.Payload)
 		var authErr error
-		for _, upstreamModel := range models {
+		for mi, upstreamModel := range models {
 			execReq := req
 			execReq.Model = upstreamModel
 			resp, errExec := executor.Execute(execCtx, auth, execReq, opts)
@@ -1140,8 +1150,22 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 				if isRequestInvalidError(errExec) {
 					return cliproxyexecutor.Response{}, errExec
 				}
+				if len(models) > 1 && IsSkyworkFallbackAuth(auth) {
+					httpStatus := 0
+					if result.Error != nil {
+						httpStatus = result.Error.HTTPStatus
+					}
+					if mi < len(models)-1 {
+						LogSkyworkFallbackEvent(upstreamModel, models[mi+1], provider, auth.ID, httpStatus, errExec.Error())
+					} else {
+						LogSkyworkFallbackExhausted(routeModel, provider, auth.ID, errExec.Error())
+					}
+				}
 				authErr = errExec
 				continue
+			}
+			if len(models) > 1 && mi > 0 && IsSkyworkFallbackAuth(auth) {
+				LogSkyworkFallbackSuccess(routeModel, upstreamModel, provider, auth.ID)
 			}
 			m.MarkResult(execCtx, result)
 			return resp, nil
@@ -2395,9 +2419,18 @@ func isRequestInvalidError(err error) bool {
 		return false
 	}
 	status := statusCodeFromError(err)
+	msg := err.Error()
 	switch status {
 	case http.StatusBadRequest:
-		return strings.Contains(err.Error(), "invalid_request_error")
+		if !strings.Contains(msg, "invalid_request_error") {
+			return false
+		}
+		// Skywork/Bedrock wraps rate-limit errors as invalid_request_error; these are
+		// transient and should be retried with a different model, not treated as invalid.
+		if strings.Contains(msg, "rate limit") || strings.Contains(msg, "retry quota exceeded") {
+			return false
+		}
+		return true
 	case http.StatusUnprocessableEntity:
 		return true
 	default:
