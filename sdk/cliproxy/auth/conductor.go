@@ -536,9 +536,27 @@ func (m *Manager) prepareExecutionModels(auth *Auth, routeModel string, payload 
 						seen[c] = true
 					}
 				}
-				// Always keep at least the requested model as last resort.
-				if !seen[primaryModel] {
-					primary = append(primary, primaryModel)
+				// If all fallback candidates are cooled down, pick only the one
+				// whose cooldown expires soonest. This prevents the outer account
+				// rotation from retrying the same cooled-down model on every account
+				// (7 accounts × 30s timeout = 3.5 min wasted).
+				if len(primary) == 0 {
+					var bestModel string
+					var bestExpiry time.Time
+					for _, c := range chain {
+						skyworkGlobalCooldown.mu.RLock()
+						exp, ok := skyworkGlobalCooldown.entries[c]
+						skyworkGlobalCooldown.mu.RUnlock()
+						if ok && (bestModel == "" || exp.Before(bestExpiry)) {
+							bestModel = c
+							bestExpiry = exp
+						}
+					}
+					if bestModel != "" {
+						primary = append(primary, bestModel)
+					} else {
+						primary = append(primary, primaryModel)
+					}
 				}
 			}
 		}
