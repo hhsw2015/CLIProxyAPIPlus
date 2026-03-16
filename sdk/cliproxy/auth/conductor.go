@@ -477,24 +477,80 @@ func preserveRequestedModelSuffix(requestedModel, resolved string) string {
 }
 
 func (m *Manager) executionModelCandidates(auth *Auth, routeModel string) []string {
-	return m.prepareExecutionModels(auth, routeModel)
+	return m.prepareExecutionModels(auth, routeModel, nil)
 }
 
-func (m *Manager) prepareExecutionModels(auth *Auth, routeModel string) []string {
+func (m *Manager) prepareExecutionModels(auth *Auth, routeModel string, payload []byte) []string {
 	requestedModel := rewriteModelForAuth(routeModel, auth)
 	requestedModel = m.applyOAuthModelAlias(auth, requestedModel)
+
+	var primary []string
 	if pool := m.resolveOpenAICompatUpstreamModelPool(auth, requestedModel); len(pool) > 0 {
 		if len(pool) == 1 {
-			return pool
+			primary = pool
+		} else {
+			offset := m.nextModelPoolOffset(openAICompatModelPoolKey(auth, requestedModel), len(pool))
+			primary = rotateStrings(pool, offset)
 		}
-		offset := m.nextModelPoolOffset(openAICompatModelPoolKey(auth, requestedModel), len(pool))
-		return rotateStrings(pool, offset)
+	} else {
+		resolved := m.applyAPIKeyModelAlias(auth, requestedModel)
+		if strings.TrimSpace(resolved) == "" {
+			resolved = requestedModel
+		}
+		primary = []string{resolved}
 	}
-	resolved := m.applyAPIKeyModelAlias(auth, requestedModel)
-	if strings.TrimSpace(resolved) == "" {
-		resolved = requestedModel
+
+	// Skywork smart fallback: extend with fallback chain if enabled.
+	if len(primary) > 0 && IsSkyworkFallbackAuth(auth) {
+		cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
+		if cfg != nil && cfg.SkyworkSmartFallback {
+			primaryModel := primary[0]
+			available := m.skyworkAvailableModels(auth, cfg)
+			if len(available) > 1 {
+				heavy := IsHeavySkyworkRequest(payload)
+				chain := PlanSkyworkFallbackChain(primaryModel, available, heavy)
+				// Merge: keep primary list, then append fallback candidates not already present.
+				seen := make(map[string]bool, len(primary))
+				for _, p := range primary {
+					seen[p] = true
+				}
+				for _, c := range chain {
+					if !seen[c] {
+						primary = append(primary, c)
+						seen[c] = true
+					}
+				}
+			}
+		}
 	}
-	return []string{resolved}
+
+	return primary
+}
+
+// skyworkAvailableModels returns the list of model names configured for the auth's
+// OpenAI compatibility entry, used to filter fallback candidates.
+func (m *Manager) skyworkAvailableModels(auth *Auth, cfg *internalconfig.Config) []string {
+	if cfg == nil || auth == nil {
+		return nil
+	}
+	providerKey := ""
+	compatName := ""
+	if auth.Attributes != nil {
+		providerKey = strings.TrimSpace(auth.Attributes["provider_key"])
+		compatName = strings.TrimSpace(auth.Attributes["compat_name"])
+	}
+	entry := resolveOpenAICompatConfig(cfg, providerKey, compatName, auth.Provider)
+	if entry == nil {
+		return nil
+	}
+	models := make([]string, 0, len(entry.Models))
+	for _, m := range entry.Models {
+		name := strings.TrimSpace(m.GetName())
+		if name != "" {
+			models = append(models, name)
+		}
+	}
+	return models
 }
 
 func discardStreamChunks(ch <-chan cliproxyexecutor.StreamChunk) {
@@ -539,7 +595,7 @@ func readStreamBootstrap(ctx context.Context, ch <-chan cliproxyexecutor.StreamC
 	}
 }
 
-func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, routeModel string, headers http.Header, buffered []cliproxyexecutor.StreamChunk, remaining <-chan cliproxyexecutor.StreamChunk) *cliproxyexecutor.StreamResult {
+func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, execModel string, headers http.Header, buffered []cliproxyexecutor.StreamChunk, remaining <-chan cliproxyexecutor.StreamChunk) *cliproxyexecutor.StreamResult {
 	out := make(chan cliproxyexecutor.StreamChunk)
 	go func() {
 		defer close(out)
@@ -552,7 +608,7 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, ro
 				if se, ok := errors.AsType[cliproxyexecutor.StatusError](chunk.Err); ok && se != nil {
 					rerr.HTTPStatus = se.StatusCode()
 				}
-				m.MarkResult(ctx, Result{AuthID: auth.ID, Provider: provider, Model: routeModel, Success: false, Error: rerr})
+				m.MarkResult(ctx, Result{AuthID: auth.ID, Provider: provider, Model: execModel, Success: false, Error: rerr})
 			}
 			if !forward {
 				return false
@@ -582,7 +638,7 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, ro
 			}
 		}
 		if !failed {
-			m.MarkResult(ctx, Result{AuthID: auth.ID, Provider: provider, Model: routeModel, Success: true})
+			m.MarkResult(ctx, Result{AuthID: auth.ID, Provider: provider, Model: execModel, Success: true})
 		}
 	}()
 	return &cliproxyexecutor.StreamResult{Headers: headers, Chunks: out}
@@ -592,7 +648,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 	if executor == nil {
 		return nil, &Error{Code: "executor_not_found", Message: "executor not registered"}
 	}
-	execModels := m.prepareExecutionModels(auth, routeModel)
+	execModels := m.prepareExecutionModels(auth, routeModel, req.Payload)
 	var lastErr error
 	for idx, execModel := range execModels {
 		execReq := req
@@ -606,7 +662,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			if se, ok := errors.AsType[cliproxyexecutor.StatusError](errStream); ok && se != nil {
 				rerr.HTTPStatus = se.StatusCode()
 			}
-			result := Result{AuthID: auth.ID, Provider: provider, Model: routeModel, Success: false, Error: rerr}
+			result := Result{AuthID: auth.ID, Provider: provider, Model: execModel, Success: false, Error: rerr}
 			result.RetryAfter = retryAfterFromError(errStream)
 			m.MarkResult(ctx, result)
 			if isRequestInvalidError(errStream) {
@@ -627,7 +683,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 				if se, ok := errors.AsType[cliproxyexecutor.StatusError](bootstrapErr); ok && se != nil {
 					rerr.HTTPStatus = se.StatusCode()
 				}
-				result := Result{AuthID: auth.ID, Provider: provider, Model: routeModel, Success: false, Error: rerr}
+				result := Result{AuthID: auth.ID, Provider: provider, Model: execModel, Success: false, Error: rerr}
 				result.RetryAfter = retryAfterFromError(bootstrapErr)
 				m.MarkResult(ctx, result)
 				discardStreamChunks(streamResult.Chunks)
@@ -638,7 +694,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 				if se, ok := errors.AsType[cliproxyexecutor.StatusError](bootstrapErr); ok && se != nil {
 					rerr.HTTPStatus = se.StatusCode()
 				}
-				result := Result{AuthID: auth.ID, Provider: provider, Model: routeModel, Success: false, Error: rerr}
+				result := Result{AuthID: auth.ID, Provider: provider, Model: execModel, Success: false, Error: rerr}
 				result.RetryAfter = retryAfterFromError(bootstrapErr)
 				m.MarkResult(ctx, result)
 				discardStreamChunks(streamResult.Chunks)
@@ -648,12 +704,12 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			errCh := make(chan cliproxyexecutor.StreamChunk, 1)
 			errCh <- cliproxyexecutor.StreamChunk{Err: bootstrapErr}
 			close(errCh)
-			return m.wrapStreamResult(ctx, auth.Clone(), provider, routeModel, streamResult.Headers, nil, errCh), nil
+			return m.wrapStreamResult(ctx, auth.Clone(), provider, execModel, streamResult.Headers, nil, errCh), nil
 		}
 
 		if closed && len(buffered) == 0 {
 			emptyErr := &Error{Code: "empty_stream", Message: "upstream stream closed before first payload", Retryable: true}
-			result := Result{AuthID: auth.ID, Provider: provider, Model: routeModel, Success: false, Error: emptyErr}
+			result := Result{AuthID: auth.ID, Provider: provider, Model: execModel, Success: false, Error: emptyErr}
 			m.MarkResult(ctx, result)
 			if idx < len(execModels)-1 {
 				lastErr = emptyErr
@@ -662,7 +718,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			errCh := make(chan cliproxyexecutor.StreamChunk, 1)
 			errCh <- cliproxyexecutor.StreamChunk{Err: emptyErr}
 			close(errCh)
-			return m.wrapStreamResult(ctx, auth.Clone(), provider, routeModel, streamResult.Headers, nil, errCh), nil
+			return m.wrapStreamResult(ctx, auth.Clone(), provider, execModel, streamResult.Headers, nil, errCh), nil
 		}
 
 		remaining := streamResult.Chunks
@@ -671,7 +727,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			close(closedCh)
 			remaining = closedCh
 		}
-		return m.wrapStreamResult(ctx, auth.Clone(), provider, routeModel, streamResult.Headers, buffered, remaining), nil
+		return m.wrapStreamResult(ctx, auth.Clone(), provider, execModel, streamResult.Headers, buffered, remaining), nil
 	}
 	if lastErr == nil {
 		lastErr = &Error{Code: "auth_not_found", Message: "no upstream model available"}
@@ -1062,13 +1118,13 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			execCtx = context.WithValue(execCtx, "cliproxy.roundtripper", rt)
 		}
 
-		models := m.prepareExecutionModels(auth, routeModel)
+		models := m.prepareExecutionModels(auth, routeModel, req.Payload)
 		var authErr error
 		for _, upstreamModel := range models {
 			execReq := req
 			execReq.Model = upstreamModel
 			resp, errExec := executor.Execute(execCtx, auth, execReq, opts)
-			result := Result{AuthID: auth.ID, Provider: provider, Model: routeModel, Success: errExec == nil}
+			result := Result{AuthID: auth.ID, Provider: provider, Model: upstreamModel, Success: errExec == nil}
 			if errExec != nil {
 				if errCtx := execCtx.Err(); errCtx != nil {
 					return cliproxyexecutor.Response{}, errCtx
@@ -1134,13 +1190,13 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 			execCtx = context.WithValue(execCtx, "cliproxy.roundtripper", rt)
 		}
 
-		models := m.prepareExecutionModels(auth, routeModel)
+		models := m.prepareExecutionModels(auth, routeModel, req.Payload)
 		var authErr error
 		for _, upstreamModel := range models {
 			execReq := req
 			execReq.Model = upstreamModel
 			resp, errExec := executor.CountTokens(execCtx, auth, execReq, opts)
-			result := Result{AuthID: auth.ID, Provider: provider, Model: routeModel, Success: errExec == nil}
+			result := Result{AuthID: auth.ID, Provider: provider, Model: upstreamModel, Success: errExec == nil}
 			if errExec != nil {
 				if errCtx := execCtx.Err(); errCtx != nil {
 					return cliproxyexecutor.Response{}, errCtx

@@ -139,7 +139,8 @@ func TestOpenAICompatExecutorExecuteStream_SingularityUsesCookieAuth(t *testing.
 }
 
 func TestAdaptSingularityPayload_ConvertsReasoningEffortToThinking(t *testing.T) {
-	adapted := adaptSingularityPayload([]byte(`{"model":"gemini-3-flash-preview","reasoning_effort":"xhigh","stream":false}`))
+	// For Claude models, reasoning_effort should be converted to thinking.budget_tokens.
+	adapted := adaptSingularityPayload([]byte(`{"model":"claude-opus-4.6","reasoning_effort":"xhigh","stream":false}`), "claude-opus-4.6")
 
 	if got := gjson.GetBytes(adapted, "thinking.type").String(); got != "enabled" {
 		t.Fatalf("thinking.type = %q, want %q; body=%s", got, "enabled", string(adapted))
@@ -149,6 +150,21 @@ func TestAdaptSingularityPayload_ConvertsReasoningEffortToThinking(t *testing.T)
 	}
 	if gjson.GetBytes(adapted, "reasoning_effort").Exists() {
 		t.Fatalf("did not expect reasoning_effort in adapted body: %s", string(adapted))
+	}
+	if got := gjson.GetBytes(adapted, "stream").Bool(); !got {
+		t.Fatalf("expected stream=true in adapted body, got %s", string(adapted))
+	}
+}
+
+func TestAdaptSingularityPayload_GPTKeepsReasoningEffort(t *testing.T) {
+	// For GPT models, reasoning_effort should NOT be converted — kept as-is.
+	adapted := adaptSingularityPayload([]byte(`{"model":"gpt-5.4","reasoning_effort":"xhigh","stream":false}`), "gpt-5.4")
+
+	if gjson.GetBytes(adapted, "thinking.type").Exists() {
+		t.Fatalf("did not expect thinking.type for GPT model: %s", string(adapted))
+	}
+	if got := gjson.GetBytes(adapted, "reasoning_effort").String(); got != "xhigh" {
+		t.Fatalf("reasoning_effort = %q, want %q; body=%s", got, "xhigh", string(adapted))
 	}
 	if got := gjson.GetBytes(adapted, "stream").Bool(); !got {
 		t.Fatalf("expected stream=true in adapted body, got %s", string(adapted))

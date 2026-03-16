@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -105,8 +106,12 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	translated := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, opts.Stream)
 	requestedModel := payloadRequestedModel(opts, req.Model)
 	translated = applyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", translated, originalTranslated, requestedModel)
-	translated, extraBetas := prepareOpenAICompatAnthropicPassthrough(originalPayload, translated)
-	translated = e.adaptCompatPayload(auth, translated)
+	var extraBetas []string
+	if isClaudeFamilyModel(baseModel) {
+		translated, extraBetas = prepareOpenAICompatAnthropicPassthrough(originalPayload, translated)
+		translated = e.adaptCompatPayload(auth, translated)
+	}
+	translated = adaptCrossFamilyReasoningEffort(translated, baseModel, requestedModel)
 	if opts.Alt == "responses/compact" {
 		if updated, errDelete := sjson.DeleteBytes(translated, "stream"); errDelete == nil {
 			translated = updated
@@ -121,7 +126,7 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 		if opts.Alt != "" {
 			return resp, statusErr{code: http.StatusBadRequest, msg: "singularity provider does not support " + opts.Alt}
 		}
-		translated = adaptSingularityPayload(translated)
+		translated = adaptSingularityPayload(translated, baseModel)
 		return e.executeSingularityNonStream(ctx, auth, req, opts, translated, to, baseURL, apiKey, extraBetas, reporter)
 	}
 
@@ -140,7 +145,9 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 		attrs = auth.Attributes
 	}
 	util.ApplyCustomHeadersFromAttrs(httpReq, attrs)
-	applyOpenAICompatAnthropicPassthroughHeaders(httpReq, ctx, extraBetas)
+	if isClaudeFamilyModel(baseModel) {
+		applyOpenAICompatAnthropicPassthroughHeaders(httpReq, ctx, extraBetas)
+	}
 	applySingularityHeaders(httpReq, auth, apiKey, false)
 	logInfo := upstreamRequestLog{
 		URL:      url,
@@ -155,6 +162,7 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
 	httpResp, err := httpClient.Do(httpReq)
 	if err != nil {
+		err = normalizeOpenAICompatTransportError(err)
 		recordAPIResponseError(ctx, e.cfg, err)
 		return resp, err
 	}
@@ -173,6 +181,7 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	}
 	body, err := io.ReadAll(httpResp.Body)
 	if err != nil {
+		err = normalizeOpenAICompatTransportError(err)
 		recordAPIResponseError(ctx, e.cfg, err)
 		return resp, err
 	}
@@ -214,8 +223,12 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	translated := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, true)
 	requestedModel := payloadRequestedModel(opts, req.Model)
 	translated = applyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", translated, originalTranslated, requestedModel)
-	translated, extraBetas := prepareOpenAICompatAnthropicPassthrough(originalPayload, translated)
-	translated = e.adaptCompatPayload(auth, translated)
+	var extraBetas []string
+	if isClaudeFamilyModel(baseModel) {
+		translated, extraBetas = prepareOpenAICompatAnthropicPassthrough(originalPayload, translated)
+		translated = e.adaptCompatPayload(auth, translated)
+	}
+	translated = adaptCrossFamilyReasoningEffort(translated, baseModel, requestedModel)
 	if streamResult, webErr := e.handleMaybeInterceptedWebSearchStream(ctx, auth, req, opts, originalPayload); streamResult != nil || webErr != nil {
 		return streamResult, webErr
 	}
@@ -225,7 +238,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		return nil, err
 	}
 	if e.usesSingularityTransport(auth) {
-		translated = adaptSingularityPayload(translated)
+		translated = adaptSingularityPayload(translated, baseModel)
 	}
 
 	url := openAICompatRequestURL(baseURL, "/chat/completions")
@@ -243,7 +256,9 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		attrs = auth.Attributes
 	}
 	util.ApplyCustomHeadersFromAttrs(httpReq, attrs)
-	applyOpenAICompatAnthropicPassthroughHeaders(httpReq, ctx, extraBetas)
+	if isClaudeFamilyModel(baseModel) {
+		applyOpenAICompatAnthropicPassthroughHeaders(httpReq, ctx, extraBetas)
+	}
 	applySingularityHeaders(httpReq, auth, apiKey, true)
 	httpReq.Header.Set("Accept", "text/event-stream")
 	httpReq.Header.Set("Cache-Control", "no-cache")
@@ -260,6 +275,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
 	httpResp, err := httpClient.Do(httpReq)
 	if err != nil {
+		err = normalizeOpenAICompatTransportError(err)
 		recordAPIResponseError(ctx, e.cfg, err)
 		return nil, err
 	}
@@ -277,6 +293,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	if strings.Contains(strings.ToLower(strings.TrimSpace(httpResp.Header.Get("Content-Type"))), "application/json") {
 		body, readErr := io.ReadAll(httpResp.Body)
 		if readErr != nil {
+			readErr = normalizeOpenAICompatTransportError(readErr)
 			recordAPIResponseError(ctx, e.cfg, readErr)
 			return nil, readErr
 		}
@@ -332,6 +349,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 			}
 		}
 		if errScan := scanner.Err(); errScan != nil {
+			errScan = normalizeOpenAICompatTransportError(errScan)
 			recordAPIResponseError(ctx, e.cfg, errScan)
 			reporter.publishFailure(ctx)
 			out <- cliproxyexecutor.StreamChunk{Err: errScan}
@@ -727,11 +745,16 @@ func isSingularityAuth(auth *cliproxyauth.Auth) bool {
 		strings.EqualFold(strings.TrimSpace(auth.Attributes["compat_name"]), "singularity")
 }
 
-func adaptSingularityPayload(payload []byte) []byte {
+func adaptSingularityPayload(payload []byte, modelName string) []byte {
 	if len(payload) == 0 {
 		return payload
 	}
 	payload, _ = sjson.SetBytes(payload, "stream", true)
+	// Only convert reasoning_effort to thinking.budget_tokens for Claude-family models.
+	// GPT models use reasoning_effort natively and should keep it as-is.
+	if !isClaudeFamilyModel(modelName) {
+		return payload
+	}
 	effort := strings.ToLower(strings.TrimSpace(gjson.GetBytes(payload, "reasoning_effort").String()))
 	budgetMap := map[string]int64{
 		"minimal": 256,
@@ -775,7 +798,9 @@ func (e *OpenAICompatExecutor) executeSingularityNonStream(
 		attrs = auth.Attributes
 	}
 	util.ApplyCustomHeadersFromAttrs(httpReq, attrs)
-	applyOpenAICompatAnthropicPassthroughHeaders(httpReq, ctx, extraBetas)
+	if isClaudeFamilyModel(req.Model) {
+		applyOpenAICompatAnthropicPassthroughHeaders(httpReq, ctx, extraBetas)
+	}
 	applySingularityHeaders(httpReq, auth, apiKey, true)
 
 	logInfo := upstreamRequestLog{
@@ -1027,3 +1052,64 @@ func (e statusErr) Error() string {
 }
 func (e statusErr) StatusCode() int            { return e.code }
 func (e statusErr) RetryAfter() *time.Duration { return e.retryAfter }
+
+// isClaudeFamilyModel returns true if the model name indicates a Claude-family model.
+func isClaudeFamilyModel(model string) bool {
+	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(model)), "claude-")
+}
+
+// adaptCrossFamilyReasoningEffort adjusts reasoning_effort in the payload when the
+// execution model is in a different family than the originally-requested model.
+func adaptCrossFamilyReasoningEffort(payload []byte, execModel, requestedModel string) []byte {
+	if len(payload) == 0 {
+		return payload
+	}
+	fromFamily := cliproxyauth.SkyworkModelFamily(execModel)     // empty if unknown
+	toFamily := cliproxyauth.SkyworkModelFamily(requestedModel)  // empty if unknown
+	// Swap: fromFamily is the *requested* model's family, toFamily is the *exec* model's family.
+	// We are mapping FROM the requested effort space TO the exec effort space.
+	fromFamily, toFamily = toFamily, fromFamily
+	if fromFamily == "" || toFamily == "" || fromFamily == toFamily {
+		return payload
+	}
+	effort := strings.ToLower(strings.TrimSpace(gjson.GetBytes(payload, "reasoning_effort").String()))
+	if effort == "" {
+		return payload
+	}
+	mapped := cliproxyauth.MapCrossFamilyReasoningEffort(effort, fromFamily, toFamily)
+	if mapped == effort {
+		return payload
+	}
+	out, err := sjson.SetBytes(payload, "reasoning_effort", mapped)
+	if err != nil {
+		return payload
+	}
+	return out
+}
+
+func normalizeOpenAICompatTransportError(err error) error {
+	if err == nil {
+		return nil
+	}
+	if _, ok := err.(interface{ StatusCode() int }); ok {
+		return err
+	}
+	if errors.Is(err, context.DeadlineExceeded) || isTimeoutLikeError(err) {
+		return statusErr{code: http.StatusGatewayTimeout, msg: "upstream request timed out: " + err.Error()}
+	}
+	return err
+}
+
+func isTimeoutLikeError(err error) bool {
+	type timeout interface {
+		Timeout() bool
+	}
+	var timeoutErr timeout
+	if errors.As(err, &timeoutErr) && timeoutErr != nil && timeoutErr.Timeout() {
+		return true
+	}
+	msg := strings.ToLower(strings.TrimSpace(err.Error()))
+	return strings.Contains(msg, "client.timeout exceeded") ||
+		strings.Contains(msg, "while awaiting headers") ||
+		strings.Contains(msg, "while reading body")
+}
