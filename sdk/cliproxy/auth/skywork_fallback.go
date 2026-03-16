@@ -75,6 +75,11 @@ func PlanSkyworkFallbackChain(requestedModel string, availableModels []string, h
 	if !known {
 		return []string{requestedModel}
 	}
+	// Only T1 and T2 models participate in fallback as the originator.
+	// T3 models are too weak to justify fallback overhead.
+	if reqCap.Tier > 2 {
+		return []string{requestedModel}
+	}
 
 	// Build set of available models for O(1) lookup.
 	availSet := make(map[string]bool, len(availableModels))
@@ -83,12 +88,17 @@ func PlanSkyworkFallbackChain(requestedModel string, availableModels []string, h
 	}
 
 	// Collect eligible candidates (in capability table AND in available list), excluding requested.
+	// Only T1 and T2 models participate in fallback to keep the chain short and avoid
+	// blocking account rotation with too many slow retries on weak models.
 	var candidates []skyworkModelCapability
 	for _, cap := range skyworkModelTable {
 		if cap.Name == requestedModel {
 			continue
 		}
 		if !availSet[cap.Name] {
+			continue
+		}
+		if cap.Tier > 2 {
 			continue
 		}
 		candidates = append(candidates, cap)

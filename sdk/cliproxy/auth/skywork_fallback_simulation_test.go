@@ -94,8 +94,9 @@ func TestSkyworkFallback_ClaudeFailsToGPT(t *testing.T) {
 
 func TestSkyworkFallback_GPTFailsToClaude(t *testing.T) {
 	// Scenario: gpt-5.4 and gpt-5.3-codex both fail, should fall back to claude-opus-4.6.
+	// T3 models (gpt-5.2) are excluded from fallback chain.
 	executor := &mockFallbackExecutor{
-		failModels: map[string]bool{"gpt-5.4": true, "gpt-5.3-codex": true, "gpt-5.2": true},
+		failModels: map[string]bool{"gpt-5.4": true, "gpt-5.3-codex": true},
 		provider:   "skywork",
 	}
 
@@ -115,9 +116,9 @@ func TestSkyworkFallback_GPTFailsToClaude(t *testing.T) {
 	if successModel != "claude-opus-4.6" {
 		t.Fatalf("expected fallback to claude-opus-4.6, got %s", successModel)
 	}
-	// Light request: gpt-5.4 → gpt-5.3-codex → gpt-5.2 → claude-opus-4.6
-	if len(executor.calls) != 4 {
-		t.Fatalf("expected 4 calls, got %d: %v", len(executor.calls), executor.calls)
+	// Light request: gpt-5.4 → gpt-5.3-codex → claude-opus-4.6 (T3 gpt-5.2 skipped)
+	if len(executor.calls) != 3 {
+		t.Fatalf("expected 3 calls, got %d: %v", len(executor.calls), executor.calls)
 	}
 }
 
@@ -154,15 +155,12 @@ func TestSkyworkFallback_AllModelsFail(t *testing.T) {
 }
 
 func TestSkyworkFallback_CascadeDownToWeakest(t *testing.T) {
-	// Scenario: everything except gpt-5.2 fails. Should cascade all the way down.
+	// Scenario: all T1/T2 models except gpt-5.3-codex fail. Should cascade within T1+T2 only.
 	executor := &mockFallbackExecutor{
 		failModels: map[string]bool{
 			"claude-opus-4.6":   true,
 			"gpt-5.4":           true,
 			"claude-sonnet-4.6": true,
-			"gpt-5.3-codex":     true,
-			"claude-opus-4.5":   true,
-			"claude-sonnet-4.5": true,
 		},
 		provider: "skywork",
 	}
@@ -183,11 +181,15 @@ func TestSkyworkFallback_CascadeDownToWeakest(t *testing.T) {
 		}
 	}
 
-	if successModel != "gpt-5.2" {
-		t.Fatalf("expected fallback all the way to gpt-5.2, got %s", successModel)
+	if successModel != "gpt-5.3-codex" {
+		t.Fatalf("expected fallback to gpt-5.3-codex (last T2), got %s", successModel)
 	}
-	if len(executor.calls) != 7 {
-		t.Fatalf("expected 7 calls, got %d: %v", len(executor.calls), executor.calls)
+	// T3 models should NOT be tried
+	for _, call := range executor.calls {
+		cap, ok := skyworkModelIndex[call]
+		if ok && cap.Tier > 2 {
+			t.Errorf("T3 model %s should not have been tried", call)
+		}
 	}
 }
 
