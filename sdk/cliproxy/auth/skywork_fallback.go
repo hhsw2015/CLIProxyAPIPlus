@@ -3,10 +3,64 @@ package auth
 import (
 	"sort"
 	"strings"
+	"sync"
+	"time"
 
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 )
+
+// skyworkGlobalCooldown tracks model failures across all Skywork accounts.
+// Since all Skywork accounts share the same upstream domain (desktop-llm.skywork.ai),
+// a model failure on one account means the same model will fail on all accounts.
+var skyworkGlobalCooldown = struct {
+	mu      sync.RWMutex
+	entries map[string]time.Time // model name -> cooldown expiry
+}{
+	entries: make(map[string]time.Time),
+}
+
+const skyworkGlobalCooldownDuration = 60 * time.Second
+
+// MarkSkyworkModelCooldown records that a model has failed and should be
+// skipped across all Skywork accounts for the cooldown duration.
+func MarkSkyworkModelCooldown(model string) {
+	skyworkGlobalCooldown.mu.Lock()
+	skyworkGlobalCooldown.entries[model] = time.Now().Add(skyworkGlobalCooldownDuration)
+	skyworkGlobalCooldown.mu.Unlock()
+	log.WithFields(log.Fields{
+		"event": "skywork-global-cooldown",
+		"model": model,
+		"until": time.Now().Add(skyworkGlobalCooldownDuration).Format(time.RFC3339),
+	}).Infof("[skywork-fallback] %s globally cooled down for %s", model, skyworkGlobalCooldownDuration)
+}
+
+// ClearSkyworkModelCooldown clears the cooldown for a model after it succeeds.
+func ClearSkyworkModelCooldown(model string) {
+	skyworkGlobalCooldown.mu.Lock()
+	delete(skyworkGlobalCooldown.entries, model)
+	skyworkGlobalCooldown.mu.Unlock()
+}
+
+// IsSkyworkModelCooledDown returns true if the model is in global cooldown.
+func IsSkyworkModelCooledDown(model string) bool {
+	skyworkGlobalCooldown.mu.RLock()
+	expiry, ok := skyworkGlobalCooldown.entries[model]
+	skyworkGlobalCooldown.mu.RUnlock()
+	if !ok {
+		return false
+	}
+	if time.Now().After(expiry) {
+		// Expired — clean up lazily.
+		skyworkGlobalCooldown.mu.Lock()
+		if e, exists := skyworkGlobalCooldown.entries[model]; exists && time.Now().After(e) {
+			delete(skyworkGlobalCooldown.entries, model)
+		}
+		skyworkGlobalCooldown.mu.Unlock()
+		return false
+	}
+	return true
+}
 
 // skyworkModelCapability describes a model's capability for Skywork smart fallback.
 type skyworkModelCapability struct {
