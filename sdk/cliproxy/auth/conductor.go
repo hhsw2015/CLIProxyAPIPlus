@@ -689,6 +689,9 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 	execModels := m.prepareExecutionModels(auth, routeModel, req.Payload, opts.OriginalRequest)
 	var lastErr error
 	for idx, execModel := range execModels {
+		if IsSkyworkFallbackAuth(auth) {
+			ThrottleSkyworkRequest()
+		}
 		execReq := req
 		execReq.Model = execModel
 		streamResult, errStream := executor.ExecuteStream(ctx, auth, execReq, opts)
@@ -1173,6 +1176,9 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 		models := m.prepareExecutionModels(auth, routeModel, req.Payload, opts.OriginalRequest)
 		var authErr error
 		for mi, upstreamModel := range models {
+			if IsSkyworkFallbackAuth(auth) {
+				ThrottleSkyworkRequest()
+			}
 			execReq := req
 			execReq.Model = upstreamModel
 			resp, errExec := executor.Execute(execCtx, auth, execReq, opts)

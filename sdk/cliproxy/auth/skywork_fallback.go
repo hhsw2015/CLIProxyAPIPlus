@@ -87,6 +87,62 @@ func IsSkyworkModelCooledDown(model string) bool {
 	return true
 }
 
+// skyworkThrottle limits the rate of requests to the Skywork domain to prevent
+// cumulative load from triggering upstream throttling. Normal conversations with
+// natural pauses between messages are unaffected. Only dense back-to-back tool
+// calls (e.g., Explore agents with 60+ sequential tool invocations) are slowed.
+var skyworkThrottle = struct {
+	mu          sync.Mutex
+	lastRequest time.Time
+	recentCount int       // requests in the current window
+	windowStart time.Time // start of the current counting window
+}{
+	windowStart: time.Now(),
+}
+
+const (
+	// skyworkThrottleWindow is the time window for counting recent requests.
+	skyworkThrottleWindow = 30 * time.Second
+	// skyworkThrottleThreshold is how many requests in the window before throttling kicks in.
+	skyworkThrottleThreshold = 8
+	// skyworkThrottleDelay is the minimum delay between requests when throttling is active.
+	skyworkThrottleDelay = 2 * time.Second
+)
+
+// ThrottleSkyworkRequest applies rate limiting for Skywork requests.
+// Returns immediately for normal conversations. Only adds a small delay
+// when dense sequential requests are detected (sub-agent tool call storms).
+func ThrottleSkyworkRequest() {
+	skyworkThrottle.mu.Lock()
+	defer skyworkThrottle.mu.Unlock()
+
+	now := time.Now()
+
+	// Reset window if expired.
+	if now.Sub(skyworkThrottle.windowStart) > skyworkThrottleWindow {
+		skyworkThrottle.recentCount = 0
+		skyworkThrottle.windowStart = now
+	}
+
+	skyworkThrottle.recentCount++
+
+	// If we're under the threshold, no throttle needed.
+	if skyworkThrottle.recentCount <= skyworkThrottleThreshold {
+		skyworkThrottle.lastRequest = now
+		return
+	}
+
+	// Dense request pattern detected. Enforce minimum delay.
+	elapsed := now.Sub(skyworkThrottle.lastRequest)
+	if elapsed < skyworkThrottleDelay {
+		wait := skyworkThrottleDelay - elapsed
+		skyworkThrottle.mu.Unlock()
+		time.Sleep(wait)
+		skyworkThrottle.mu.Lock()
+	}
+	skyworkThrottle.lastRequest = time.Now()
+}
+
 // skyworkModelCapability describes a model's capability for Skywork smart fallback.
 type skyworkModelCapability struct {
 	Name       string
