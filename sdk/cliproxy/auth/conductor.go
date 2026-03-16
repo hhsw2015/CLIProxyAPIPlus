@@ -509,16 +509,36 @@ func (m *Manager) prepareExecutionModels(auth *Auth, routeModel string, payload 
 			if len(available) > 1 {
 				heavy := IsHeavySkyworkRequest(payload, originalRequest)
 				chain := PlanSkyworkFallbackChain(primaryModel, available, heavy)
-				// Merge: keep primary list, then append fallback candidates not already present.
+				// Filter out globally cooled-down models and merge.
 				seen := make(map[string]bool, len(primary))
 				for _, p := range primary {
 					seen[p] = true
 				}
+				// If the primary model is globally cooled down, move it out of
+				// first position so we don't waste 30s waiting for a known-bad model.
+				if IsSkyworkModelCooledDown(primaryModel) && len(chain) > 1 {
+					var reordered []string
+					for _, c := range chain {
+						if c != primaryModel && !IsSkyworkModelCooledDown(c) {
+							reordered = append(reordered, c)
+						}
+					}
+					// Append the cooled-down primary at the end so it can be retried
+					// if everything else fails (probing for recovery).
+					reordered = append(reordered, primaryModel)
+					chain = reordered
+					primary = nil
+					seen = make(map[string]bool)
+				}
 				for _, c := range chain {
-					if !seen[c] {
+					if !seen[c] && !IsSkyworkModelCooledDown(c) {
 						primary = append(primary, c)
 						seen[c] = true
 					}
+				}
+				// Always keep at least the requested model as last resort.
+				if !seen[primaryModel] {
+					primary = append(primary, primaryModel)
 				}
 			}
 		}
@@ -669,6 +689,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 				return nil, errStream
 			}
 			if len(execModels) > 1 && IsSkyworkFallbackAuth(auth) {
+				MarkSkyworkModelCooldown(execModel)
 				if idx < len(execModels)-1 {
 					LogSkyworkFallbackEvent(execModel, execModels[idx+1], provider, auth.ID, rerr.HTTPStatus, errStream.Error())
 				} else {
@@ -733,6 +754,9 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			closedCh := make(chan cliproxyexecutor.StreamChunk)
 			close(closedCh)
 			remaining = closedCh
+		}
+		if IsSkyworkFallbackAuth(auth) {
+			ClearSkyworkModelCooldown(execModel)
 		}
 		if len(execModels) > 1 && idx > 0 && IsSkyworkFallbackAuth(auth) {
 			LogSkyworkFallbackSuccess(routeModel, execModel, provider, auth.ID)
@@ -1151,6 +1175,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 					return cliproxyexecutor.Response{}, errExec
 				}
 				if len(models) > 1 && IsSkyworkFallbackAuth(auth) {
+					MarkSkyworkModelCooldown(upstreamModel)
 					httpStatus := 0
 					if result.Error != nil {
 						httpStatus = result.Error.HTTPStatus
@@ -1163,6 +1188,9 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 				}
 				authErr = errExec
 				continue
+			}
+			if IsSkyworkFallbackAuth(auth) {
+				ClearSkyworkModelCooldown(upstreamModel)
 			}
 			if len(models) > 1 && mi > 0 && IsSkyworkFallbackAuth(auth) {
 				LogSkyworkFallbackSuccess(routeModel, upstreamModel, provider, auth.ID)
