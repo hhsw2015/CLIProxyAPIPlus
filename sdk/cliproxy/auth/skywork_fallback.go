@@ -3,6 +3,8 @@ package auth
 import (
 	"sort"
 	"strings"
+
+	log "github.com/sirupsen/logrus"
 )
 
 // skyworkModelCapability describes a model's capability for Skywork smart fallback.
@@ -192,4 +194,42 @@ func IsSkyworkFallbackAuth(a *Auth) bool {
 		}
 	}
 	return false
+}
+
+// LogSkyworkFallbackEvent logs a structured entry when a Skywork model fails and
+// the next fallback candidate is about to be tried. Designed for easy filtering
+// with grep: all entries contain "[skywork-fallback]".
+func LogSkyworkFallbackEvent(failedModel, nextModel, provider, authID string, httpStatus int, errMsg string) {
+	log.WithFields(log.Fields{
+		"event":        "skywork-fallback",
+		"failed_model": failedModel,
+		"next_model":   nextModel,
+		"provider":     provider,
+		"auth_id":      authID,
+		"http_status":  httpStatus,
+		"error":        errMsg,
+	}).Warnf("[skywork-fallback] %s failed (HTTP %d), falling back to %s: %s",
+		failedModel, httpStatus, nextModel, errMsg)
+}
+
+// LogSkyworkFallbackExhausted logs when all fallback models have been exhausted.
+func LogSkyworkFallbackExhausted(requestedModel, provider, authID string, errMsg string) {
+	log.WithFields(log.Fields{
+		"event":           "skywork-fallback-exhausted",
+		"requested_model": requestedModel,
+		"provider":        provider,
+		"auth_id":         authID,
+		"error":           errMsg,
+	}).Errorf("[skywork-fallback] all models exhausted for %s: %s", requestedModel, errMsg)
+}
+
+// LogSkyworkFallbackSuccess logs when a fallback model succeeds.
+func LogSkyworkFallbackSuccess(requestedModel, fallbackModel, provider, authID string) {
+	log.WithFields(log.Fields{
+		"event":           "skywork-fallback-success",
+		"requested_model": requestedModel,
+		"fallback_model":  fallbackModel,
+		"provider":        provider,
+		"auth_id":         authID,
+	}).Infof("[skywork-fallback] %s failed, recovered via %s", requestedModel, fallbackModel)
 }

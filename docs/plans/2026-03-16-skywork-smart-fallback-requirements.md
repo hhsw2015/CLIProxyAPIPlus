@@ -96,10 +96,52 @@ Fallback is triggered when the **conversation cannot continue** with the current
 | Stream interruption mid-response (`while reading body`) | Yes |
 | Upstream 5xx error (`500`, `502`, `503`, `504`) | Yes |
 | Rate limiting (`429`) / quota exhaustion | Yes |
+| Bedrock rate limit wrapped as `invalid_request_error` | Yes (special-cased) |
+| Empty stream (200 but no data) | Yes |
 | All auth lanes for the same model exhausted | Yes |
 | Another model might be "stronger" | **No** |
 | Another model might be "faster" | **No** |
 | Request is heavy (alone, without failure) | **No** |
+| Client canceled request (`context canceled`) | **No** |
+| True invalid request (400 + `invalid_request_error`, no rate limit) | **No** |
+
+### 2.4 Observed Error Types from Production Logs
+
+Based on actual Skywork failure logs (March 11-16, 2026):
+
+| Error | HTTP Status | Frequency | Example |
+|-------|------------|-----------|---------|
+| `context deadline exceeded (while reading body)` | 500 | 29+ | Upstream started responding but body read timed out |
+| `context deadline exceeded (while awaiting headers)` | 504 | 20+ | Upstream completely unresponsive, no headers received |
+| `empty_stream: upstream stream closed before first payload` | 500 | 11 | Upstream returned 200 + SSE headers but sent no data |
+| `context canceled` | 500 | 7 | Client (Claude CLI) canceled the request |
+| Bedrock `retry quota exceeded` | 400 | 3 | Skywork's Bedrock backend rate-limited, wrapped as `invalid_request_error` |
+| Stream mid-flight failure | 500 | ~6 | Upstream returned 200 + partial SSE data, then connection broke |
+
+**Correlation with payload size**: All `while reading body` and `while awaiting headers` failures
+occurred on requests with Content-Length ~234KB. Small requests (~159 bytes) in the same time
+window succeeded. This confirms the heavy-request heuristic is relevant.
+
+**Failure window pattern**: Errors clustered in 15-20 minute windows (e.g., 00:28-00:46 UTC),
+then spontaneously recovered. All Skywork accounts affected simultaneously.
+
+### 2.5 Log Filtering
+
+All Skywork fallback events are logged with the prefix `[skywork-fallback]` for easy filtering:
+
+```bash
+# Find all fallback events
+grep "skywork-fallback" /path/to/proxy/stdout.log
+
+# Find only failures (model failed, trying next)
+grep "skywork-fallback\].*failed" /path/to/proxy/stdout.log
+
+# Find successful recoveries
+grep "skywork-fallback-success" /path/to/proxy/stdout.log
+
+# Find exhausted chains (all models failed)
+grep "skywork-fallback-exhausted" /path/to/proxy/stdout.log
+```
 
 ### 2.4 Priority Principles
 
