@@ -239,9 +239,12 @@ T3   | gpt-5.2            | gpt     | 7
 Fields:
 - `Tier`: capability tier (T1 = strongest, T2 = mid, T3 = weakest)
 - `Family`: model vendor family (`"claude"`, `"gpt"`)
-- `CodingRank`: overall coding capability ranking (lower = better), used as fallback
-  priority. The chain tries every model from rank 1 to 7 (skipping the requested
-  model which is always first) until one succeeds or all are exhausted.
+- `CodingRank`: overall coding capability ranking (lower = better), used as fallback priority
+
+**Only T1 and T2 models participate in fallback.** T3 models are excluded to keep the
+chain short (max 4 models) and avoid blocking the outer account rotation loop.
+
+Both T1 models (claude-opus-4.6 and gpt-5.4) support 1M context.
 
 This table is extensible by adding entries. No external config needed.
 
@@ -249,30 +252,32 @@ This table is extensible by adding entries. No external config needed.
 
 Estimates whether a request is "heavy" (large context) or "light":
 
-| Signal | Weight |
+| Signal | Heavy? |
 |--------|--------|
-| Payload byte size > threshold (e.g., 100KB) | Heavy indicator |
-| Many messages in conversation history | Heavy indicator |
-| Large tool results in payload | Heavy indicator |
-| File content attachments | Heavy indicator |
+| Payload byte size > 100KB | Yes |
+| Request uses 1M context mode (`context-1m` in betas) | Yes |
+| Otherwise | No (light) |
 
-**No tokenization needed** — rough heuristic based on byte size and structure.
+Both T1 models (claude-opus-4.6 and gpt-5.4) support 1M context. When a 1M request
+fails, it should fallback to the other T1 model cross-family, since that model also
+supports 1M and is more likely to succeed than a weaker same-family model.
+
 Classification affects **fallback ordering only**, never triggers fallback by itself.
 
 ### 3.5 Fallback Ordering Rules
 
 **Core principle**: the requested model is always tried first. If it fails, walk
-down the full fallback chain until a model succeeds. If all models fail, the request
-fails as usual. The goal is to **keep the client's conversation alive**.
+down the fallback chain (T1+T2 only, max 4 models) until one succeeds. If all fail,
+the outer account rotation loop continues. The goal is to **keep the conversation alive**.
 
 Given requested model `M` and request weight `W`:
 
 **Light request** (same-family first, then cross-family):
 ```
 1. M (requested model -- always first)
-2. Same-family models, ordered by CodingRank
-3. Cross-family models, ordered by CodingRank
-4. If ALL fail -> return error to client
+2. Same-family T1/T2 models, ordered by CodingRank
+3. Cross-family T1/T2 models, ordered by CodingRank
+4. If ALL fail -> account rotation takes over
 ```
 
 Rationale: light requests can be handled by weaker same-family models, so prefer
@@ -281,11 +286,11 @@ staying in the same family (less style drift) before crossing over.
 **Heavy request** (cross-family OK immediately when same-tier exists):
 ```
 1. M (requested model -- always first)
-2. Same-tier cross-family model (if exists) -- a heavy request that crashed
+2. Same-tier cross-family model (if exists) -- a heavy/1M request that crashed
    a T1 Claude may also crash a weaker same-family model, so try the T1 GPT
    (or vice versa) before going to T2
-3. Remaining models ordered by CodingRank
-4. If ALL fail -> return error to client
+3. Remaining T1/T2 models ordered by CodingRank
+4. If ALL fail -> account rotation takes over
 ```
 
 Rationale: if a T1 model can't handle a heavy request, a T2 same-family model is
@@ -295,31 +300,29 @@ even less likely to handle it. Better to try the other T1 model first.
 
 **Claude Opus 4.6 fails (light request)**:
 ```
-claude-opus-4.6 -> claude-sonnet-4.6 -> claude-opus-4.5 -> claude-sonnet-4.5
-                -> gpt-5.4 -> gpt-5.3-codex -> gpt-5.2
-(same-family first, then cross-family, all the way down)
+claude-opus-4.6 -> claude-sonnet-4.6 -> gpt-5.4 -> gpt-5.3-codex
+(same-family first, then cross-family, T1+T2 only)
 ```
 
-**Claude Opus 4.6 fails (heavy request)**:
+**Claude Opus 4.6 1M fails (heavy request)**:
 ```
 claude-opus-4.6 -> gpt-5.4 -> claude-sonnet-4.6 -> gpt-5.3-codex
-                -> claude-opus-4.5 -> claude-sonnet-4.5 -> gpt-5.2
-(same-tier cross-family first, then remaining by rank, all the way down)
+(same-tier cross-family first — gpt-5.4 also supports 1M)
 ```
 
 **GPT-5.4 fails (light request)**:
 ```
-gpt-5.4 -> gpt-5.3-codex -> gpt-5.2
-        -> claude-opus-4.6 -> claude-sonnet-4.6 -> claude-opus-4.5 -> claude-sonnet-4.5
-(same-family first, then cross-family, all the way down)
+gpt-5.4 -> gpt-5.3-codex -> claude-opus-4.6 -> claude-sonnet-4.6
+(same-family first, then cross-family, T1+T2 only)
 ```
 
-**GPT-5.4 fails (heavy request)**:
+**GPT-5.4 1M fails (heavy request)**:
 ```
 gpt-5.4 -> claude-opus-4.6 -> gpt-5.3-codex -> claude-sonnet-4.6
-        -> gpt-5.2 -> claude-opus-4.5 -> claude-sonnet-4.5
-(same-tier cross-family first, then remaining by rank, all the way down)
+(same-tier cross-family first — claude-opus-4.6 also supports 1M)
 ```
+
+**T3 models (gpt-5.2, opus-4.5, sonnet-4.5)**: no fallback, use existing account rotation.
 
 ### 3.6 Candidate Filtering
 
@@ -428,42 +431,46 @@ Provider models: [claude-opus-4.6, gpt-5.4, claude-sonnet-4.6, gpt-5.3-codex, ..
 3. Return response (identical to fallback-disabled behavior)
 ```
 
-### 5.2 Claude Fails, Cascading Fallback (Heavy Request)
+### 5.2 Claude 1M Fails, Cross-Family Fallback (Heavy Request)
 
 ```
-User requests: claude-opus-4.6 (large payload, classified as heavy)
+User requests: claude-opus-4.6 with 1M context (via Claude CLI)
 Skywork upstream unstable for Claude
 
-1. Chain: claude-opus-4.6 -> gpt-5.4 -> claude-sonnet-4.6 -> gpt-5.3-codex -> ...
-2. Try claude-opus-4.6 -> TIMEOUT (504)
-3. MarkResult(model="claude-opus-4.6", success=false) -> 1 min cooldown
-4. Try gpt-5.4 -> SUCCESS (Claude-specific passthrough skipped for GPT target)
-5. Return response from gpt-5.4
+1. Classified as heavy (1M context detected in betas)
+2. Chain: claude-opus-4.6 -> gpt-5.4 -> claude-sonnet-4.6 -> gpt-5.3-codex
+3. Try claude-opus-4.6 -> TIMEOUT (504)
+4. MarkResult(model="claude-opus-4.6", success=false) -> 1 min cooldown
+5. Log: [skywork-fallback] claude-opus-4.6 failed (HTTP 504), falling back to gpt-5.4
+6. Try gpt-5.4 -> SUCCESS (Claude passthrough skipped, GPT also supports 1M)
+7. Log: [skywork-fallback-success] claude-opus-4.6 failed, recovered via gpt-5.4
+8. Return response from gpt-5.4
 ```
 
-### 5.3 GPT Fails, Cascading All The Way Down (Light Request)
+### 5.3 GPT Fails, Same-Family Then Cross-Family (Light Request)
 
 ```
 User requests: gpt-5.4 (via Codex CLI, small payload)
-Skywork upstream unstable for all GPT models
+Skywork upstream unstable for GPT-5.4
 
-1. Chain: gpt-5.4 -> gpt-5.3-codex -> gpt-5.2 -> claude-opus-4.6 -> claude-sonnet-4.6 -> ...
-2. Try gpt-5.4 -> 500 error -> cooldown
-3. Try gpt-5.3-codex -> 500 error -> cooldown
-4. Try gpt-5.2 -> 500 error -> cooldown
-5. Try claude-opus-4.6 -> SUCCESS (Claude passthrough applied)
-6. Return response from claude-opus-4.6
-   (conversation continues, not interrupted)
+1. Classified as light (small payload, no 1M)
+2. Chain: gpt-5.4 -> gpt-5.3-codex -> claude-opus-4.6 -> claude-sonnet-4.6
+3. Try gpt-5.4 -> 500 error -> cooldown
+4. Try gpt-5.3-codex -> SUCCESS
+5. Return response from gpt-5.3-codex
+   (stayed in same family, conversation continues)
 ```
 
-### 5.4 Everything Fails
+### 5.4 All T1+T2 Fail, Account Rotation Takes Over
 
 ```
 User requests: claude-opus-4.6 (entire Skywork domain down)
 
-1. Chain: claude-opus-4.6 -> gpt-5.4 -> claude-sonnet-4.6 -> ... -> gpt-5.2
-2. Try each model in chain -> ALL FAIL
-3. Return error to client (same as current behavior, no worse)
+1. Chain: claude-opus-4.6 -> gpt-5.4 -> claude-sonnet-4.6 -> gpt-5.3-codex
+2. Try each model in chain -> ALL FAIL (max 4 attempts)
+3. Log: [skywork-fallback-exhausted] all models exhausted for claude-opus-4.6
+4. Outer loop picks next Skywork account and retries
+   (keeps original account rotation behavior)
 ```
 
 ### 5.5 Cooldown Recovery
