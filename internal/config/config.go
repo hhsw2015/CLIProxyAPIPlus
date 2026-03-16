@@ -83,6 +83,11 @@ type Config struct {
 	// Invalid credentials are deleted, and quota-exhausted credentials are moved to auth-dir/limit.
 	ArchiveFailedAuth bool `yaml:"archive-failed-auth" json:"archive-failed-auth"`
 
+	// SkyworkSmartFallback enables automatic model fallback within Skywork providers.
+	// When a model fails (timeout, 5xx, etc.), the proxy tries alternative models in the
+	// same provider to keep the client conversation alive.
+	SkyworkSmartFallback bool `yaml:"skywork-smart-fallback" json:"skywork-smart-fallback"`
+
 	// PoolManager maintains a bounded healthy auth buffer for routing when enabled.
 	PoolManager PoolManagerConfig `yaml:"pool-manager,omitempty" json:"pool-manager,omitempty"`
 
