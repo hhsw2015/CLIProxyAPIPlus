@@ -3,8 +3,10 @@ package auth
 import (
 	"context"
 	"net/http"
+	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
@@ -16,8 +18,10 @@ type openAICompatPoolExecutor struct {
 
 	mu                sync.Mutex
 	executeModels     []string
+	executeAttempts   []string
 	countModels       []string
 	streamModels      []string
+	streamAttempts    []string
 	executeErrors     map[string]error
 	countErrors       map[string]error
 	streamFirstErrors map[string]error
@@ -28,10 +32,12 @@ func (e *openAICompatPoolExecutor) Identifier() string { return e.id }
 
 func (e *openAICompatPoolExecutor) Execute(ctx context.Context, auth *Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
 	_ = ctx
-	_ = auth
 	_ = opts
 	e.mu.Lock()
 	e.executeModels = append(e.executeModels, req.Model)
+	if auth != nil {
+		e.executeAttempts = append(e.executeAttempts, auth.ID+":"+req.Model)
+	}
 	err := e.executeErrors[req.Model]
 	e.mu.Unlock()
 	if err != nil {
@@ -42,10 +48,12 @@ func (e *openAICompatPoolExecutor) Execute(ctx context.Context, auth *Auth, req 
 
 func (e *openAICompatPoolExecutor) ExecuteStream(ctx context.Context, auth *Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
 	_ = ctx
-	_ = auth
 	_ = opts
 	e.mu.Lock()
 	e.streamModels = append(e.streamModels, req.Model)
+	if auth != nil {
+		e.streamAttempts = append(e.streamAttempts, auth.ID+":"+req.Model)
+	}
 	err := e.streamFirstErrors[req.Model]
 	payloadChunks, hasCustomChunks := e.streamPayloads[req.Model]
 	chunks := append([]cliproxyexecutor.StreamChunk(nil), payloadChunks...)
@@ -116,6 +124,22 @@ func (e *openAICompatPoolExecutor) StreamModels() []string {
 	return out
 }
 
+func (e *openAICompatPoolExecutor) ExecuteAttempts() []string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	out := make([]string, len(e.executeAttempts))
+	copy(out, e.executeAttempts)
+	return out
+}
+
+func (e *openAICompatPoolExecutor) StreamAttempts() []string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	out := make([]string, len(e.streamAttempts))
+	copy(out, e.streamAttempts)
+	return out
+}
+
 func newOpenAICompatPoolTestManager(t *testing.T, alias string, models []internalconfig.OpenAICompatibilityModel, executor *openAICompatPoolExecutor) *Manager {
 	t.Helper()
 	cfg := &internalconfig.Config{
@@ -151,6 +175,70 @@ func newOpenAICompatPoolTestManager(t *testing.T, alias string, models []interna
 		reg.UnregisterClient(auth.ID)
 	})
 	return m
+}
+
+func newSkyworkProxyFallbackTestManager(t *testing.T, proxyURL string, executor *openAICompatPoolExecutor) (*Manager, []string) {
+	t.Helper()
+	cfg := &internalconfig.Config{
+		SDKConfig: internalconfig.SDKConfig{
+			ProxyURL: proxyURL,
+		},
+		SkyworkSmartFallback: true,
+		OpenAICompatibility: []internalconfig.OpenAICompatibility{{
+			Name: "skywork",
+			Models: []internalconfig.OpenAICompatibilityModel{
+				{Name: "claude-opus-4.6"},
+				{Name: "gpt-5.4"},
+			},
+		}},
+	}
+	m := NewManager(nil, nil, nil)
+	m.SetConfig(cfg)
+	if executor == nil {
+		executor = &openAICompatPoolExecutor{id: "skywork"}
+	}
+	m.RegisterExecutor(executor)
+
+	authIDs := []string{"skywork-auth-a-" + t.Name(), "skywork-auth-b-" + t.Name()}
+	reg := registry.GetGlobalRegistry()
+	for _, authID := range authIDs {
+		auth := &Auth{
+			ID:       authID,
+			Provider: "skywork",
+			Status:   StatusActive,
+			Attributes: map[string]string{
+				"api_key":      authID + "-key",
+				"compat_name":  "skywork",
+				"provider_key": "skywork",
+			},
+		}
+		if _, err := m.Register(context.Background(), auth); err != nil {
+			t.Fatalf("register auth %s: %v", authID, err)
+		}
+		reg.RegisterClient(authID, "skywork", []*registry.ModelInfo{{ID: "claude-opus-4-6"}})
+	}
+	t.Cleanup(func() {
+		for _, authID := range authIDs {
+			reg.UnregisterClient(authID)
+		}
+	})
+	return m, authIDs
+}
+
+func splitAttempt(t *testing.T, attempt string) (string, string) {
+	t.Helper()
+	authID, model, ok := strings.Cut(attempt, ":")
+	if !ok {
+		t.Fatalf("invalid attempt %q", attempt)
+	}
+	return authID, model
+}
+
+func resetSkyworkCooldownForTest() {
+	skyworkGlobalCooldown.mu.Lock()
+	defer skyworkGlobalCooldown.mu.Unlock()
+	skyworkGlobalCooldown.entries = make(map[string]time.Time)
+	skyworkGlobalCooldown.failureCounts = make(map[string]int)
 }
 
 func TestManagerExecuteCount_OpenAICompatAliasPoolStopsOnInvalidRequest(t *testing.T) {
@@ -483,5 +571,170 @@ func TestManagerExecuteStream_OpenAICompatAliasPoolStopsOnInvalidBootstrap(t *te
 	}
 	if got := executor.StreamModels(); len(got) != 1 || got[0] != "qwen3.5-plus" {
 		t.Fatalf("stream calls = %v, want only first upstream model", got)
+	}
+}
+
+func TestManagerExecute_SkyworkGlobalProxyRetriesSameModelAcrossAccountsBeforeFallback(t *testing.T) {
+	resetSkyworkCooldownForTest()
+	executor := &openAICompatPoolExecutor{
+		id: "skywork",
+		executeErrors: map[string]error{
+			"claude-opus-4.6": &Error{HTTPStatus: http.StatusGatewayTimeout, Message: "timeout"},
+		},
+	}
+	m, authIDs := newSkyworkProxyFallbackTestManager(t, "socks5://127.0.0.1:7891", executor)
+
+	resp, err := m.Execute(context.Background(), []string{"skywork"}, cliproxyexecutor.Request{
+		Model: "claude-opus-4-6",
+	}, cliproxyexecutor.Options{})
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if string(resp.Payload) != "gpt-5.4" {
+		t.Fatalf("payload = %q, want %q", string(resp.Payload), "gpt-5.4")
+	}
+
+	got := executor.ExecuteAttempts()
+	if len(got) != 3 {
+		t.Fatalf("execute attempts = %v, want 3 attempts", got)
+	}
+	firstAuth, firstModel := splitAttempt(t, got[0])
+	secondAuth, secondModel := splitAttempt(t, got[1])
+	thirdAuth, thirdModel := splitAttempt(t, got[2])
+	if firstModel != "claude-opus-4.6" || secondModel != "claude-opus-4.6" {
+		t.Fatalf("first two attempts = %v, want same requested model across accounts first", got[:2])
+	}
+	if thirdModel != "gpt-5.4" {
+		t.Fatalf("third attempt model = %q, want fallback model gpt-5.4", thirdModel)
+	}
+	if firstAuth == secondAuth {
+		t.Fatalf("first two attempts used same auth: %v", got)
+	}
+	if thirdAuth != firstAuth {
+		t.Fatalf("third attempt auth = %q, want retry cycle to restart from first auth %q", thirdAuth, firstAuth)
+	}
+	if (firstAuth != authIDs[0] && firstAuth != authIDs[1]) || (secondAuth != authIDs[0] && secondAuth != authIDs[1]) {
+		t.Fatalf("unexpected auth ids in attempts: %v", got)
+	}
+}
+
+func TestManagerExecute_SkyworkWithoutGlobalProxyFallsBackWithinSameAccountFirst(t *testing.T) {
+	resetSkyworkCooldownForTest()
+	executor := &openAICompatPoolExecutor{
+		id: "skywork",
+		executeErrors: map[string]error{
+			"claude-opus-4.6": &Error{HTTPStatus: http.StatusGatewayTimeout, Message: "timeout"},
+		},
+	}
+	m, _ := newSkyworkProxyFallbackTestManager(t, "", executor)
+
+	resp, err := m.Execute(context.Background(), []string{"skywork"}, cliproxyexecutor.Request{
+		Model: "claude-opus-4-6",
+	}, cliproxyexecutor.Options{})
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if string(resp.Payload) != "gpt-5.4" {
+		t.Fatalf("payload = %q, want %q", string(resp.Payload), "gpt-5.4")
+	}
+
+	got := executor.ExecuteAttempts()
+	if len(got) != 2 {
+		t.Fatalf("execute attempts = %v, want 2 attempts", got)
+	}
+	firstAuth, firstModel := splitAttempt(t, got[0])
+	secondAuth, secondModel := splitAttempt(t, got[1])
+	if firstAuth != secondAuth {
+		t.Fatalf("expected same-auth fallback without global proxy, got %v", got)
+	}
+	if firstModel != "claude-opus-4.6" || secondModel != "gpt-5.4" {
+		t.Fatalf("attempts = %v, want requested model then fallback model on same auth", got)
+	}
+}
+
+func TestManagerExecuteStream_SkyworkGlobalProxyRetriesSameModelAcrossAccountsBeforeFallback(t *testing.T) {
+	resetSkyworkCooldownForTest()
+	executor := &openAICompatPoolExecutor{
+		id: "skywork",
+		streamFirstErrors: map[string]error{
+			"claude-opus-4.6": &Error{HTTPStatus: http.StatusGatewayTimeout, Message: "timeout"},
+		},
+	}
+	m, _ := newSkyworkProxyFallbackTestManager(t, "socks5://127.0.0.1:7891", executor)
+
+	streamResult, err := m.ExecuteStream(context.Background(), []string{"skywork"}, cliproxyexecutor.Request{
+		Model: "claude-opus-4-6",
+	}, cliproxyexecutor.Options{})
+	if err != nil {
+		t.Fatalf("execute stream: %v", err)
+	}
+	var payload []byte
+	for chunk := range streamResult.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("unexpected stream error: %v", chunk.Err)
+		}
+		payload = append(payload, chunk.Payload...)
+	}
+	if string(payload) != "gpt-5.4" {
+		t.Fatalf("payload = %q, want %q", string(payload), "gpt-5.4")
+	}
+
+	got := executor.StreamAttempts()
+	if len(got) != 3 {
+		t.Fatalf("stream attempts = %v, want 3 attempts", got)
+	}
+	firstAuth, firstModel := splitAttempt(t, got[0])
+	secondAuth, secondModel := splitAttempt(t, got[1])
+	thirdAuth, thirdModel := splitAttempt(t, got[2])
+	if firstModel != "claude-opus-4.6" || secondModel != "claude-opus-4.6" {
+		t.Fatalf("first two stream attempts = %v, want same requested model across accounts first", got[:2])
+	}
+	if thirdModel != "gpt-5.4" {
+		t.Fatalf("third stream attempt model = %q, want fallback model gpt-5.4", thirdModel)
+	}
+	if firstAuth == secondAuth {
+		t.Fatalf("first two stream attempts used same auth: %v", got)
+	}
+	if thirdAuth != firstAuth {
+		t.Fatalf("third stream attempt auth = %q, want retry cycle to restart from first auth %q", thirdAuth, firstAuth)
+	}
+	if gotHeader := streamResult.Headers.Get("X-Model"); gotHeader != "gpt-5.4" {
+		t.Fatalf("header X-Model = %q, want %q", gotHeader, "gpt-5.4")
+	}
+}
+
+func TestManagerExecuteStream_SkyworkGlobalProxyPreservesTerminalBootstrapErrorChunk(t *testing.T) {
+	resetSkyworkCooldownForTest()
+	executor := &openAICompatPoolExecutor{
+		id: "skywork",
+		streamFirstErrors: map[string]error{
+			"claude-opus-4.6": &Error{HTTPStatus: http.StatusGatewayTimeout, Message: "timeout"},
+			"gpt-5.4":         &Error{HTTPStatus: http.StatusGatewayTimeout, Message: "timeout"},
+		},
+	}
+	m, _ := newSkyworkProxyFallbackTestManager(t, "socks5://127.0.0.1:7891", executor)
+
+	streamResult, err := m.ExecuteStream(context.Background(), []string{"skywork"}, cliproxyexecutor.Request{
+		Model: "claude-opus-4-6",
+	}, cliproxyexecutor.Options{})
+	if err != nil {
+		t.Fatalf("execute stream error = %v, want wrapped stream error chunk", err)
+	}
+	if streamResult == nil {
+		t.Fatal("expected streamResult with terminal error chunk")
+	}
+
+	var gotErr error
+	for chunk := range streamResult.Chunks {
+		if chunk.Err != nil {
+			gotErr = chunk.Err
+			break
+		}
+	}
+	if gotErr == nil {
+		t.Fatal("expected terminal stream error chunk")
+	}
+	if !strings.Contains(gotErr.Error(), "timeout") {
+		t.Fatalf("terminal stream error = %v, want timeout", gotErr)
 	}
 }

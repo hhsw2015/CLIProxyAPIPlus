@@ -682,6 +682,310 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, ex
 	return &cliproxyexecutor.StreamResult{Headers: headers, Chunks: out}
 }
 
+type mixedExecutionTarget struct {
+	auth     *Auth
+	executor ProviderExecutor
+	provider string
+	execCtx  context.Context
+	models   []string
+	modelSet map[string]struct{}
+	logged   bool
+}
+
+func shouldUseSkyworkCrossAccountFallback(cfg *internalconfig.Config, providers []string, auth *Auth) bool {
+	if cfg == nil || auth == nil {
+		return false
+	}
+	if !cfg.SkyworkSmartFallback || strings.TrimSpace(cfg.ProxyURL) == "" {
+		return false
+	}
+	if len(providers) != 1 {
+		return false
+	}
+	return IsSkyworkFallbackAuth(auth)
+}
+
+func (m *Manager) makeMixedExecutionTarget(ctx context.Context, auth *Auth, executor ProviderExecutor, provider, routeModel string, payload []byte, originalRequest []byte, logged bool) mixedExecutionTarget {
+	execCtx := ctx
+	if rt := m.roundTripperFor(auth); rt != nil {
+		execCtx = context.WithValue(execCtx, roundTripperContextKey{}, rt)
+		execCtx = context.WithValue(execCtx, "cliproxy.roundtripper", rt)
+	}
+	models := m.prepareExecutionModels(auth, routeModel, payload, originalRequest)
+	modelSet := make(map[string]struct{}, len(models))
+	for _, model := range models {
+		modelSet[model] = struct{}{}
+	}
+	return mixedExecutionTarget{
+		auth:     auth,
+		executor: executor,
+		provider: provider,
+		execCtx:  execCtx,
+		models:   models,
+		modelSet: modelSet,
+		logged:   logged,
+	}
+}
+
+func (m *Manager) collectAdditionalMixedExecutionTargets(ctx context.Context, providers []string, routeModel string, opts cliproxyexecutor.Options, maxRetryCredentials int, tried map[string]struct{}, payload []byte, originalRequest []byte, targets []mixedExecutionTarget) []mixedExecutionTarget {
+	for {
+		if maxRetryCredentials > 0 && len(tried) >= maxRetryCredentials {
+			return targets
+		}
+		auth, executor, provider, errPick := m.pickNextMixed(ctx, providers, routeModel, opts, tried)
+		if errPick != nil {
+			return targets
+		}
+		tried[auth.ID] = struct{}{}
+		targets = append(targets, m.makeMixedExecutionTarget(ctx, auth, executor, provider, routeModel, payload, originalRequest, false))
+	}
+}
+
+func skyworkCrossAccountModelOrder(targets []mixedExecutionTarget) []string {
+	seen := make(map[string]struct{})
+	order := make([]string, 0)
+	for _, target := range targets {
+		for _, model := range target.models {
+			if _, ok := seen[model]; ok {
+				continue
+			}
+			seen[model] = struct{}{}
+			order = append(order, model)
+		}
+	}
+	return order
+}
+
+func skyworkTargetSupportsModel(target mixedExecutionTarget, model string) bool {
+	_, ok := target.modelSet[model]
+	return ok
+}
+
+func skyworkModelHasMoreTargets(targets []mixedExecutionTarget, start int, model string) bool {
+	for i := start; i < len(targets); i++ {
+		if skyworkTargetSupportsModel(targets[i], model) {
+			return true
+		}
+	}
+	return false
+}
+
+func skyworkHasRemainingAttempts(targets []mixedExecutionTarget, orderedModels []string, modelIndex, targetIndex int) bool {
+	if modelIndex < 0 || modelIndex >= len(orderedModels) {
+		return false
+	}
+	if skyworkModelHasMoreTargets(targets, targetIndex+1, orderedModels[modelIndex]) {
+		return true
+	}
+	for i := modelIndex + 1; i < len(orderedModels); i++ {
+		if skyworkModelHasMoreTargets(targets, 0, orderedModels[i]) {
+			return true
+		}
+	}
+	return false
+}
+
+func skyworkFallbackDelay(cfg *internalconfig.Config) time.Duration {
+	delay := skyworkThrottleDelay
+	if cfg == nil {
+		return delay
+	}
+	if cfg.SkyworkThrottleDelaySeconds > 0 {
+		return time.Duration(cfg.SkyworkThrottleDelaySeconds) * time.Second
+	}
+	if cfg.SkyworkThrottleDelaySeconds < 0 {
+		return 0
+	}
+	return delay
+}
+
+func ensureTargetSelectionLogged(ctx context.Context, target *mixedExecutionTarget, requestModel string, meta map[string]any) {
+	if target == nil || target.logged {
+		return
+	}
+	entry := logEntryWithRequestID(ctx)
+	debugLogAuthSelection(entry, target.auth, target.provider, requestModel)
+	publishSelectedAuthMetadata(meta, target.auth.ID)
+	target.logged = true
+}
+
+func (m *Manager) executeSkyworkCrossAccountMixed(ctx context.Context, cfg *internalconfig.Config, targets []mixedExecutionTarget, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, routeModel string) (cliproxyexecutor.Response, error) {
+	orderedModels := skyworkCrossAccountModelOrder(targets)
+	var lastErr error
+	for mi, upstreamModel := range orderedModels {
+		for ti := range targets {
+			target := &targets[ti]
+			if !skyworkTargetSupportsModel(*target, upstreamModel) {
+				continue
+			}
+			ensureTargetSelectionLogged(ctx, target, req.Model, opts.Metadata)
+			ThrottleSkyworkRequestWithDelay(skyworkFallbackDelay(cfg))
+
+			execReq := req
+			execReq.Model = upstreamModel
+			resp, errExec := target.executor.Execute(target.execCtx, target.auth, execReq, opts)
+			result := Result{AuthID: target.auth.ID, Provider: target.provider, Model: upstreamModel, Success: errExec == nil}
+			if errExec != nil {
+				if errCtx := target.execCtx.Err(); errCtx != nil {
+					return cliproxyexecutor.Response{}, errCtx
+				}
+				result.Error = &Error{Message: errExec.Error()}
+				if se, ok := errors.AsType[cliproxyexecutor.StatusError](errExec); ok && se != nil {
+					result.Error.HTTPStatus = se.StatusCode()
+				}
+				if ra := retryAfterFromError(errExec); ra != nil {
+					result.RetryAfter = ra
+				}
+				m.MarkResult(target.execCtx, result)
+				if isRequestInvalidError(errExec) {
+					return cliproxyexecutor.Response{}, errExec
+				}
+				MarkSkyworkModelCooldown(upstreamModel)
+				if !skyworkModelHasMoreTargets(targets, ti+1, upstreamModel) {
+					if mi < len(orderedModels)-1 {
+						httpStatus := 0
+						if result.Error != nil {
+							httpStatus = result.Error.HTTPStatus
+						}
+						LogSkyworkFallbackEvent(upstreamModel, orderedModels[mi+1], target.provider, target.auth.ID, httpStatus, errExec.Error())
+					} else {
+						LogSkyworkFallbackExhausted(routeModel, target.provider, target.auth.ID, errExec.Error())
+					}
+				}
+				lastErr = errExec
+				continue
+			}
+			ClearSkyworkModelCooldown(upstreamModel)
+			if mi > 0 {
+				LogSkyworkFallbackSuccess(routeModel, upstreamModel, target.provider, target.auth.ID)
+			}
+			m.MarkResult(target.execCtx, result)
+			return resp, nil
+		}
+	}
+	if lastErr == nil {
+		lastErr = &Error{Code: "auth_not_found", Message: "no upstream model available"}
+	}
+	return cliproxyexecutor.Response{}, lastErr
+}
+
+func (m *Manager) executeSkyworkCrossAccountStream(ctx context.Context, cfg *internalconfig.Config, targets []mixedExecutionTarget, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, routeModel string) (*cliproxyexecutor.StreamResult, error) {
+	orderedModels := skyworkCrossAccountModelOrder(targets)
+	var lastErr error
+	for mi, upstreamModel := range orderedModels {
+		for ti := range targets {
+			target := &targets[ti]
+			if !skyworkTargetSupportsModel(*target, upstreamModel) {
+				continue
+			}
+			ensureTargetSelectionLogged(ctx, target, req.Model, opts.Metadata)
+			ThrottleSkyworkRequestWithDelay(skyworkFallbackDelay(cfg))
+
+			execReq := req
+			execReq.Model = upstreamModel
+			streamResult, errStream := target.executor.ExecuteStream(target.execCtx, target.auth, execReq, opts)
+			if errStream != nil {
+				if errCtx := target.execCtx.Err(); errCtx != nil {
+					return nil, errCtx
+				}
+				rerr := &Error{Message: errStream.Error()}
+				if se, ok := errors.AsType[cliproxyexecutor.StatusError](errStream); ok && se != nil {
+					rerr.HTTPStatus = se.StatusCode()
+				}
+				result := Result{AuthID: target.auth.ID, Provider: target.provider, Model: upstreamModel, Success: false, Error: rerr}
+				result.RetryAfter = retryAfterFromError(errStream)
+				m.MarkResult(target.execCtx, result)
+				if isRequestInvalidError(errStream) {
+					return nil, errStream
+				}
+				MarkSkyworkModelCooldown(upstreamModel)
+				if !skyworkModelHasMoreTargets(targets, ti+1, upstreamModel) {
+					if mi < len(orderedModels)-1 {
+						LogSkyworkFallbackEvent(upstreamModel, orderedModels[mi+1], target.provider, target.auth.ID, rerr.HTTPStatus, errStream.Error())
+					} else {
+						LogSkyworkFallbackExhausted(routeModel, target.provider, target.auth.ID, errStream.Error())
+					}
+				}
+				lastErr = errStream
+				continue
+			}
+
+			buffered, closed, bootstrapErr := readStreamBootstrap(target.execCtx, streamResult.Chunks)
+			if bootstrapErr != nil {
+				if errCtx := target.execCtx.Err(); errCtx != nil {
+					discardStreamChunks(streamResult.Chunks)
+					return nil, errCtx
+				}
+				rerr := &Error{Message: bootstrapErr.Error()}
+				if se, ok := errors.AsType[cliproxyexecutor.StatusError](bootstrapErr); ok && se != nil {
+					rerr.HTTPStatus = se.StatusCode()
+				}
+				result := Result{AuthID: target.auth.ID, Provider: target.provider, Model: upstreamModel, Success: false, Error: rerr}
+				result.RetryAfter = retryAfterFromError(bootstrapErr)
+				m.MarkResult(target.execCtx, result)
+				discardStreamChunks(streamResult.Chunks)
+				if isRequestInvalidError(bootstrapErr) {
+					return nil, bootstrapErr
+				}
+				MarkSkyworkModelCooldown(upstreamModel)
+				if !skyworkModelHasMoreTargets(targets, ti+1, upstreamModel) {
+					if mi < len(orderedModels)-1 {
+						LogSkyworkFallbackEvent(upstreamModel, orderedModels[mi+1], target.provider, target.auth.ID, rerr.HTTPStatus, bootstrapErr.Error())
+					} else {
+						LogSkyworkFallbackExhausted(routeModel, target.provider, target.auth.ID, bootstrapErr.Error())
+					}
+				}
+				if !skyworkHasRemainingAttempts(targets, orderedModels, mi, ti) {
+					errCh := make(chan cliproxyexecutor.StreamChunk, 1)
+					errCh <- cliproxyexecutor.StreamChunk{Err: bootstrapErr}
+					close(errCh)
+					return m.wrapStreamResult(target.execCtx, target.auth.Clone(), target.provider, upstreamModel, streamResult.Headers, nil, errCh), nil
+				}
+				lastErr = bootstrapErr
+				continue
+			}
+
+			if closed && len(buffered) == 0 {
+				emptyErr := &Error{Code: "empty_stream", Message: "upstream stream closed before first payload", Retryable: true}
+				result := Result{AuthID: target.auth.ID, Provider: target.provider, Model: upstreamModel, Success: false, Error: emptyErr}
+				m.MarkResult(target.execCtx, result)
+				MarkSkyworkModelCooldown(upstreamModel)
+				if !skyworkModelHasMoreTargets(targets, ti+1, upstreamModel) {
+					if mi < len(orderedModels)-1 {
+						LogSkyworkFallbackEvent(upstreamModel, orderedModels[mi+1], target.provider, target.auth.ID, 0, emptyErr.Error())
+					} else {
+						LogSkyworkFallbackExhausted(routeModel, target.provider, target.auth.ID, emptyErr.Error())
+					}
+				}
+				if !skyworkHasRemainingAttempts(targets, orderedModels, mi, ti) {
+					errCh := make(chan cliproxyexecutor.StreamChunk, 1)
+					errCh <- cliproxyexecutor.StreamChunk{Err: emptyErr}
+					close(errCh)
+					return m.wrapStreamResult(target.execCtx, target.auth.Clone(), target.provider, upstreamModel, streamResult.Headers, nil, errCh), nil
+				}
+				lastErr = emptyErr
+				continue
+			}
+
+			remaining := streamResult.Chunks
+			if closed {
+				closedCh := make(chan cliproxyexecutor.StreamChunk)
+				close(closedCh)
+				remaining = closedCh
+			}
+			ClearSkyworkModelCooldown(upstreamModel)
+			if mi > 0 {
+				LogSkyworkFallbackSuccess(routeModel, upstreamModel, target.provider, target.auth.ID)
+			}
+			return m.wrapStreamResult(target.execCtx, target.auth.Clone(), target.provider, upstreamModel, streamResult.Headers, buffered, remaining), nil
+		}
+	}
+	if lastErr == nil {
+		lastErr = &Error{Code: "auth_not_found", Message: "no upstream model available"}
+	}
+	return nil, lastErr
+}
+
 func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor ProviderExecutor, auth *Auth, provider string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, routeModel string) (*cliproxyexecutor.StreamResult, error) {
 	if executor == nil {
 		return nil, &Error{Code: "executor_not_found", Message: "executor not registered"}
@@ -1152,6 +1456,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 	}
 	routeModel := req.Model
 	opts = ensureRequestedModelMetadata(opts, routeModel)
+	cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
 	tried := make(map[string]struct{})
 	var lastErr error
 	for {
@@ -1174,17 +1479,16 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 		publishSelectedAuthMetadata(opts.Metadata, auth.ID)
 
 		tried[auth.ID] = struct{}{}
-		execCtx := ctx
-		if rt := m.roundTripperFor(auth); rt != nil {
-			execCtx = context.WithValue(execCtx, roundTripperContextKey{}, rt)
-			execCtx = context.WithValue(execCtx, "cliproxy.roundtripper", rt)
+		firstTarget := m.makeMixedExecutionTarget(ctx, auth, executor, provider, routeModel, req.Payload, opts.OriginalRequest, true)
+		if shouldUseSkyworkCrossAccountFallback(cfg, providers, auth) {
+			targets := m.collectAdditionalMixedExecutionTargets(ctx, providers, routeModel, opts, maxRetryCredentials, tried, req.Payload, opts.OriginalRequest, []mixedExecutionTarget{firstTarget})
+			return m.executeSkyworkCrossAccountMixed(ctx, cfg, targets, req, opts, routeModel)
 		}
 
-		models := m.prepareExecutionModels(auth, routeModel, req.Payload, opts.OriginalRequest)
+		models := firstTarget.models
 		var authErr error
 		for mi, upstreamModel := range models {
 			if IsSkyworkFallbackAuth(auth) {
-				cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
 				delay := skyworkThrottleDelay
 				if cfg != nil && cfg.SkyworkThrottleDelaySeconds > 0 {
 					delay = time.Duration(cfg.SkyworkThrottleDelaySeconds) * time.Second
@@ -1195,10 +1499,10 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			}
 			execReq := req
 			execReq.Model = upstreamModel
-			resp, errExec := executor.Execute(execCtx, auth, execReq, opts)
+			resp, errExec := executor.Execute(firstTarget.execCtx, auth, execReq, opts)
 			result := Result{AuthID: auth.ID, Provider: provider, Model: upstreamModel, Success: errExec == nil}
 			if errExec != nil {
-				if errCtx := execCtx.Err(); errCtx != nil {
+				if errCtx := firstTarget.execCtx.Err(); errCtx != nil {
 					return cliproxyexecutor.Response{}, errCtx
 				}
 				result.Error = &Error{Message: errExec.Error()}
@@ -1208,7 +1512,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 				if ra := retryAfterFromError(errExec); ra != nil {
 					result.RetryAfter = ra
 				}
-				m.MarkResult(execCtx, result)
+				m.MarkResult(firstTarget.execCtx, result)
 				if isRequestInvalidError(errExec) {
 					return cliproxyexecutor.Response{}, errExec
 				}
@@ -1233,7 +1537,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			if len(models) > 1 && mi > 0 && IsSkyworkFallbackAuth(auth) {
 				LogSkyworkFallbackSuccess(routeModel, upstreamModel, provider, auth.ID)
 			}
-			m.MarkResult(execCtx, result)
+			m.MarkResult(firstTarget.execCtx, result)
 			return resp, nil
 		}
 		if authErr != nil {
@@ -1324,6 +1628,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 	}
 	routeModel := req.Model
 	opts = ensureRequestedModelMetadata(opts, routeModel)
+	cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
 	tried := make(map[string]struct{})
 	var lastErr error
 	for {
@@ -1346,6 +1651,11 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 		publishSelectedAuthMetadata(opts.Metadata, auth.ID)
 
 		tried[auth.ID] = struct{}{}
+		if shouldUseSkyworkCrossAccountFallback(cfg, providers, auth) {
+			firstTarget := m.makeMixedExecutionTarget(ctx, auth, executor, provider, routeModel, req.Payload, opts.OriginalRequest, true)
+			targets := m.collectAdditionalMixedExecutionTargets(ctx, providers, routeModel, opts, maxRetryCredentials, tried, req.Payload, opts.OriginalRequest, []mixedExecutionTarget{firstTarget})
+			return m.executeSkyworkCrossAccountStream(ctx, cfg, targets, req, opts, routeModel)
+		}
 		execCtx := ctx
 		if rt := m.roundTripperFor(auth); rt != nil {
 			execCtx = context.WithValue(execCtx, roundTripperContextKey{}, rt)
