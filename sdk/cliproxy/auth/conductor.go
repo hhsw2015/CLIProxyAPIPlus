@@ -690,7 +690,14 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 	var lastErr error
 	for idx, execModel := range execModels {
 		if IsSkyworkFallbackAuth(auth) {
-			ThrottleSkyworkRequest()
+			cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
+			delay := skyworkThrottleDelay
+			if cfg != nil && cfg.SkyworkThrottleDelaySeconds > 0 {
+				delay = time.Duration(cfg.SkyworkThrottleDelaySeconds) * time.Second
+			} else if cfg != nil && cfg.SkyworkThrottleDelaySeconds < 0 {
+				delay = 0
+			}
+			ThrottleSkyworkRequestWithDelay(delay)
 		}
 		execReq := req
 		execReq.Model = execModel
@@ -1177,7 +1184,14 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 		var authErr error
 		for mi, upstreamModel := range models {
 			if IsSkyworkFallbackAuth(auth) {
-				ThrottleSkyworkRequest()
+				cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
+				delay := skyworkThrottleDelay
+				if cfg != nil && cfg.SkyworkThrottleDelaySeconds > 0 {
+					delay = time.Duration(cfg.SkyworkThrottleDelaySeconds) * time.Second
+				} else if cfg != nil && cfg.SkyworkThrottleDelaySeconds < 0 {
+					delay = 0
+				}
+				ThrottleSkyworkRequestWithDelay(delay)
 			}
 			execReq := req
 			execReq.Model = upstreamModel
