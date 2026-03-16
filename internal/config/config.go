@@ -88,6 +88,11 @@ type Config struct {
 	// same provider to keep the client conversation alive.
 	SkyworkSmartFallback bool `yaml:"skywork-smart-fallback" json:"skywork-smart-fallback"`
 
+	// SkyworkThrottleDelaySeconds controls the minimum interval (in seconds) enforced
+	// between dense sequential Skywork requests once the throttle threshold is exceeded.
+	// Default: 2 seconds. Set to 0 to disable the delay.
+	SkyworkThrottleDelaySeconds int `yaml:"skywork-throttle-delay-seconds" json:"skywork-throttle-delay-seconds"`
+
 	// PoolManager maintains a bounded healthy auth buffer for routing when enabled.
 	PoolManager PoolManagerConfig `yaml:"pool-manager,omitempty" json:"pool-manager,omitempty"`
 

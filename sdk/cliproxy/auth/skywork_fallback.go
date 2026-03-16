@@ -109,33 +109,32 @@ const (
 	skyworkThrottleDelay = 2 * time.Second
 )
 
-// ThrottleSkyworkRequest applies rate limiting for Skywork requests.
-// Returns immediately for normal conversations. Only adds a small delay
-// when dense sequential requests are detected (sub-agent tool call storms).
-func ThrottleSkyworkRequest() {
+// ThrottleSkyworkRequestWithDelay applies rate limiting for Skywork requests with a
+// caller-provided delay. If delay <= 0, throttling is disabled. Returns immediately
+// for normal conversations. Only adds a delay when dense sequential requests are detected.
+func ThrottleSkyworkRequestWithDelay(delay time.Duration) {
+	if delay <= 0 {
+		return
+	}
 	skyworkThrottle.mu.Lock()
 	defer skyworkThrottle.mu.Unlock()
 
 	now := time.Now()
 
-	// Reset window if expired.
 	if now.Sub(skyworkThrottle.windowStart) > skyworkThrottleWindow {
 		skyworkThrottle.recentCount = 0
 		skyworkThrottle.windowStart = now
 	}
 
 	skyworkThrottle.recentCount++
-
-	// If we're under the threshold, no throttle needed.
 	if skyworkThrottle.recentCount <= skyworkThrottleThreshold {
 		skyworkThrottle.lastRequest = now
 		return
 	}
 
-	// Dense request pattern detected. Enforce minimum delay.
 	elapsed := now.Sub(skyworkThrottle.lastRequest)
-	if elapsed < skyworkThrottleDelay {
-		wait := skyworkThrottleDelay - elapsed
+	if elapsed < delay {
+		wait := delay - elapsed
 		skyworkThrottle.mu.Unlock()
 		time.Sleep(wait)
 		skyworkThrottle.mu.Lock()
@@ -143,7 +142,6 @@ func ThrottleSkyworkRequest() {
 	skyworkThrottle.lastRequest = time.Now()
 }
 
-// skyworkModelCapability describes a model's capability for Skywork smart fallback.
 type skyworkModelCapability struct {
 	Name       string
 	Family     string // "claude" or "gpt"
