@@ -11,6 +11,10 @@ type ProxyConfig struct {
 	HTTPPort      int             `yaml:"http_port"`
 	IncludeDirect bool            `yaml:"include_direct"`
 	ExtraBackends []ExtraBackend  `yaml:"extra_backends"`
+	// Routing weights: higher = more traffic. Default: ech=3, warp=2, direct=1
+	WeightECH    int `yaml:"weight_ech"`
+	WeightWarp   int `yaml:"weight_warp"`
+	WeightDirect int `yaml:"weight_direct"`
 }
 
 // ExtraBackend is an external SOCKS5/HTTP proxy to include in the rotation pool.

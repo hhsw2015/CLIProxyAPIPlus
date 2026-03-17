@@ -15,13 +15,25 @@ import (
 	"warp-pool/pool"
 )
 
+// ProxyStatsProvider provides route statistics from the proxy server.
+type ProxyStatsProvider interface {
+	Stats() []struct {
+		Name    string `json:"name"`
+		Kind    string `json:"kind"`
+		Total   int64  `json:"total_requests"`
+		Active  int64  `json:"active_connections"`
+		Healthy bool   `json:"healthy"`
+	}
+}
+
 // Server provides HTTP API for pool management
 type Server struct {
-	cfg     *config.Config
-	pool    *pool.Pool
-	checker *health.Checker
-	licMgr  *license.Manager
-	server  *http.Server
+	cfg        *config.Config
+	pool       *pool.Pool
+	checker    *health.Checker
+	licMgr     *license.Manager
+	server     *http.Server
+	proxyStats func() interface{} // optional: returns proxy route stats
 }
 
 // New creates a new API server
@@ -32,6 +44,11 @@ func New(cfg *config.Config, p *pool.Pool, checker *health.Checker, licMgr *lice
 		checker: checker,
 		licMgr:  licMgr,
 	}
+}
+
+// SetProxyStats sets the function to retrieve proxy route stats.
+func (s *Server) SetProxyStats(fn func() interface{}) {
+	s.proxyStats = fn
 }
 
 // Start starts the API server
@@ -122,7 +139,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	}
 
 	stats := s.pool.Stats()
-	s.jsonResponse(w, map[string]interface{}{
+	result := map[string]interface{}{
 		"status":         "ok",
 		"pool_size":      stats.Total,
 		"running":        stats.Running,
@@ -132,7 +149,11 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"total_requests": stats.TotalRequests,
 		"socks_port":     s.cfg.Proxy.SocksPort,
 		"http_port":      s.cfg.Proxy.HTTPPort,
-	})
+	}
+	if s.proxyStats != nil {
+		result["routes"] = s.proxyStats()
+	}
+	s.jsonResponse(w, result)
 }
 
 // handleProcesses returns all process info

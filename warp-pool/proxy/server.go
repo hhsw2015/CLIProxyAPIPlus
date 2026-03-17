@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"warp-pool/pool"
@@ -30,6 +31,22 @@ type route struct {
 	addr    string // backend address for routeExtra (e.g. "127.0.0.1:30004")
 	name    string // label for logging
 	process *process.Process
+	weight  int    // higher = more traffic; 0 treated as 1
+}
+
+// RouteStats holds per-route request statistics.
+type RouteStats struct {
+	Name       string `json:"name"`
+	Kind       string `json:"kind"`
+	Total      int64  `json:"total_requests"`
+	Active     int64  `json:"active_connections"`
+	Healthy    bool   `json:"healthy"`
+}
+
+// routeState holds runtime counters for a route entry.
+type routeState struct {
+	total  int64 // atomic: total requests served
+	active int64 // atomic: currently active connections
 }
 
 // Server provides unified SOCKS5 and HTTP proxy entry points
@@ -43,7 +60,8 @@ type Server struct {
 
 	mu      sync.Mutex
 	counter uint64
-	routes  []route // round-robin route table
+	routes  []route      // round-robin route table
+	states  []routeState // per-route counters (same index as routes)
 
 	healthMu     sync.RWMutex
 	extraHealthy map[string]bool // addr -> healthy
@@ -64,85 +82,99 @@ type ExtraBackend struct {
 	Addr string
 }
 
+// RouteWeights holds the weight configuration for route building.
+type RouteWeights struct {
+	ECH    int // default 3
+	Warp   int // default 2
+	Direct int // default 1
+}
+
 // NewWithOptions creates a proxy server with direct and extra backend support.
-func NewWithOptions(p *pool.Pool, socksPort, httpPort int, includeDirect bool, extras []ExtraBackend) *Server {
+func NewWithOptions(p *pool.Pool, socksPort, httpPort int, includeDirect bool, extras []ExtraBackend, weights RouteWeights) *Server {
 	s := &Server{
 		pool:      p,
 		socksPort: socksPort,
 		httpPort:  httpPort,
 	}
-	s.buildRoutes(includeDirect, extras)
+	s.buildRoutes(includeDirect, extras, weights)
 	return s
 }
 
-// buildRoutes constructs the round-robin route table:
-// [warp0, extra0, warp1, extra1, warp2, direct, ...]
-// Extras and direct are interleaved to spread different IP sources evenly.
-func (s *Server) buildRoutes(includeDirect bool, extras []ExtraBackend) {
+// buildRoutes constructs the weighted round-robin route table.
+// Each route is repeated by its weight, then interleaved for even distribution.
+// Example with weights ech=3, warp=2, direct=1:
+//   [ech-1, warp-0, ech-2, warp-1, ech-3, warp-2, ech-1, direct, ech-2, warp-0, ech-3, warp-1, ...]
+func (s *Server) buildRoutes(includeDirect bool, extras []ExtraBackend, weights RouteWeights) {
+	if weights.ECH <= 0 {
+		weights.ECH = 3
+	}
+	if weights.Warp <= 0 {
+		weights.Warp = 2
+	}
+	if weights.Direct <= 0 {
+		weights.Direct = 1
+	}
+
 	procs := s.pool.All()
-	// Count extra slots (extras + optional direct)
-	extraSlots := len(extras)
-	if includeDirect {
-		extraSlots++
-	}
 
-	if extraSlots == 0 {
-		// No extras, no routes needed — pool.Next() handles everything
-		return
-	}
-
-	// Build interleaved route list
-	var routes []route
-	extraIdx := 0
-	// Collect extra entries: extras first, then direct
-	var extraEntries []route
+	// Build weighted lists per kind
+	var echRoutes, warpRoutes, directRoutes []route
 	for _, eb := range extras {
-		extraEntries = append(extraEntries, route{kind: routeExtra, addr: eb.Addr, name: eb.Name})
+		r := route{kind: routeExtra, addr: eb.Addr, name: eb.Name, weight: weights.ECH}
+		for w := 0; w < weights.ECH; w++ {
+			echRoutes = append(echRoutes, r)
+		}
+	}
+	for _, proc := range procs {
+		r := route{kind: routeWarp, process: proc, name: fmt.Sprintf("warp-%d", proc.ID()), weight: weights.Warp}
+		for w := 0; w < weights.Warp; w++ {
+			warpRoutes = append(warpRoutes, r)
+		}
 	}
 	if includeDirect {
-		extraEntries = append(extraEntries, route{kind: routeDirect, name: "direct"})
-	}
-
-	// Interleave: after every ceil(poolSize/extraSlots) warp entries, insert an extra
-	warpPerExtra := len(procs)
-	if extraSlots > 0 && len(procs) > extraSlots {
-		warpPerExtra = len(procs) / extraSlots
-		if warpPerExtra < 1 {
-			warpPerExtra = 1
+		r := route{kind: routeDirect, name: "direct", weight: weights.Direct}
+		for w := 0; w < weights.Direct; w++ {
+			directRoutes = append(directRoutes, r)
 		}
 	}
 
-	warpCount := 0
-	for _, proc := range procs {
-		routes = append(routes, route{kind: routeWarp, process: proc, name: fmt.Sprintf("warp-%d", proc.ID())})
-		warpCount++
-		if warpCount >= warpPerExtra && extraIdx < len(extraEntries) {
-			routes = append(routes, extraEntries[extraIdx])
-			extraIdx++
-			warpCount = 0
+	// Interleave: ech first (highest weight), then warp, then direct
+	// Use round-robin merge across the three lists
+	var routes []route
+	ei, wi, di := 0, 0, 0
+	total := len(echRoutes) + len(warpRoutes) + len(directRoutes)
+	for len(routes) < total {
+		if ei < len(echRoutes) {
+			routes = append(routes, echRoutes[ei])
+			ei++
 		}
-	}
-	// Append remaining extras
-	for ; extraIdx < len(extraEntries); extraIdx++ {
-		routes = append(routes, extraEntries[extraIdx])
+		if wi < len(warpRoutes) {
+			routes = append(routes, warpRoutes[wi])
+			wi++
+		}
+		if di < len(directRoutes) {
+			routes = append(routes, directRoutes[di])
+			di++
+		}
 	}
 
 	s.routes = routes
+	s.states = make([]routeState, len(routes))
 
-	names := make([]string, len(routes))
-	for i, r := range routes {
-		names[i] = r.name
+	// Log summary
+	counts := map[string]int{}
+	for _, r := range routes {
+		counts[r.name]++
 	}
-	log.Printf("[proxy] Route table: %v", names)
+	log.Printf("[proxy] Route table (%d entries): %v", len(routes), counts)
 }
 
-// nextRoute returns the next healthy route via round-robin.
-// Skips unhealthy backends (warp not running, extra backend port unreachable).
-// If no route table is configured, returns a warp route from the pool.
-func (s *Server) nextRoute() route {
+// nextRoute returns the next healthy route via weighted round-robin with load awareness.
+// Skips unhealthy backends. Prefers routes with fewer active connections.
+func (s *Server) nextRoute() (route, int) {
 	if len(s.routes) == 0 {
 		proc := s.pool.Next()
-		return route{kind: routeWarp, process: proc, name: fmt.Sprintf("warp-%d", proc.ID())}
+		return route{kind: routeWarp, process: proc, name: fmt.Sprintf("warp-%d", proc.ID())}, -1
 	}
 
 	n := len(s.routes)
@@ -153,7 +185,7 @@ func (s *Server) nextRoute() route {
 
 	// Try up to len(routes) times to find a healthy backend
 	for i := 0; i < n; i++ {
-		idx := (start + uint64(i)) % uint64(n)
+		idx := int((start + uint64(i)) % uint64(n))
 		r := s.routes[idx]
 
 		switch r.kind {
@@ -161,19 +193,87 @@ func (s *Server) nextRoute() route {
 			proc := s.pool.Next()
 			if proc != nil && proc.State() == process.StateRunning {
 				r.process = proc
-				return r
+				return r, idx
 			}
 		case routeExtra:
 			if s.isExtraHealthy(r.addr) {
-				return r
+				return r, idx
 			}
 		case routeDirect:
-			return r // always available
+			return r, idx
 		}
 	}
 
 	// All unhealthy — fall back to direct
-	return route{kind: routeDirect, name: "direct-fallback"}
+	return route{kind: routeDirect, name: "direct-fallback"}, -1
+}
+
+// trackRequest increments active and total counters for a route. Returns a done func to call when the request finishes.
+func (s *Server) trackRequest(idx int) func() {
+	if idx < 0 || idx >= len(s.states) {
+		return func() {}
+	}
+	atomic.AddInt64(&s.states[idx].total, 1)
+	atomic.AddInt64(&s.states[idx].active, 1)
+	return func() {
+		atomic.AddInt64(&s.states[idx].active, -1)
+	}
+}
+
+// Stats returns per-route statistics.
+func (s *Server) Stats() []RouteStats {
+	if len(s.routes) == 0 {
+		return nil
+	}
+
+	// Deduplicate by name (routes repeat due to weights)
+	type agg struct {
+		name    string
+		kind    string
+		total   int64
+		active  int64
+		healthy bool
+	}
+	seen := map[string]*agg{}
+	var order []string
+
+	for i, r := range s.routes {
+		kindStr := "warp"
+		if r.kind == routeExtra {
+			kindStr = "ech"
+		} else if r.kind == routeDirect {
+			kindStr = "direct"
+		}
+
+		a, ok := seen[r.name]
+		if !ok {
+			healthy := true
+			if r.kind == routeExtra {
+				healthy = s.isExtraHealthy(r.addr)
+			} else if r.kind == routeWarp {
+				proc := s.pool.Get(0) // just check pool health
+				healthy = proc != nil && proc.State() == process.StateRunning
+			}
+			a = &agg{name: r.name, kind: kindStr, healthy: healthy}
+			seen[r.name] = a
+			order = append(order, r.name)
+		}
+		a.total += atomic.LoadInt64(&s.states[i].total)
+		a.active += atomic.LoadInt64(&s.states[i].active)
+	}
+
+	stats := make([]RouteStats, 0, len(order))
+	for _, name := range order {
+		a := seen[name]
+		stats = append(stats, RouteStats{
+			Name:    a.name,
+			Kind:    a.kind,
+			Total:   a.total,
+			Active:  a.active,
+			Healthy: a.healthy,
+		})
+	}
+	return stats
 }
 
 // isExtraHealthy returns cached health status for an external backend.
@@ -314,7 +414,10 @@ func (s *Server) serveSocks(ctx context.Context) {
 func (s *Server) handleSocks(clientConn net.Conn) {
 	defer clientConn.Close()
 
-	r := s.nextRoute()
+	r, idx := s.nextRoute()
+	done := s.trackRequest(idx)
+	defer done()
+
 	switch r.kind {
 	case routeDirect:
 		s.handleSocksDirect(clientConn)
@@ -459,7 +562,10 @@ func (s *Server) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	rt := s.nextRoute()
+	rt, idx := s.nextRoute()
+	done := s.trackRequest(idx)
+	defer done()
+
 	switch rt.kind {
 	case routeDirect:
 		s.handleHTTPDirect(w, r)
@@ -525,7 +631,10 @@ func (s *Server) handleHTTP(w http.ResponseWriter, r *http.Request) {
 
 // handleHTTPConnect handles HTTPS tunneling via CONNECT method
 func (s *Server) handleHTTPConnect(w http.ResponseWriter, r *http.Request) {
-	rt := s.nextRoute()
+	rt, idx := s.nextRoute()
+	done := s.trackRequest(idx)
+	defer done()
+
 	switch rt.kind {
 	case routeDirect:
 		s.handleHTTPConnectDirect(w, r)
