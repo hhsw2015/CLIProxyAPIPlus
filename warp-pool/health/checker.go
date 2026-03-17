@@ -147,6 +147,20 @@ func (c *Checker) checkOne(proc *process.Process) {
 	proc.SetIP(ip)
 	proc.SetState(process.StateRunning)
 
+	// Check memory usage - restart if RSS exceeds configured limit
+	limitMB := proc.MemoryLimitMB()
+	if limitMB > 0 {
+		rssBytes := proc.RSSBytes()
+		rssMB := rssBytes / (1024 * 1024)
+		if rssMB > int64(limitMB) {
+			log.Printf("[health] Process %d memory %dMB exceeds limit %dMB, restarting", proc.ID(), rssMB, limitMB)
+			if restartErr := proc.Restart(c.ctx); restartErr != nil {
+				log.Printf("[health] Process %d memory-limit restart failed: %v", proc.ID(), restartErr)
+			}
+			return
+		}
+	}
+
 	log.Printf("[health] Process %d: IP=%s", proc.ID(), ip)
 }
 

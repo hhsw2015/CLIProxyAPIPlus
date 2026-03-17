@@ -17,6 +17,25 @@ http_base_port: 11001
 proxy:
   socks_port: 1080
   http_port: 8118
+  include_direct: true  # Include VPS direct IP in round-robin
+
+# ECH Workers - Cloudflare Workers proxy with rotating IPs
+# Each worker runs on a different Cloudflare account/domain = different exit IP
+# warp-pool manages their lifecycle automatically
+ech_workers:
+  enabled: true
+  bin_path: "./ech-workers"
+  workers:
+    - name: ech-1
+      domain: "ech.playingapi.tech:443"
+      ip: "104.17.0.134"
+      token: "7bd57098-82bd-4dfa-b32c-9943a52d354f"
+      port: 30001
+    # Add more workers on different Cloudflare accounts for more IPs:
+    # - name: ech-2
+    #   domain: "ech2.example.com:443"
+    #   token: "another-token"
+    #   port: 30002
 
 # Management API
 api:
@@ -34,7 +53,7 @@ license_key_url: "http://warp-tool.vercel.app/api/full"
 # by restarting instances until all have different IPs
 unique_ipv4:
   enabled: true
-  max_retries: 15
+  max_retries: 30
   retry_delay: 5
 
 # Auto rotation settings - disabled for stable pool

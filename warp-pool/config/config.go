@@ -7,8 +7,32 @@ import (
 )
 
 type ProxyConfig struct {
-	SocksPort int `yaml:"socks_port"`
-	HTTPPort  int `yaml:"http_port"`
+	SocksPort     int             `yaml:"socks_port"`
+	HTTPPort      int             `yaml:"http_port"`
+	IncludeDirect bool            `yaml:"include_direct"`
+	ExtraBackends []ExtraBackend  `yaml:"extra_backends"`
+}
+
+// ExtraBackend is an external SOCKS5/HTTP proxy to include in the rotation pool.
+type ExtraBackend struct {
+	Name string `yaml:"name"`
+	Addr string `yaml:"addr"` // e.g. "127.0.0.1:30004"
+}
+
+// ECHWorkerConfig defines an ech-workers instance to be managed by warp-pool.
+type ECHWorkerConfig struct {
+	Name   string `yaml:"name"`             // display name
+	Domain string `yaml:"domain"`           // e.g. "ech.playingapi.tech:443"
+	IP     string `yaml:"ip,omitempty"`     // optional: pin server IP
+	Token  string `yaml:"token"`            // auth token
+	Port   int    `yaml:"port"`             // local listen port (SOCKS5)
+}
+
+// ECHWorkersConfig holds all ech-workers instances.
+type ECHWorkersConfig struct {
+	Enabled  bool              `yaml:"enabled"`
+	BinPath  string            `yaml:"bin_path"`  // path to ech-workers binary
+	Workers  []ECHWorkerConfig `yaml:"workers"`
 }
 
 type APIConfig struct {
@@ -57,6 +81,7 @@ type Config struct {
 	Direct              DirectConfig         `yaml:"direct"`
 	UniqueIPv4          UniqueIPv4Config     `yaml:"unique_ipv4"`
 	ResourceLimits      ResourceLimitsConfig `yaml:"resource_limits"`
+	ECHWorkers          ECHWorkersConfig     `yaml:"ech_workers"`
 }
 
 func Load(path string) (*Config, error) {
