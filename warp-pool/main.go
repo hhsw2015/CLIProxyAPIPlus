@@ -79,11 +79,21 @@ func main() {
 		}
 		// Append ech-workers managed backends
 		extras = append(extras, echBackends...)
-		proxyServer = proxy.NewWithOptions(p, cfg.Proxy.SocksPort, cfg.Proxy.HTTPPort, cfg.Proxy.IncludeDirect, extras)
+		weights := proxy.RouteWeights{
+			ECH:    cfg.Proxy.WeightECH,
+			Warp:   cfg.Proxy.WeightWarp,
+			Direct: cfg.Proxy.WeightDirect,
+		}
+		proxyServer = proxy.NewWithOptions(p, cfg.Proxy.SocksPort, cfg.Proxy.HTTPPort, cfg.Proxy.IncludeDirect, extras, weights)
 	}
 
 	// Initialize API server
 	apiServer := api.New(cfg, p, checker, licMgr)
+	if proxyServer != nil {
+		apiServer.SetProxyStats(func() interface{} {
+			return proxyServer.Stats()
+		})
+	}
 
 	// Start pool
 	if err := p.Start(ctx); err != nil {

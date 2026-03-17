@@ -17,7 +17,11 @@ http_base_port: 11001
 proxy:
   socks_port: 1080
   http_port: 8118
-  include_direct: true  # Include VPS direct IP in round-robin
+  include_direct: true
+  # Routing weights: higher = more traffic routed to this type
+  weight_ech: 3     # ECH Workers (dynamic IP, highest priority)
+  weight_warp: 2    # WARP instances (fixed IP)
+  weight_direct: 1  # VPS direct IP (lowest priority)  # Include VPS direct IP in round-robin
 
 # ECH Workers - Cloudflare Workers proxy with rotating IPs
 # Each worker runs on a different Cloudflare account/domain = different exit IP
