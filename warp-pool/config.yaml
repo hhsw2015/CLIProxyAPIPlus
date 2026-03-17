@@ -31,15 +31,20 @@ ech_workers:
   bin_path: "./ech-workers"
   workers:
     - name: ech-1
-      domain: "ech.playingapi.tech:443"
+      domain: "ech-workers.pikapk-f47.workers.dev:443"
       ip: "104.17.0.134"
       token: "7bd57098-82bd-4dfa-b32c-9943a52d354f"
       port: 30001
-    # Add more workers on different Cloudflare accounts for more IPs:
-    # - name: ech-2
-    #   domain: "ech2.example.com:443"
-    #   token: "another-token"
-    #   port: 30002
+    - name: ech-2
+      domain: "ech-workers.pikapk-f47.workers.dev:443"
+      ip: "104.17.0.134"
+      token: "7bd57098-82bd-4dfa-b32c-9943a52d354f"
+      port: 30002
+    - name: ech-3
+      domain: "ech-workers.pikapk-f47.workers.dev:443"
+      ip: "104.17.0.134"
+      token: "7bd57098-82bd-4dfa-b32c-9943a52d354f"
+      port: 30003
 
 # Management API
 api:
