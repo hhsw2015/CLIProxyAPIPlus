@@ -1,0 +1,50 @@
+# WARP Proxy Pool Configuration
+
+# Number of WARP instances to run (each will have unique IPv4)
+pool_size: 3
+
+# WARP binary path
+warp_bin: "./warp"
+
+# Base directory for WARP data
+data_dir: "./data"
+
+# Port ranges for internal WARP instances
+socks_base_port: 10001
+http_base_port: 11001
+
+# External proxy ports (the unified entry point)
+proxy:
+  socks_port: 1080
+  http_port: 8118
+
+# Management API
+api:
+  port: 9090
+  token: ""
+
+# Health check interval in seconds
+health_check_interval: 30
+
+# License key list URL (for WARP+ upgrade)
+license_key_url: "http://warp-tool.vercel.app/api/full"
+
+# Unique IPv4 mode
+# When enabled, startup will ensure each instance has a unique IPv4
+# by restarting instances until all have different IPs
+unique_ipv4:
+  enabled: true
+  max_retries: 15
+  retry_delay: 5
+
+# Auto rotation settings - disabled for stable pool
+rotation:
+  enabled: false
+  requests_threshold: 0
+  min_interval: 60
+  only_used: true
+
+# Direct connection mode
+direct:
+  enabled: true
+  expose_external: true
