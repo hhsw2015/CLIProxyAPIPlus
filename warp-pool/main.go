@@ -12,6 +12,7 @@ import (
 
 	"warp-pool/api"
 	"warp-pool/config"
+	"warp-pool/ech"
 	"warp-pool/health"
 	"warp-pool/license"
 	"warp-pool/pool"
@@ -65,10 +66,20 @@ func main() {
 	// Initialize health checker
 	checker := health.New(p, time.Duration(cfg.HealthCheckInterval)*time.Second)
 
+	// Start managed ech-workers instances
+	echMgr := ech.New(cfg.ECHWorkers)
+	echBackends := echMgr.Start(ctx)
+
 	// Initialize proxy server (only if ports are configured)
 	var proxyServer *proxy.Server
 	if cfg.Proxy.SocksPort > 0 || cfg.Proxy.HTTPPort > 0 {
-		proxyServer = proxy.New(p, cfg.Proxy.SocksPort, cfg.Proxy.HTTPPort)
+		var extras []proxy.ExtraBackend
+		for _, eb := range cfg.Proxy.ExtraBackends {
+			extras = append(extras, proxy.ExtraBackend{Name: eb.Name, Addr: eb.Addr})
+		}
+		// Append ech-workers managed backends
+		extras = append(extras, echBackends...)
+		proxyServer = proxy.NewWithOptions(p, cfg.Proxy.SocksPort, cfg.Proxy.HTTPPort, cfg.Proxy.IncludeDirect, extras)
 	}
 
 	// Initialize API server
@@ -131,6 +142,7 @@ func main() {
 		proxyServer.Stop()
 	}
 	checker.Stop()
+	echMgr.Stop()
 	p.Stop()
 
 	log.Println("Goodbye!")
@@ -141,9 +153,35 @@ func startUniqueIPv4Async(ctx context.Context, p *pool.Pool, checker *health.Che
 		return
 	}
 	go func() {
-		log.Println("Ensuring unique IPv4 addresses...")
-		if err := ensureUniqueIPv4Func(ctx, p, checker, cfg); err != nil {
-			log.Printf("Warning: %v", err)
+		for {
+			log.Println("Ensuring unique IPv4 addresses...")
+			if err := ensureUniqueIPv4Func(ctx, p, checker, cfg); err != nil {
+				log.Printf("Warning: %v", err)
+			}
+			// Monitor: re-check every 60s in case IPs drift
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(60 * time.Second):
+			}
+			// Check if IPs are still unique
+			ipv4Map := make(map[string]bool)
+			for _, proc := range p.All() {
+				ip := proc.Info().IP
+				if ip != "" && !isIPv6(ip) {
+					ipv4Map[ip] = true
+				}
+			}
+			if len(ipv4Map) < cfg.PoolSize {
+				log.Printf("[unique-ipv4] IP drift detected: only %d unique IPs, re-running dedup", len(ipv4Map))
+			} else {
+				// Still good, wait longer before next check
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(4 * time.Minute):
+				}
+			}
 		}
 	}()
 }

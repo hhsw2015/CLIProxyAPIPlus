@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -398,6 +399,40 @@ func (p *Process) Stderr() <-chan string {
 // DataDir returns the data directory path
 func (p *Process) DataDir() string {
 	return p.dataDir
+}
+
+// MemoryLimitMB returns the configured memory limit in MiB (0 = no limit).
+func (p *Process) MemoryLimitMB() int {
+	return p.limits.MemoryMB
+}
+
+// RSSBytes returns the resident set size of the child process in bytes.
+// Returns 0 if the process is not running or RSS cannot be read.
+func (p *Process) RSSBytes() int64 {
+	p.mu.RLock()
+	cmd := p.cmd
+	p.mu.RUnlock()
+
+	if cmd == nil || cmd.Process == nil {
+		return 0
+	}
+	pid := cmd.Process.Pid
+
+	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/status", pid))
+	if err != nil {
+		return 0
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.HasPrefix(line, "VmRSS:") {
+			fields := strings.Fields(line)
+			if len(fields) >= 2 {
+				var kb int64
+				fmt.Sscanf(fields[1], "%d", &kb)
+				return kb * 1024
+			}
+		}
+	}
+	return 0
 }
 
 // WarpBin returns the warp binary path

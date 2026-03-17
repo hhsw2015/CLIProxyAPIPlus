@@ -16,6 +16,22 @@ import (
 	"warp-pool/process"
 )
 
+// routeKind indicates how a request should be handled.
+type routeKind int
+
+const (
+	routeWarp   routeKind = iota // forward through a warp backend
+	routeDirect                  // connect directly using VPS IP
+	routeExtra                   // forward through an external SOCKS5 proxy
+)
+
+type route struct {
+	kind    routeKind
+	addr    string // backend address for routeExtra (e.g. "127.0.0.1:30004")
+	name    string // label for logging
+	process *process.Process
+}
+
 // Server provides unified SOCKS5 and HTTP proxy entry points
 type Server struct {
 	pool       *pool.Pool
@@ -24,6 +40,10 @@ type Server struct {
 	socksLn    net.Listener
 	httpServer *http.Server
 	wg         sync.WaitGroup
+
+	mu      sync.Mutex
+	counter uint64
+	routes  []route // round-robin route table
 }
 
 // New creates a new proxy server
@@ -33,6 +53,105 @@ func New(p *pool.Pool, socksPort, httpPort int) *Server {
 		socksPort: socksPort,
 		httpPort:  httpPort,
 	}
+}
+
+// ExtraBackend describes an external SOCKS5 proxy to include in rotation.
+type ExtraBackend struct {
+	Name string
+	Addr string
+}
+
+// NewWithOptions creates a proxy server with direct and extra backend support.
+func NewWithOptions(p *pool.Pool, socksPort, httpPort int, includeDirect bool, extras []ExtraBackend) *Server {
+	s := &Server{
+		pool:      p,
+		socksPort: socksPort,
+		httpPort:  httpPort,
+	}
+	s.buildRoutes(includeDirect, extras)
+	return s
+}
+
+// buildRoutes constructs the round-robin route table:
+// [warp0, extra0, warp1, extra1, warp2, direct, ...]
+// Extras and direct are interleaved to spread different IP sources evenly.
+func (s *Server) buildRoutes(includeDirect bool, extras []ExtraBackend) {
+	procs := s.pool.All()
+	// Count extra slots (extras + optional direct)
+	extraSlots := len(extras)
+	if includeDirect {
+		extraSlots++
+	}
+
+	if extraSlots == 0 {
+		// No extras, no routes needed — pool.Next() handles everything
+		return
+	}
+
+	// Build interleaved route list
+	var routes []route
+	extraIdx := 0
+	// Collect extra entries: extras first, then direct
+	var extraEntries []route
+	for _, eb := range extras {
+		extraEntries = append(extraEntries, route{kind: routeExtra, addr: eb.Addr, name: eb.Name})
+	}
+	if includeDirect {
+		extraEntries = append(extraEntries, route{kind: routeDirect, name: "direct"})
+	}
+
+	// Interleave: after every ceil(poolSize/extraSlots) warp entries, insert an extra
+	warpPerExtra := len(procs)
+	if extraSlots > 0 && len(procs) > extraSlots {
+		warpPerExtra = len(procs) / extraSlots
+		if warpPerExtra < 1 {
+			warpPerExtra = 1
+		}
+	}
+
+	warpCount := 0
+	for _, proc := range procs {
+		routes = append(routes, route{kind: routeWarp, process: proc, name: fmt.Sprintf("warp-%d", proc.ID())})
+		warpCount++
+		if warpCount >= warpPerExtra && extraIdx < len(extraEntries) {
+			routes = append(routes, extraEntries[extraIdx])
+			extraIdx++
+			warpCount = 0
+		}
+	}
+	// Append remaining extras
+	for ; extraIdx < len(extraEntries); extraIdx++ {
+		routes = append(routes, extraEntries[extraIdx])
+	}
+
+	s.routes = routes
+
+	names := make([]string, len(routes))
+	for i, r := range routes {
+		names[i] = r.name
+	}
+	log.Printf("[proxy] Route table: %v", names)
+}
+
+// nextRoute returns the next route via round-robin.
+// If no route table is configured, returns a warp route from the pool.
+func (s *Server) nextRoute() route {
+	if len(s.routes) == 0 {
+		proc := s.pool.Next()
+		return route{kind: routeWarp, process: proc, name: fmt.Sprintf("warp-%d", proc.ID())}
+	}
+	s.mu.Lock()
+	idx := s.counter % uint64(len(s.routes))
+	s.counter++
+	s.mu.Unlock()
+
+	r := s.routes[idx]
+	// For warp routes, get a fresh process reference to ensure it's healthy
+	if r.kind == routeWarp {
+		proc := s.pool.Next()
+		r.process = proc
+	}
+	return r
 }
 
 // Start starts both SOCKS5 and HTTP proxy servers
@@ -108,14 +227,23 @@ func (s *Server) serveSocks(ctx context.Context) {
 func (s *Server) handleSocks(clientConn net.Conn) {
 	defer clientConn.Close()
 
-	// Get next healthy process
-	proc := s.pool.Next()
+	r := s.nextRoute()
+	switch r.kind {
+	case routeDirect:
+		s.handleSocksDirect(clientConn)
+		return
+	case routeExtra:
+		s.handleSocksViaBackend(clientConn, r.addr)
+		return
+	}
+
+	// routeWarp: forward through warp backend
+	proc := r.process
 	if proc == nil || proc.State() != process.StateRunning {
 		log.Printf("[proxy] No healthy backend available")
 		return
 	}
 
-	// Connect to backend SOCKS proxy
 	backendAddr := fmt.Sprintf("127.0.0.1:%d", proc.SocksPort())
 	backendConn, err := net.DialTimeout("tcp", backendAddr, 5*time.Second)
 	if err != nil {
@@ -125,6 +253,94 @@ func (s *Server) handleSocks(clientConn net.Conn) {
 	defer backendConn.Close()
 
 	proc.IncrementRequests()
+	bidirectionalCopy(clientConn, backendConn)
+}
+
+// handleSocksViaBackend forwards SOCKS traffic to an external SOCKS5 proxy.
+func (s *Server) handleSocksViaBackend(clientConn net.Conn, backendAddr string) {
+	backendConn, err := net.DialTimeout("tcp", backendAddr, 5*time.Second)
+	if err != nil {
+		log.Printf("[proxy] Failed to connect to extra backend %s: %v", backendAddr, err)
+		return
+	}
+	defer backendConn.Close()
+	bidirectionalCopy(clientConn, backendConn)
+}
+
+// handleSocksDirect handles SOCKS5 protocol inline and connects directly to the target.
+func (s *Server) handleSocksDirect(clientConn net.Conn) {
+	// SOCKS5 auth negotiation
+	buf := make([]byte, 258)
+	// Read version + nmethods
+	if _, err := io.ReadFull(clientConn, buf[:2]); err != nil {
+		return
+	}
+	if buf[0] != 0x05 {
+		return // not SOCKS5
+	}
+	nmethods := int(buf[1])
+	if _, err := io.ReadFull(clientConn, buf[:nmethods]); err != nil {
+		return
+	}
+	// Reply: no auth required
+	clientConn.Write([]byte{0x05, 0x00})
+
+	// Read connect request: VER CMD RSV ATYP DST.ADDR DST.PORT
+	if _, err := io.ReadFull(clientConn, buf[:4]); err != nil {
+		return
+	}
+	if buf[1] != 0x01 { // only CONNECT supported
+		clientConn.Write([]byte{0x05, 0x07, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
+		return
+	}
+
+	var targetAddr string
+	atyp := buf[3]
+	switch atyp {
+	case 0x01: // IPv4
+		if _, err := io.ReadFull(clientConn, buf[:4]); err != nil {
+			return
+		}
+		targetAddr = net.IP(buf[:4]).String()
+	case 0x03: // Domain
+		if _, err := io.ReadFull(clientConn, buf[:1]); err != nil {
+			return
+		}
+		domLen := int(buf[0])
+		if _, err := io.ReadFull(clientConn, buf[:domLen]); err != nil {
+			return
+		}
+		targetAddr = string(buf[:domLen])
+	case 0x04: // IPv6
+		if _, err := io.ReadFull(clientConn, buf[:16]); err != nil {
+			return
+		}
+		targetAddr = net.IP(buf[:16]).String()
+	default:
+		clientConn.Write([]byte{0x05, 0x08, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
+		return
+	}
+
+	// Read port (2 bytes, big-endian)
+	if _, err := io.ReadFull(clientConn, buf[:2]); err != nil {
+		return
+	}
+	port := int(buf[0])<<8 | int(buf[1])
+	target := fmt.Sprintf("%s:%d", targetAddr, port)
+
+	// Direct connect
+	targetConn, err := net.DialTimeout("tcp", target, 10*time.Second)
+	if err != nil {
+		// Reply: host unreachable
+		clientConn.Write([]byte{0x05, 0x04, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
+		return
+	}
+	defer targetConn.Close()
+
+	// Reply: success
+	clientConn.Write([]byte{0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
+
+	// Only log direct connections at debug level to avoid log noise
 
 	// Bidirectional copy
 	var wg sync.WaitGroup
@@ -132,14 +348,18 @@ func (s *Server) handleSocks(clientConn net.Conn) {
 
 	go func() {
 		defer wg.Done()
-		io.Copy(backendConn, clientConn)
-		backendConn.(*net.TCPConn).CloseWrite()
+		io.Copy(targetConn, clientConn)
+		if tc, ok := targetConn.(*net.TCPConn); ok {
+			tc.CloseWrite()
+		}
 	}()
 
 	go func() {
 		defer wg.Done()
-		io.Copy(clientConn, backendConn)
-		clientConn.(*net.TCPConn).CloseWrite()
+		io.Copy(clientConn, targetConn)
+		if tc, ok := clientConn.(*net.TCPConn); ok {
+			tc.CloseWrite()
+		}
 	}()
 
 	wg.Wait()
@@ -152,8 +372,18 @@ func (s *Server) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Get next healthy process
-	proc := s.pool.Next()
+	rt := s.nextRoute()
+	switch rt.kind {
+	case routeDirect:
+		s.handleHTTPDirect(w, r)
+		return
+	case routeExtra:
+		s.handleHTTPViaBackend(w, r, rt.addr)
+		return
+	}
+
+	// routeWarp
+	proc := rt.process
 	if proc == nil || proc.State() != process.StateRunning {
 		http.Error(w, "No healthy backend available", http.StatusServiceUnavailable)
 		return
@@ -208,8 +438,18 @@ func (s *Server) handleHTTP(w http.ResponseWriter, r *http.Request) {
 
 // handleHTTPConnect handles HTTPS tunneling via CONNECT method
 func (s *Server) handleHTTPConnect(w http.ResponseWriter, r *http.Request) {
-	// Get next healthy process
-	proc := s.pool.Next()
+	rt := s.nextRoute()
+	switch rt.kind {
+	case routeDirect:
+		s.handleHTTPConnectDirect(w, r)
+		return
+	case routeExtra:
+		s.handleHTTPConnectViaBackend(w, r, rt.addr)
+		return
+	}
+
+	// routeWarp
+	proc := rt.process
 	if proc == nil || proc.State() != process.StateRunning {
 		http.Error(w, "No healthy backend available", http.StatusServiceUnavailable)
 		return
@@ -281,6 +521,216 @@ func (s *Server) handleHTTPConnect(w http.ResponseWriter, r *http.Request) {
 	go func() {
 		defer wg.Done()
 		io.Copy(clientConn, backendConn)
+		clientConn.Close()
+	}()
+
+	wg.Wait()
+}
+
+// handleHTTPViaBackend forwards a plain HTTP request through an external proxy.
+func (s *Server) handleHTTPViaBackend(w http.ResponseWriter, r *http.Request, backendAddr string) {
+	proxyURL, _ := url.Parse(fmt.Sprintf("socks5://"+backendAddr))
+	client := &http.Client{
+		Transport: &http.Transport{Proxy: http.ProxyURL(proxyURL)},
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+
+	proxyReq, err := http.NewRequest(r.Method, r.URL.String(), r.Body)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	for key, values := range r.Header {
+		for _, value := range values {
+			proxyReq.Header.Add(key, value)
+		}
+	}
+
+	resp, err := client.Do(proxyReq)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+
+	for key, values := range resp.Header {
+		for _, value := range values {
+			w.Header().Add(key, value)
+		}
+	}
+	w.WriteHeader(resp.StatusCode)
+	io.Copy(w, resp.Body)
+}
+
+// handleHTTPConnectViaBackend tunnels HTTPS CONNECT through an external SOCKS5 proxy.
+func (s *Server) handleHTTPConnectViaBackend(w http.ResponseWriter, r *http.Request, backendAddr string) {
+	// Connect to the external SOCKS5 backend, then relay raw bytes.
+	backendConn, err := net.DialTimeout("tcp", backendAddr, 5*time.Second)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+
+	// SOCKS5 handshake with the external backend
+	// Auth negotiation: version 5, 1 method (no auth)
+	backendConn.Write([]byte{0x05, 0x01, 0x00})
+	buf := make([]byte, 2)
+	if _, err := io.ReadFull(backendConn, buf); err != nil || buf[0] != 0x05 {
+		backendConn.Close()
+		http.Error(w, "SOCKS5 handshake failed with extra backend", http.StatusBadGateway)
+		return
+	}
+
+	// SOCKS5 CONNECT request
+	host, portStr, _ := net.SplitHostPort(r.Host)
+	if host == "" {
+		host = r.Host
+		portStr = "443"
+	}
+	port := 443
+	fmt.Sscanf(portStr, "%d", &port)
+
+	// Build CONNECT: VER CMD RSV ATYP(domain) LEN DOMAIN PORT
+	req := []byte{0x05, 0x01, 0x00, 0x03, byte(len(host))}
+	req = append(req, []byte(host)...)
+	req = append(req, byte(port>>8), byte(port&0xff))
+	backendConn.Write(req)
+
+	// Read reply (at least 10 bytes for IPv4 reply)
+	reply := make([]byte, 10)
+	if _, err := io.ReadFull(backendConn, reply); err != nil || reply[1] != 0x00 {
+		backendConn.Close()
+		http.Error(w, "SOCKS5 CONNECT failed with extra backend", http.StatusBadGateway)
+		return
+	}
+
+	// Hijack client connection
+	hijacker, ok := w.(http.Hijacker)
+	if !ok {
+		backendConn.Close()
+		http.Error(w, "Hijacking not supported", http.StatusInternalServerError)
+		return
+	}
+	clientConn, _, err := hijacker.Hijack()
+	if err != nil {
+		backendConn.Close()
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	clientConn.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n"))
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		io.Copy(backendConn, clientConn)
+		backendConn.Close()
+	}()
+	go func() {
+		defer wg.Done()
+		io.Copy(clientConn, backendConn)
+		clientConn.Close()
+	}()
+	wg.Wait()
+}
+
+// bidirectionalCopy pipes data between two connections until either side closes.
+func bidirectionalCopy(a, b net.Conn) {
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		io.Copy(b, a)
+		if tc, ok := b.(*net.TCPConn); ok {
+			tc.CloseWrite()
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		io.Copy(a, b)
+		if tc, ok := a.(*net.TCPConn); ok {
+			tc.CloseWrite()
+		}
+	}()
+	wg.Wait()
+}
+func (s *Server) handleHTTPDirect(w http.ResponseWriter, r *http.Request) {
+	// Only log direct connections at debug level to avoid log noise from port scanners
+
+	client := &http.Client{
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+
+	proxyReq, err := http.NewRequest(r.Method, r.URL.String(), r.Body)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	for key, values := range r.Header {
+		for _, value := range values {
+			proxyReq.Header.Add(key, value)
+		}
+	}
+
+	resp, err := client.Do(proxyReq)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+
+	for key, values := range resp.Header {
+		for _, value := range values {
+			w.Header().Add(key, value)
+		}
+	}
+	w.WriteHeader(resp.StatusCode)
+	io.Copy(w, resp.Body)
+}
+
+// handleHTTPConnectDirect handles HTTPS CONNECT tunneling directly without a proxy backend.
+func (s *Server) handleHTTPConnectDirect(w http.ResponseWriter, r *http.Request) {
+	// Only log direct CONNECT at debug level
+
+	targetConn, err := net.DialTimeout("tcp", r.Host, 10*time.Second)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+
+	hijacker, ok := w.(http.Hijacker)
+	if !ok {
+		targetConn.Close()
+		http.Error(w, "Hijacking not supported", http.StatusInternalServerError)
+		return
+	}
+
+	clientConn, _, err := hijacker.Hijack()
+	if err != nil {
+		targetConn.Close()
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	clientConn.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n"))
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	go func() {
+		defer wg.Done()
+		io.Copy(targetConn, clientConn)
+		targetConn.Close()
+	}()
+
+	go func() {
+		defer wg.Done()
+		io.Copy(clientConn, targetConn)
 		clientConn.Close()
 	}()
 
