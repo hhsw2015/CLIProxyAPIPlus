@@ -346,7 +346,7 @@ func (s *Server) probeExtras(addrs []string) {
 // Start starts both SOCKS5 and HTTP proxy servers
 func (s *Server) Start(ctx context.Context) error {
 	// Start SOCKS5 proxy
-	socksLn, err := net.Listen("tcp", fmt.Sprintf(":%d", s.socksPort))
+	socksLn, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", s.socksPort))
 	if err != nil {
 		return fmt.Errorf("failed to start SOCKS proxy: %w", err)
 	}
@@ -357,7 +357,7 @@ func (s *Server) Start(ctx context.Context) error {
 
 	// Start HTTP proxy
 	s.httpServer = &http.Server{
-		Addr:    fmt.Sprintf(":%d", s.httpPort),
+		Addr:    fmt.Sprintf("127.0.0.1:%d", s.httpPort),
 		Handler: http.HandlerFunc(s.handleHTTP),
 	}
 
