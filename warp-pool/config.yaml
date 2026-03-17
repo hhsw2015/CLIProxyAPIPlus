@@ -32,19 +32,39 @@ ech_workers:
   workers:
     - name: ech-1
       domain: "ech-workers.pikapk-f47.workers.dev:443"
-      ip: "104.17.0.134"
+      ip: "172.64.80.1"
       token: "7bd57098-82bd-4dfa-b32c-9943a52d354f"
       port: 30001
     - name: ech-2
-      domain: "ech-workers.pikapk-f47.workers.dev:443"
-      ip: "104.17.0.134"
+      domain: "ech.alias1.workers.dev:443"
+      ip: "172.64.80.1"
       token: "7bd57098-82bd-4dfa-b32c-9943a52d354f"
       port: 30002
     - name: ech-3
-      domain: "ech-workers.pikapk-f47.workers.dev:443"
-      ip: "104.17.0.134"
+      domain: "ech.alias2.workers.dev:443"
+      ip: "172.64.80.1"
       token: "7bd57098-82bd-4dfa-b32c-9943a52d354f"
       port: 30003
+    - name: ech-4
+      domain: "ech.alias3.workers.dev:443"
+      ip: "172.64.80.1"
+      token: "7bd57098-82bd-4dfa-b32c-9943a52d354f"
+      port: 30004
+    - name: ech-5
+      domain: "ech.alias4.workers.dev:443"
+      ip: "172.64.80.1"
+      token: "7bd57098-82bd-4dfa-b32c-9943a52d354f"
+      port: 30005
+    - name: ech-6
+      domain: "ech.alias5.workers.dev:443"
+      ip: "172.64.80.1"
+      token: "7bd57098-82bd-4dfa-b32c-9943a52d354f"
+      port: 30006
+    - name: ech-7
+      domain: "ech.alias6.workers.dev:443"
+      ip: "172.64.80.1"
+      token: "7bd57098-82bd-4dfa-b32c-9943a52d354f"
+      port: 30007
 
 # Management API
 api:
