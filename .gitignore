@@ -34,6 +34,14 @@ AGENTS.md
 CLAUDE.md
 GEMINI.md
 
+# warp-pool runtime artifacts
+warp-pool/warp-pool
+warp-pool/warp-pool-linux
+warp-pool/*.log
+warp-pool/*.pid
+warp-pool/*.bak
+warp-pool/data/
+
 # Tooling metadata
 .vscode/*
 .codex/*

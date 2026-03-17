@@ -1,0 +1,26 @@
+version: "3.8"
+
+services:
+  warp-pool:
+    build: .
+    container_name: warp-pool
+    restart: unless-stopped
+    ports:
+      - "1080:1080"   # SOCKS5 proxy
+      - "8118:8118"   # HTTP proxy
+      - "9090:9090"   # Management API
+    volumes:
+      - ./data:/app/data
+      - ./config.yaml:/app/config.yaml:ro
+    environment:
+      - TZ=UTC
+    cap_add:
+      - NET_ADMIN
+    sysctls:
+      - net.ipv4.ip_forward=1
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9090/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
