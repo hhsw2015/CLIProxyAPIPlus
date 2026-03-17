@@ -34,6 +34,15 @@ type UniqueIPv4Config struct {
 	RetryDelay int  `yaml:"retry_delay"`
 }
 
+type ResourceLimitsConfig struct {
+	// MemoryMB sets GOMEMLIMIT per warp instance (MiB). 0 = no limit.
+	MemoryMB int `yaml:"memory_mb"`
+	// MaxProcs sets GOMAXPROCS per warp instance. 0 = use system default.
+	MaxProcs int `yaml:"max_procs"`
+	// LogLevel overrides warp --loglevel (debug/info/warn/error/silent). Empty = default.
+	LogLevel string `yaml:"log_level"`
+}
+
 type Config struct {
 	PoolSize            int              `yaml:"pool_size"`
 	WarpBin             string           `yaml:"warp_bin"`
@@ -44,9 +53,10 @@ type Config struct {
 	API                 APIConfig        `yaml:"api"`
 	HealthCheckInterval int              `yaml:"health_check_interval"`
 	LicenseKeyURL       string           `yaml:"license_key_url"`
-	Rotation            RotationConfig   `yaml:"rotation"`
-	Direct              DirectConfig     `yaml:"direct"`
-	UniqueIPv4          UniqueIPv4Config `yaml:"unique_ipv4"`
+	Rotation            RotationConfig       `yaml:"rotation"`
+	Direct              DirectConfig         `yaml:"direct"`
+	UniqueIPv4          UniqueIPv4Config     `yaml:"unique_ipv4"`
+	ResourceLimits      ResourceLimitsConfig `yaml:"resource_limits"`
 }
 
 func Load(path string) (*Config, error) {

@@ -44,6 +44,13 @@ rotation:
   min_interval: 60
   only_used: true
 
+# Resource limits per warp instance
+# Keeps 3 instances within ~1.5G total instead of unbounded growth
+resource_limits:
+  memory_mb: 512    # GOMEMLIMIT per instance (MiB)
+  max_procs: 1      # GOMAXPROCS per instance (2-core VPS / 3 instances)
+  log_level: "warn" # reduce log I/O
+
 # Direct connection mode
 direct:
   enabled: true

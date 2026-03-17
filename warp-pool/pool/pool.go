@@ -38,13 +38,19 @@ func New(cfg *config.Config) *Pool {
 	}
 
 	for i := 0; i < cfg.PoolSize; i++ {
-		processes[i] = process.NewWithBind(
+		limits := process.ResourceLimits{
+			MemoryMB: cfg.ResourceLimits.MemoryMB,
+			MaxProcs: cfg.ResourceLimits.MaxProcs,
+			LogLevel: cfg.ResourceLimits.LogLevel,
+		}
+		processes[i] = process.NewWithLimits(
 			i,
 			cfg.WarpBin,
 			cfg.DataDir,
 			cfg.SocksBasePort+i,
 			cfg.HTTPBasePort+i,
 			bindAddr,
+			limits,
 		)
 	}
 

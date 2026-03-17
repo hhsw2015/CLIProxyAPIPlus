@@ -55,6 +55,13 @@ type Info struct {
 	SessionReqs int64     `json:"session_requests"` // Requests since last restart
 }
 
+// ResourceLimits holds per-instance resource constraints.
+type ResourceLimits struct {
+	MemoryMB int    // GOMEMLIMIT in MiB; 0 = no limit
+	MaxProcs int    // GOMAXPROCS; 0 = system default
+	LogLevel string // warp --loglevel override; empty = default
+}
+
 // Process manages a single WARP instance
 type Process struct {
 	mu sync.RWMutex
@@ -65,6 +72,7 @@ type Process struct {
 	socksPort int
 	httpPort  int
 	bindAddr  string // "127.0.0.1" or "0.0.0.0"
+	limits    ResourceLimits
 
 	state       State
 	cmd         *exec.Cmd
@@ -106,6 +114,22 @@ func NewWithBind(id int, warpBin, dataDir string, socksPort, httpPort int, bindA
 		socksPort: socksPort,
 		httpPort:  httpPort,
 		bindAddr:  bindAddr,
+		state:     StateStopped,
+		stdout:    make(chan string, 100),
+		stderr:    make(chan string, 100),
+	}
+}
+
+// NewWithLimits creates a new WARP process manager with resource limits
+func NewWithLimits(id int, warpBin, dataDir string, socksPort, httpPort int, bindAddr string, limits ResourceLimits) *Process {
+	return &Process{
+		id:        id,
+		warpBin:   warpBin,
+		dataDir:   filepath.Join(dataDir, fmt.Sprintf("warp-%d", id)),
+		socksPort: socksPort,
+		httpPort:  httpPort,
+		bindAddr:  bindAddr,
+		limits:    limits,
 		state:     StateStopped,
 		stdout:    make(chan string, 100),
 		stderr:    make(chan string, 100),
@@ -197,9 +221,25 @@ func (p *Process) Start(ctx context.Context) error {
 		"--data-dir", p.dataDir,
 	}
 
+	// Append loglevel if configured
+	if p.limits.LogLevel != "" {
+		args = append(args, "--loglevel", p.limits.LogLevel)
+	}
+
 	p.cmd = exec.CommandContext(procCtx, p.warpBin, args...)
 	p.cmd.SysProcAttr = &syscall.SysProcAttr{
 		Setpgid: true,
+	}
+
+	// Inject resource-limit env vars for Go-based warp binary
+	p.cmd.Env = os.Environ()
+	if p.limits.MemoryMB > 0 {
+		p.cmd.Env = append(p.cmd.Env,
+			fmt.Sprintf("GOMEMLIMIT=%dMiB", p.limits.MemoryMB))
+	}
+	if p.limits.MaxProcs > 0 {
+		p.cmd.Env = append(p.cmd.Env,
+			fmt.Sprintf("GOMAXPROCS=%d", p.limits.MaxProcs))
 	}
 
 	// Reset session requests on start
