@@ -69,7 +69,7 @@ func (s *Server) Start(ctx context.Context) error {
 	mux.HandleFunc("/api/license/apply", s.withAuth(s.handleLicenseApply))
 
 	s.server = &http.Server{
-		Addr:    ":" + strconv.Itoa(s.cfg.API.Port),
+		Addr:    "127.0.0.1:" + strconv.Itoa(s.cfg.API.Port),
 		Handler: mux,
 	}
 
