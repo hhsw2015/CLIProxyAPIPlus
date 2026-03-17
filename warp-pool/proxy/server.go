@@ -44,6 +44,9 @@ type Server struct {
 	mu      sync.Mutex
 	counter uint64
 	routes  []route // round-robin route table
+
+	healthMu     sync.RWMutex
+	extraHealthy map[string]bool // addr -> healthy
 }
 
 // New creates a new proxy server
@@ -133,25 +136,106 @@ func (s *Server) buildRoutes(includeDirect bool, extras []ExtraBackend) {
 	log.Printf("[proxy] Route table: %v", names)
 }
 
-// nextRoute returns the next route via round-robin.
+// nextRoute returns the next healthy route via round-robin.
+// Skips unhealthy backends (warp not running, extra backend port unreachable).
 // If no route table is configured, returns a warp route from the pool.
 func (s *Server) nextRoute() route {
 	if len(s.routes) == 0 {
 		proc := s.pool.Next()
 		return route{kind: routeWarp, process: proc, name: fmt.Sprintf("warp-%d", proc.ID())}
 	}
+
+	n := len(s.routes)
 	s.mu.Lock()
-	idx := s.counter % uint64(len(s.routes))
+	start := s.counter
 	s.counter++
 	s.mu.Unlock()
 
-	r := s.routes[idx]
-	// For warp routes, get a fresh process reference to ensure it's healthy
-	if r.kind == routeWarp {
-		proc := s.pool.Next()
-		r.process = proc
+	// Try up to len(routes) times to find a healthy backend
+	for i := 0; i < n; i++ {
+		idx := (start + uint64(i)) % uint64(n)
+		r := s.routes[idx]
+
+		switch r.kind {
+		case routeWarp:
+			proc := s.pool.Next()
+			if proc != nil && proc.State() == process.StateRunning {
+				r.process = proc
+				return r
+			}
+		case routeExtra:
+			if s.isExtraHealthy(r.addr) {
+				return r
+			}
+		case routeDirect:
+			return r // always available
+		}
 	}
-	return r
+
+	// All unhealthy — fall back to direct
+	return route{kind: routeDirect, name: "direct-fallback"}
+}
+
+// isExtraHealthy returns cached health status for an external backend.
+func (s *Server) isExtraHealthy(addr string) bool {
+	s.healthMu.RLock()
+	defer s.healthMu.RUnlock()
+	if s.extraHealthy == nil {
+		return true // assume healthy before first probe
+	}
+	healthy, ok := s.extraHealthy[addr]
+	if !ok {
+		return true // unknown = assume healthy
+	}
+	return healthy
+}
+
+// startHealthProbe runs periodic health checks on extra backends.
+func (s *Server) startHealthProbe(ctx context.Context) {
+	// Collect extra backend addresses
+	var addrs []string
+	for _, r := range s.routes {
+		if r.kind == routeExtra {
+			addrs = append(addrs, r.addr)
+		}
+	}
+	if len(addrs) == 0 {
+		return
+	}
+
+	// Initial probe
+	s.probeExtras(addrs)
+
+	s.wg.Add(1)
+	go func() {
+		defer s.wg.Done()
+		ticker := time.NewTicker(15 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				s.probeExtras(addrs)
+			}
+		}
+	}()
+}
+
+func (s *Server) probeExtras(addrs []string) {
+	results := make(map[string]bool, len(addrs))
+	for _, addr := range addrs {
+		conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
+		if err != nil {
+			results[addr] = false
+		} else {
+			conn.Close()
+			results[addr] = true
+		}
+	}
+	s.healthMu.Lock()
+	s.extraHealthy = results
+	s.healthMu.Unlock()
 }
 
 // Start starts both SOCKS5 and HTTP proxy servers
@@ -182,6 +266,9 @@ func (s *Server) Start(ctx context.Context) error {
 
 	log.Printf("[proxy] SOCKS5 listening on :%d", s.socksPort)
 	log.Printf("[proxy] HTTP listening on :%d", s.httpPort)
+
+	// Start background health probes for extra backends
+	s.startHealthProbe(ctx)
 
 	return nil
 }
