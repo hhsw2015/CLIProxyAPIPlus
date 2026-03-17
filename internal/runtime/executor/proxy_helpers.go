@@ -2,6 +2,7 @@ package executor
 
 import (
 	"context"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -24,16 +25,8 @@ var (
 // 2. Use cfg.ProxyURL if auth proxy is not configured
 // 3. Use RoundTripper from context if neither are configured
 //
-// This function caches HTTP clients by proxy URL to enable TCP/TLS connection reuse.
-//
-// Parameters:
-//   - ctx: The context containing optional RoundTripper
-//   - cfg: The application configuration
-//   - auth: The authentication information
-//   - timeout: The client timeout (0 means no timeout)
-//
-// Returns:
-//   - *http.Client: An HTTP client with configured proxy or transport
+// When a proxy is configured, the client wraps the transport with automatic
+// fallback to direct connection if the proxy is unreachable.
 func newProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, timeout time.Duration) *http.Client {
 	// Priority 1: Use auth.ProxyURL if configured
 	var proxyURL string
@@ -70,11 +63,24 @@ func newProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *clip
 		httpClient.Timeout = timeout
 	}
 
-	// If we have a proxy URL configured, set up the transport
+	// If we have a proxy URL configured, set up the transport with fallback
 	if proxyURL != "" {
+		// "direct" / "none" = explicit bypass, no proxy and no fallback
+		lower := strings.ToLower(proxyURL)
+		if lower == "direct" || lower == "none" {
+			httpClient.Transport = &http.Transport{}
+			httpClientCacheMutex.Lock()
+			httpClientCache[cacheKey] = httpClient
+			httpClientCacheMutex.Unlock()
+			return httpClient
+		}
+
 		transport := buildProxyTransport(proxyURL)
 		if transport != nil {
-			httpClient.Transport = transport
+			httpClient.Transport = &proxyFallbackTransport{
+				proxy:  transport,
+				direct: http.DefaultTransport,
+			}
 			// Cache the client
 			httpClientCacheMutex.Lock()
 			httpClientCache[cacheKey] = httpClient
@@ -100,14 +106,84 @@ func newProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *clip
 	return httpClient
 }
 
+// proxyFallbackTransport wraps a proxy transport with automatic fallback
+// to direct connection when the proxy itself is unreachable.
+type proxyFallbackTransport struct {
+	proxy  http.RoundTripper
+	direct http.RoundTripper
+}
+
+func (t *proxyFallbackTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	resp, err := t.proxy.RoundTrip(req)
+	if err != nil && isProxyConnectionError(err) {
+		log.Warnf("proxy unreachable, falling back to direct connection: %v", err)
+		return t.direct.RoundTrip(req)
+	}
+	return resp, err
+}
+
+// isProxyConnectionError returns true if the error indicates the proxy itself
+// is unreachable (not that the target behind the proxy is unreachable).
+func isProxyConnectionError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	// Connection refused to the proxy port
+	if strings.Contains(msg, "connection refused") {
+		return true
+	}
+	// Proxy dial timeout / no route
+	if strings.Contains(msg, "connect: connection timed out") {
+		return true
+	}
+	if strings.Contains(msg, "no route to host") {
+		return true
+	}
+	// SOCKS proxy specific errors
+	if strings.Contains(msg, "socks connect") && strings.Contains(msg, "EOF") {
+		return true
+	}
+	// Check for net.OpError targeting the proxy address (local port like 1080)
+	var opErr *net.OpError
+	if ok := errorAs(err, &opErr); ok {
+		if opErr.Op == "dial" || opErr.Op == "connect" {
+			if addr, ok := opErr.Addr.(*net.TCPAddr); ok {
+				// Proxy ports are typically local (127.0.0.1)
+				if addr.IP.IsLoopback() {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// errorAs is a helper to work around Go's errors.As with interface types.
+func errorAs(err error, target interface{}) bool {
+	if err == nil {
+		return false
+	}
+	// Walk the error chain
+	for {
+		if t, ok := err.(*net.OpError); ok {
+			if p, ok2 := target.(**net.OpError); ok2 {
+				*p = t
+				return true
+			}
+		}
+		if u, ok := err.(interface{ Unwrap() error }); ok {
+			err = u.Unwrap()
+			if err == nil {
+				return false
+			}
+		} else {
+			return false
+		}
+	}
+}
+
 // buildProxyTransport creates an HTTP transport configured for the given proxy URL.
-// It supports SOCKS5, HTTP, and HTTPS proxy protocols.
-//
-// Parameters:
-//   - proxyURL: The proxy URL string (e.g., "socks5://user:pass@host:port", "http://host:port")
-//
-// Returns:
-//   - *http.Transport: A configured transport, or nil if the proxy URL is invalid
 func buildProxyTransport(proxyURL string) *http.Transport {
 	transport, _, errBuild := proxyutil.BuildHTTPTransport(proxyURL)
 	if errBuild != nil {
