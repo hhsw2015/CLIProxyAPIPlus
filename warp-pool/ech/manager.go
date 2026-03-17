@@ -63,8 +63,9 @@ func (m *Manager) Start(ctx context.Context) []proxy.ExtraBackend {
 
 		addr := fmt.Sprintf("127.0.0.1:%d", wCfg.Port)
 		backends = append(backends, proxy.ExtraBackend{
-			Name: wCfg.Name,
-			Addr: addr,
+			Name:       wCfg.Name,
+			Addr:       addr,
+			ECHManaged: true,
 		})
 		log.Printf("[ech] Started %s on %s (domain=%s)", wCfg.Name, addr, wCfg.Domain)
 	}

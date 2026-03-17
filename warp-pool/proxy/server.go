@@ -27,11 +27,12 @@ const (
 )
 
 type route struct {
-	kind    routeKind
-	addr    string // backend address for routeExtra (e.g. "127.0.0.1:30004")
-	name    string // label for logging
-	process *process.Process
-	weight  int    // higher = more traffic; 0 treated as 1
+	kind       routeKind
+	addr       string // backend address for routeExtra (e.g. "127.0.0.1:30004")
+	name       string // label for logging
+	process    *process.Process
+	weight     int    // higher = more traffic; 0 treated as 1
+	echManaged bool   // true if managed by ech manager (skip health probe)
 }
 
 // RouteStats holds per-route request statistics.
@@ -78,8 +79,9 @@ func New(p *pool.Pool, socksPort, httpPort int) *Server {
 
 // ExtraBackend describes an external SOCKS5 proxy to include in rotation.
 type ExtraBackend struct {
-	Name string
-	Addr string
+	Name       string
+	Addr       string
+	ECHManaged bool // if true, skip health probes (Cloudflare-hosted, always healthy)
 }
 
 // RouteWeights holds the weight configuration for route building.
@@ -120,7 +122,7 @@ func (s *Server) buildRoutes(includeDirect bool, extras []ExtraBackend, weights 
 	// Build weighted lists per kind
 	var echRoutes, warpRoutes, directRoutes []route
 	for _, eb := range extras {
-		r := route{kind: routeExtra, addr: eb.Addr, name: eb.Name, weight: weights.ECH}
+		r := route{kind: routeExtra, addr: eb.Addr, name: eb.Name, weight: weights.ECH, echManaged: eb.ECHManaged}
 		for w := 0; w < weights.ECH; w++ {
 			echRoutes = append(echRoutes, r)
 		}
@@ -196,7 +198,7 @@ func (s *Server) nextRoute() (route, int) {
 				return r, idx
 			}
 		case routeExtra:
-			if s.isExtraHealthy(r.addr) {
+			if r.echManaged || s.isExtraHealthy(r.addr) {
 				return r, idx
 			}
 		case routeDirect:
@@ -291,11 +293,14 @@ func (s *Server) isExtraHealthy(addr string) bool {
 }
 
 // startHealthProbe runs periodic health checks on extra backends.
+// Note: ECH Workers backends (managed by ech manager) are NOT probed because
+// they run on Cloudflare infrastructure and are inherently stable. Probing them
+// would waste Cloudflare Workers request quota.
 func (s *Server) startHealthProbe(ctx context.Context) {
-	// Collect extra backend addresses
+	// Collect extra backend addresses, excluding ech-managed ones
 	var addrs []string
 	for _, r := range s.routes {
-		if r.kind == routeExtra {
+		if r.kind == routeExtra && !r.echManaged {
 			addrs = append(addrs, r.addr)
 		}
 	}
