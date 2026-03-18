@@ -63,8 +63,8 @@ func TestOpenAICompatExecutorExecute_SingularityUsesCookieAuthAndAggregatesSSE(t
 	if gotCookieHeader != "token=skybot-token" {
 		t.Fatalf("X-Skywork-Cookies = %q, want %q", gotCookieHeader, "token=skybot-token")
 	}
-	if gotBillingHeader != "skybot" {
-		t.Fatalf("X-Skywork-Billing-Source = %q, want %q", gotBillingHeader, "skybot")
+	if gotBillingHeader != "" {
+		t.Fatalf("X-Skywork-Billing-Source should be stripped, got %q", gotBillingHeader)
 	}
 	if strings.TrimSpace(gotAuthHeader) != "" {
 		t.Fatalf("did not expect Authorization header, got %q", gotAuthHeader)
@@ -127,8 +127,8 @@ func TestOpenAICompatExecutorExecuteStream_SingularityUsesCookieAuth(t *testing.
 	if gotCookieHeader != "token=skybot-token" {
 		t.Fatalf("X-Skywork-Cookies = %q, want %q", gotCookieHeader, "token=skybot-token")
 	}
-	if gotBillingHeader != "skybot" {
-		t.Fatalf("X-Skywork-Billing-Source = %q, want %q", gotBillingHeader, "skybot")
+	if gotBillingHeader != "" {
+		t.Fatalf("X-Skywork-Billing-Source should be stripped, got %q", gotBillingHeader)
 	}
 	if strings.TrimSpace(gotAuthHeader) != "" {
 		t.Fatalf("did not expect Authorization header, got %q", gotAuthHeader)
