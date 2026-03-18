@@ -728,9 +728,7 @@ func applySingularityHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey st
 	if strings.TrimSpace(r.Header.Get("X-Skywork-Cookies")) == "" && strings.TrimSpace(apiKey) != "" {
 		r.Header.Set("X-Skywork-Cookies", "token="+strings.TrimSpace(apiKey))
 	}
-	if strings.TrimSpace(r.Header.Get("X-Skywork-Billing-Source")) == "" {
-		r.Header.Set("X-Skywork-Billing-Source", "skybot")
-	}
+	r.Header.Del("X-Skywork-Billing-Source")
 	if stream {
 		r.Header.Set("Accept", "text/event-stream")
 		r.Header.Set("Cache-Control", "no-cache")
