@@ -10,12 +10,15 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/textproto"
 	"runtime"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/andybalholm/brotli"
@@ -241,6 +244,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	} else {
 		reporter.publish(ctx, parseClaudeUsage(data))
 	}
+	reporter.ensurePublished(ctx)
 	if isClaudeOAuthToken(apiKey) && !auth.ToolPrefixDisabled() {
 		data = stripClaudeToolPrefixFromResponse(data, claudeToolPrefix)
 	}
@@ -412,10 +416,15 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 				out <- cliproxyexecutor.StreamChunk{Payload: cloned}
 			}
 			if errScan := scanner.Err(); errScan != nil {
+				if shouldIgnoreClaudeStreamScannerError(errScan) {
+					reporter.ensurePublished(ctx)
+					return
+				}
 				recordAPIResponseError(ctx, e.cfg, errScan)
 				reporter.publishFailure(ctx)
 				out <- cliproxyexecutor.StreamChunk{Err: errScan}
 			}
+			reporter.ensurePublished(ctx)
 			return
 		}
 
@@ -447,10 +456,15 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			}
 		}
 		if errScan := scanner.Err(); errScan != nil {
+			if shouldIgnoreClaudeStreamScannerError(errScan) {
+				reporter.ensurePublished(ctx)
+				return
+			}
 			recordAPIResponseError(ctx, e.cfg, errScan)
 			reporter.publishFailure(ctx)
 			out <- cliproxyexecutor.StreamChunk{Err: errScan}
 		}
+		reporter.ensurePublished(ctx)
 	}()
 	return &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: out}, nil
 }
@@ -562,6 +576,32 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	count := gjson.GetBytes(data, "input_tokens").Int()
 	out := sdktranslator.TranslateTokenCount(ctx, to, from, count, data)
 	return cliproxyexecutor.Response{Payload: []byte(out), Headers: resp.Header.Clone()}, nil
+}
+
+func shouldIgnoreClaudeStreamScannerError(err error) bool {
+	if err == nil {
+		return true
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, net.ErrClosed) {
+		return true
+	}
+	var syscallErr syscall.Errno
+	if errors.As(err, &syscallErr) {
+		switch syscallErr {
+		case syscall.EPIPE, syscall.ECONNRESET:
+			return true
+		}
+	}
+	msg := strings.ToLower(strings.TrimSpace(err.Error()))
+	for _, marker := range []string{"broken pipe", "connection reset", "client disconnected", "use of closed network connection", "context canceled", "unexpected eof"} {
+		if strings.Contains(msg, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func (e *ClaudeExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.Auth, error) {

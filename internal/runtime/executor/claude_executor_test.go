@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -1062,5 +1063,27 @@ func TestCheckSystemInstructionsWithMode_StringWithSpecialChars(t *testing.T) {
 	}
 	if blocks[2].Get("text").String() != `Use <xml> tags & "quotes" in output.` {
 		t.Fatalf("blocks[2] text mangled, got %q", blocks[2].Get("text").String())
+	}
+}
+
+
+func TestShouldIgnoreClaudeStreamScannerError(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "context canceled", err: context.Canceled, want: true},
+		{name: "deadline exceeded", err: context.DeadlineExceeded, want: true},
+		{name: "unexpected eof", err: io.ErrUnexpectedEOF, want: true},
+		{name: "generic error", err: fmt.Errorf("boom"), want: false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := shouldIgnoreClaudeStreamScannerError(tc.err); got != tc.want {
+				t.Fatalf("shouldIgnoreClaudeStreamScannerError(%v) = %v, want %v", tc.err, got, tc.want)
+			}
+		})
 	}
 }
