@@ -101,7 +101,9 @@ func (a *geminiTaskAdaptor) BuildRequestBody(c *gin.Context, body []byte, model 
 			{"prompt": req.Prompt},
 		},
 		"parameters": map[string]any{
-			"sampleCount": 1,
+			"sampleCount":      1,
+			"durationSeconds":  8,
+			"personGeneration": "allow_all",
 		},
 	}
 	if req.Duration > 0 {

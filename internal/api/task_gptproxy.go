@@ -65,7 +65,8 @@ func (a *gptProxyAdaptor) BuildRequestBody(c *gin.Context, body []byte, model st
 	switch {
 	case strings.Contains(base, "/google/veo"):
 		// Veo format: instances + parameters
-		params := map[string]any{"sampleCount": 1, "personGeneration": "allow_all"}
+		// Supported durations: [4, 6, 8] — default to 8
+		params := map[string]any{"sampleCount": 1, "personGeneration": "allow_all", "durationSeconds": 8}
 		if d, ok := req["duration"]; ok {
 			params["durationSeconds"] = d
 		}
