@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	log "github.com/sirupsen/logrus"
@@ -207,6 +208,65 @@ func (s *Server) resolveMediaProvider(modelName string, ep mediaEndpoint) *media
 	}
 
 	return nil
+}
+
+// setupGptProxyRoutes registers a catch-all proxy for gpt-proxy media endpoints.
+// This handles both submit (POST) and poll (GET) requests transparently.
+func (s *Server) setupGptProxyRoutes(engine *gin.Engine) {
+	// Catch-all for gpt-proxy media routes.
+	// Clients use the same paths as gpt-proxy, CPA just forwards.
+	proxy := engine.Group("/gpt-proxy")
+	proxy.Use(AuthMiddleware(s.accessManager))
+	proxy.Any("/*path", s.gptProxyPassthrough())
+}
+
+// gptProxyPassthrough transparently forwards requests to the local gpt-proxy
+// via chisel tunnel (127.0.0.1:19900).
+func (s *Server) gptProxyPassthrough() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		path := c.Param("path")
+		upstreamURL := "http://127.0.0.1:19900/gpt-proxy" + path
+		if c.Request.URL.RawQuery != "" {
+			upstreamURL += "?" + c.Request.URL.RawQuery
+		}
+
+		var bodyReader io.Reader
+		if c.Request.Body != nil {
+			body, err := io.ReadAll(c.Request.Body)
+			if err == nil && len(body) > 0 {
+				bodyReader = bytes.NewReader(body)
+			}
+		}
+
+		upstreamReq, err := http.NewRequestWithContext(c.Request.Context(), c.Request.Method, upstreamURL, bodyReader)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create upstream request"})
+			return
+		}
+
+		// Forward Content-Type and auth headers.
+		if ct := c.GetHeader("Content-Type"); ct != "" {
+			upstreamReq.Header.Set("Content-Type", ct)
+		}
+		// Set gpt-proxy auth.
+		upstreamReq.Header.Set("app_key", "gpt-5739025d9e453d483a6595f95591")
+
+		resp, err := (&http.Client{Timeout: 120 * time.Second}).Do(upstreamReq)
+		if err != nil {
+			log.Errorf("gpt-proxy passthrough: request failed: %v", err)
+			c.JSON(http.StatusBadGateway, gin.H{"error": "upstream request failed"})
+			return
+		}
+		defer resp.Body.Close()
+
+		for k, vals := range resp.Header {
+			for _, v := range vals {
+				c.Writer.Header().Add(k, v)
+			}
+		}
+		c.Writer.WriteHeader(resp.StatusCode)
+		io.Copy(c.Writer, resp.Body)
+	}
 }
 
 // extractModelFromMultipart attempts to extract the "model" field from a multipart body.
