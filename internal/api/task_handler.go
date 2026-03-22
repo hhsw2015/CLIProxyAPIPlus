@@ -131,10 +131,12 @@ func (s *Server) taskSubmitHandler(platform string) gin.HandlerFunc {
 
 		// Build upstream request.
 		// If the provider base-url is a gpt-proxy URL (contains /gpt-proxy/),
-		// use it as-is without letting the adaptor append paths.
+		// use gpt-proxy-specific URL construction.
 		upstreamURL := provider.baseURL
 		isPassthrough := strings.Contains(provider.baseURL, "/gpt-proxy/")
-		if !isPassthrough {
+		if isPassthrough {
+			upstreamURL = (&gptProxyAdaptor{}).buildSubmitURL(provider.baseURL)
+		} else {
 			upstreamURL = adaptor.BuildRequestURL(provider.baseURL, action)
 		}
 

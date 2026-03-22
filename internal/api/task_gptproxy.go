@@ -57,18 +57,45 @@ func (a *gptProxyAdaptor) ParseSubmitResponse(resp *http.Response) (string, []by
 	return taskID, data, nil
 }
 
+// BuildSubmitURL constructs the gpt-proxy submit URL.
+// For Veo: base + /predict; for others: base + /submit or base as-is.
+func (a *gptProxyAdaptor) buildSubmitURL(baseURL string) string {
+	base := strings.TrimSuffix(baseURL, "/")
+	// Veo uses /predict
+	if strings.Contains(base, "/google/veo") {
+		return base + "/predict"
+	}
+	// Kling uses /submit
+	if strings.Contains(base, "/klingai") {
+		return base + "/submit"
+	}
+	// Volengine uses /submit
+	if strings.Contains(base, "/volengine") {
+		return base + "/submit"
+	}
+	return base
+}
+
 // FetchTask polls gpt-proxy for task status.
-// The baseURL is the original submit URL; for polling, we append the task ID
-// or use a query parameter depending on the provider's convention.
+// gpt-proxy uses POST for polling (not GET), with task_id in body.
 func (a *gptProxyAdaptor) FetchTask(baseURL, apiKey, upstreamTaskID, action string) (*http.Response, error) {
-	// Try common polling patterns:
-	// 1. GET {baseURL}/{taskID}
-	// 2. GET {baseURL}?task_id={taskID}
-	fetchURL := strings.TrimSuffix(baseURL, "/") + "/" + upstreamTaskID
-	req, err := http.NewRequest(http.MethodGet, fetchURL, nil)
+	base := strings.TrimSuffix(baseURL, "/")
+	var fetchURL string
+	// Veo uses /fetch
+	if strings.Contains(base, "/google/veo") {
+		fetchURL = base + "/fetch"
+	} else {
+		// Others: append /fetch or /{taskID}
+		fetchURL = base + "/fetch"
+	}
+
+	// gpt-proxy polling uses POST with task_id in body.
+	body, _ := json.Marshal(map[string]string{"task_id": upstreamTaskID})
+	req, err := http.NewRequest(http.MethodPost, fetchURL, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
+	req.Header.Set("Content-Type", "application/json")
 	a.BuildRequestHeader(req, apiKey)
 	req.Header.Set("Accept", "application/json")
 	return (&http.Client{Timeout: 30 * time.Second}).Do(req)
