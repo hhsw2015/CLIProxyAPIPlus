@@ -68,6 +68,7 @@ func (s *Server) setupTaskRoutes(v1 *gin.RouterGroup) {
 
 	// Generic task fetch (works for all platforms)
 	v1.GET("/tasks/:task_id", s.taskFetchHandler())
+	v1.GET("/tasks/:task_id/content", s.taskContentHandler())
 
 	// Start background polling
 	go s.taskPollingLoop()
@@ -360,6 +361,24 @@ func (s *Server) detectPlatformForModel(modelName string) string {
 	}
 }
 
+// taskContentHandler serves the raw video/audio data for a completed task.
+func (s *Server) taskContentHandler() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		taskID := c.Param("task_id")
+		task := globalTaskStore.Get(taskID)
+		if task == nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": "task not found"})
+			return
+		}
+		if task.Status != TaskStatusSuccess || len(task.Data) == 0 {
+			c.JSON(http.StatusNotFound, gin.H{"error": "task content not available"})
+			return
+		}
+		c.Header("Content-Type", "application/json")
+		c.Writer.Write(task.Data)
+	}
+}
+
 // resolveTaskProvider finds provider config for async tasks.
 func (s *Server) resolveTaskProvider(modelName, platform string) *mediaProviderConfig {
 	if s.cfg == nil {
@@ -431,6 +450,9 @@ func (s *Server) pollUnfinishedTasks() {
 			continue
 		}
 
+		if task.Status != TaskStatusSuccess && task.Status != TaskStatusFailure {
+			log.Debugf("task poll raw response for %s: %s", task.ID, string(respBody[:min(len(respBody), 500)]))
+		}
 		info, err := adaptor.ParseTaskResult(respBody)
 		if err != nil {
 			log.Debugf("task poll: failed to parse %s: %v", task.ID, err)
@@ -446,6 +468,10 @@ func (s *Server) pollUnfinishedTasks() {
 			}
 			if info.URL != "" {
 				t.ResultURL = info.URL
+			}
+			// Store raw response for completed tasks (contains video data).
+			if info.Status == TaskStatusSuccess {
+				t.Data = respBody
 			}
 			if info.Reason != "" {
 				t.FailReason = info.Reason

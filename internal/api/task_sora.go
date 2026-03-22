@@ -120,6 +120,8 @@ func (a *soraAdaptor) BuildClientResponse(task *Task) any {
 	}
 	if task.ResultURL != "" {
 		resp.ResultURL = task.ResultURL
+	} else if task.Status == TaskStatusSuccess && len(task.Data) > 0 {
+		resp.ResultURL = fmt.Sprintf("/v1/tasks/%s/content", task.ID)
 	}
 	if task.Status == TaskStatusFailure && task.FailReason != "" {
 		resp.Error = &TaskErrorResp{Message: task.FailReason, Code: "generation_failed"}
