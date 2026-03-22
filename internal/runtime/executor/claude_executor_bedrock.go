@@ -136,6 +136,7 @@ func (e *ClaudeExecutor) executeBedrock(ctx context.Context, auth *cliproxyauth.
 		Body:        body,
 	})
 	if err != nil {
+		log.Errorf("bedrock InvokeModel error for model %s (modelID=%s, region=%s): %v", baseModel, modelID, region, err)
 		return resp, statusErr{code: http.StatusBadGateway, msg: fmt.Sprintf("bedrock invoke error: %v", err)}
 	}
 
@@ -178,6 +179,7 @@ func (e *ClaudeExecutor) executeStreamBedrock(ctx context.Context, auth *cliprox
 		Body:        body,
 	})
 	if err != nil {
+		log.Errorf("bedrock InvokeModelWithResponseStream error for model %s (modelID=%s, region=%s): %v", baseModel, modelID, region, err)
 		return nil, statusErr{code: http.StatusBadGateway, msg: fmt.Sprintf("bedrock stream error: %v", err)}
 	}
 
