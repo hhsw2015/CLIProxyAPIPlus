@@ -143,9 +143,15 @@ func (s *Server) taskSubmitHandler(platform string) gin.HandlerFunc {
 		var reqBody io.Reader
 		var contentType string
 		if isPassthrough {
-			// gpt-proxy passthrough: send original body as-is.
-			reqBody = bytes.NewReader(body)
-			contentType = "application/json"
+			// gpt-proxy: transform body and use correct submit URL.
+			c.Set("gpt_proxy_base_url", provider.baseURL)
+			var err error
+			gptAdaptor := &gptProxyAdaptor{}
+			reqBody, contentType, err = gptAdaptor.BuildRequestBody(c, body, modelName)
+			if err != nil {
+				reqBody = bytes.NewReader(body)
+				contentType = "application/json"
+			}
 		} else {
 			var err error
 			reqBody, contentType, err = adaptor.BuildRequestBody(c, body, modelName)
