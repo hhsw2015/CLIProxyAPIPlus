@@ -44,8 +44,10 @@ func (a *hailuoAdaptor) BuildRequestBody(c *gin.Context, body []byte, model stri
 	}
 
 	hailuoBody := map[string]any{
-		"model":  model,
-		"prompt": req.Prompt,
+		"model":      model,
+		"prompt":     req.Prompt,
+		"duration":   8,
+		"resolution": "1080p",
 	}
 	if req.Duration > 0 {
 		hailuoBody["duration"] = req.Duration

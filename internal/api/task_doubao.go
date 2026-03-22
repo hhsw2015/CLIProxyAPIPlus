@@ -55,10 +55,14 @@ func (a *doubaoAdaptor) BuildRequestBody(c *gin.Context, body []byte, model stri
 	}
 
 	doubaoBody := map[string]any{
-		"model":   model,
-		"content": content,
+		"model":          model,
+		"content":        content,
+		"generate_audio": true,
+		"duration":       8,
+		"resolution":     "720p",
+		"watermark":      false,
 	}
-	// Pass through metadata fields.
+	// Pass through metadata fields (can override defaults).
 	if req.Metadata != nil {
 		for k, v := range req.Metadata {
 			doubaoBody[k] = v
