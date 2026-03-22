@@ -58,7 +58,7 @@ func (a *doubaoAdaptor) BuildRequestBody(c *gin.Context, body []byte, model stri
 		"model":          model,
 		"content":        content,
 		"generate_audio": true,
-		"duration":       8,
+		"duration":       12,
 		"resolution":     "720p",
 		"watermark":      false,
 	}

@@ -93,8 +93,8 @@ func (a *gptProxyAdaptor) BuildRequestBody(c *gin.Context, body []byte, model st
 		}
 
 	case strings.Contains(base, "/klingai"):
-		// Kling: highest quality — kling-v3, duration 8s, sound on, no watermark
-		duration := "8"
+		// Kling: highest quality — kling-v3, max duration 15s, sound on, no watermark
+		duration := "15"
 		if d, ok := req["duration"]; ok {
 			duration = fmt.Sprintf("%v", d)
 		}
@@ -115,8 +115,8 @@ func (a *gptProxyAdaptor) BuildRequestBody(c *gin.Context, body []byte, model st
 		}
 
 	case strings.Contains(base, "/volengine/video"):
-		// Seedance: highest quality — 720p, audio on, no watermark
-		duration := 8
+		// Seedance: highest quality — 720p, max duration 12s, audio on, no watermark
+		duration := 12
 		if d, ok := req["duration"]; ok {
 			if di, ok := d.(float64); ok {
 				duration = int(di)

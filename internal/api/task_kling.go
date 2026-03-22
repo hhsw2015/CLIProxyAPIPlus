@@ -64,7 +64,7 @@ func (a *klingAdaptor) BuildRequestBody(c *gin.Context, body []byte, model strin
 			bodyMap["sound"] = "on"
 		}
 		if _, ok := bodyMap["duration"]; !ok {
-			bodyMap["duration"] = "8"
+			bodyMap["duration"] = "15"
 		}
 		if updated, err := json.Marshal(bodyMap); err == nil {
 			body = updated
