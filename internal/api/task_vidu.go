@@ -55,9 +55,10 @@ func (a *viduAdaptor) BuildRequestBody(c *gin.Context, body []byte, model string
 	viduBody := map[string]any{
 		"model":              model,
 		"prompt":             req.Prompt,
-		"duration":           max(req.Duration, 5),
+		"duration":           max(req.Duration, 8),
 		"resolution":         "1080p",
 		"movement_amplitude": "auto",
+		"bgm":                false,
 	}
 	if req.Size != "" {
 		viduBody["resolution"] = req.Size

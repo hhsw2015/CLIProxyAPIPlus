@@ -77,8 +77,12 @@ func (a *gptProxyAdaptor) BuildRequestBody(c *gin.Context, body []byte, model st
 		}
 
 	case strings.Contains(base, "/google/imagen"):
-		// Imagen format: instances + parameters
-		params := map[string]any{"sampleCount": 1, "personGeneration": "allow_all"}
+		// Imagen: highest quality — 16:9, allow all persons
+		params := map[string]any{
+			"sampleCount":      1,
+			"personGeneration": "allow_all",
+			"aspectRatio":      "16:9",
+		}
 		if ar, ok := req["aspect_ratio"]; ok {
 			params["aspectRatio"] = ar
 		}
@@ -89,25 +93,85 @@ func (a *gptProxyAdaptor) BuildRequestBody(c *gin.Context, body []byte, model st
 		}
 
 	case strings.Contains(base, "/klingai"):
-		// Kling format
+		// Kling: highest quality — kling-v3, duration 8s, sound on, no watermark
+		duration := "8"
+		if d, ok := req["duration"]; ok {
+			duration = fmt.Sprintf("%v", d)
+		}
+		aspectRatio := "16:9"
+		if ar, ok := req["aspect_ratio"]; ok {
+			if s, ok := ar.(string); ok {
+				aspectRatio = s
+			}
+		}
 		transformed = map[string]any{
 			"model_name":     model,
 			"prompt":         prompt,
-			"duration":       "10",
-			"aspect_ratio":   "16:9",
+			"duration":       duration,
+			"mode":           "std",
+			"sound":          "on",
+			"aspect_ratio":   aspectRatio,
 			"watermark_info": map[string]any{"enabled": false},
 		}
 
 	case strings.Contains(base, "/volengine/video"):
-		// Doubao/Seedance format
+		// Seedance: highest quality — 720p, audio on, no watermark
+		duration := 8
+		if d, ok := req["duration"]; ok {
+			if di, ok := d.(float64); ok {
+				duration = int(di)
+			}
+		}
 		content := []map[string]any{{"type": "text", "text": prompt}}
 		transformed = map[string]any{
 			"model":          model,
 			"content":        content,
-			"generate_audio": false,
-			"duration":       5,
+			"generate_audio": true,
+			"duration":       duration,
 			"resolution":     "720p",
 			"watermark":      false,
+		}
+
+	case strings.Contains(base, "/volengine/imagen"):
+		// Doubao Image: highest quality — 2k, no watermark
+		transformed = map[string]any{
+			"model":           model,
+			"prompt":          prompt,
+			"size":            "2k",
+			"response_format": "url",
+			"watermark":       false,
+		}
+
+	case strings.Contains(base, "/azure/imagen"):
+		// Azure GPT-Image: highest quality — 1536x1024, quality high
+		transformed = map[string]any{
+			"model":   model,
+			"prompt":  prompt,
+			"size":    "1536x1024",
+			"quality": "high",
+			"n":       1,
+		}
+
+	case strings.Contains(base, "/azure/tts"):
+		// Azure TTS: HD model
+		voice := "alloy"
+		if v, ok := req["voice"]; ok {
+			if s, ok := v.(string); ok {
+				voice = s
+			}
+		}
+		input := prompt
+		if inp, ok := req["input"]; ok {
+			if s, ok := inp.(string); ok {
+				input = s
+			}
+		}
+		transformed = map[string]any{
+			"model":         "tts-1-hd",
+			"input":         input,
+			"voice":         voice,
+			"output_format": "mp3",
+			"speed":         1.0,
 		}
 
 	default:

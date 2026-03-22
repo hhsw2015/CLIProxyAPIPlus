@@ -51,6 +51,25 @@ func (a *klingAdaptor) BuildRequestHeader(req *http.Request, apiKey string) {
 }
 
 func (a *klingAdaptor) BuildRequestBody(c *gin.Context, body []byte, model string) (io.Reader, string, error) {
+	// Inject highest quality defaults if not present.
+	var bodyMap map[string]any
+	if json.Unmarshal(body, &bodyMap) == nil {
+		if _, ok := bodyMap["watermark_info"]; !ok {
+			bodyMap["watermark_info"] = map[string]any{"enabled": false}
+		}
+		if _, ok := bodyMap["mode"]; !ok {
+			bodyMap["mode"] = "std"
+		}
+		if _, ok := bodyMap["sound"]; !ok {
+			bodyMap["sound"] = "on"
+		}
+		if _, ok := bodyMap["duration"]; !ok {
+			bodyMap["duration"] = "8"
+		}
+		if updated, err := json.Marshal(bodyMap); err == nil {
+			body = updated
+		}
+	}
 	return bytes.NewReader(body), "application/json", nil
 }
 
