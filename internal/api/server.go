@@ -361,6 +361,8 @@ func (s *Server) setupRoutes() {
 	}
 	// Media API proxy routes (images, audio)
 	s.setupMediaRoutes(v1)
+	// Async task routes (video generation, music, etc.)
+	s.setupTaskRoutes(v1)
 
 	// Gemini compatible API routes
 	v1beta := s.engine.Group("/v1beta")
