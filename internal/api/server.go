@@ -359,6 +359,8 @@ func (s *Server) setupRoutes() {
 		v1.POST("/responses", openaiResponsesHandlers.Responses)
 		v1.POST("/responses/compact", openaiResponsesHandlers.Compact)
 	}
+	// Media API proxy routes (images, audio)
+	s.setupMediaRoutes(v1)
 
 	// Gemini compatible API routes
 	v1beta := s.engine.Group("/v1beta")
