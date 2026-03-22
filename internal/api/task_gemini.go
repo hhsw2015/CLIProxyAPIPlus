@@ -217,6 +217,7 @@ func (a *geminiTaskAdaptor) ParseTaskResult(respBody []byte) (*TaskInfo, error) 
 			Message string `json:"message"`
 		} `json:"error"`
 		Response struct {
+			// Gemini API format
 			GenerateVideoResponse struct {
 				GeneratedVideos []struct {
 					Video struct {
@@ -224,6 +225,15 @@ func (a *geminiTaskAdaptor) ParseTaskResult(respBody []byte) (*TaskInfo, error) 
 					} `json:"video"`
 				} `json:"generatedVideos"`
 			} `json:"generateVideoResponse"`
+			// Vertex API format
+			Videos []struct {
+				MimeType           string `json:"mimeType"`
+				BytesBase64Encoded string `json:"bytesBase64Encoded"`
+				Encoding           string `json:"encoding"`
+			} `json:"videos"`
+			BytesBase64Encoded string `json:"bytesBase64Encoded"`
+			Encoding           string `json:"encoding"`
+			Video              string `json:"video"`
 		} `json:"response"`
 	}
 	if err := json.Unmarshal(respBody, &op); err != nil {
@@ -243,10 +253,57 @@ func (a *geminiTaskAdaptor) ParseTaskResult(respBody []byte) (*TaskInfo, error) 
 	}
 	info.Status = TaskStatusSuccess
 	info.Progress = "100%"
+
+	// Try Gemini API format: generateVideoResponse.generatedVideos[].video.uri
 	if len(op.Response.GenerateVideoResponse.GeneratedVideos) > 0 {
-		info.URL = op.Response.GenerateVideoResponse.GeneratedVideos[0].Video.URI
+		uri := op.Response.GenerateVideoResponse.GeneratedVideos[0].Video.URI
+		if uri != "" {
+			info.URL = uri
+			return info, nil
+		}
+	}
+	// Try Vertex format: response.videos[].bytesBase64Encoded
+	if len(op.Response.Videos) > 0 && op.Response.Videos[0].BytesBase64Encoded != "" {
+		v := op.Response.Videos[0]
+		mime := v.MimeType
+		if mime == "" {
+			enc := v.Encoding
+			if enc == "" {
+				enc = "mp4"
+			}
+			if strings.Contains(enc, "/") {
+				mime = enc
+			} else {
+				mime = "video/" + enc
+			}
+		}
+		info.URL = "data:" + mime + ";base64," + v.BytesBase64Encoded[:min(len(v.BytesBase64Encoded), 100)] + "...(truncated)"
+		return info, nil
+	}
+	// Try flat base64 field
+	if op.Response.BytesBase64Encoded != "" {
+		enc := op.Response.Encoding
+		if enc == "" {
+			enc = "mp4"
+		}
+		mime := enc
+		if !strings.Contains(enc, "/") {
+			mime = "video/" + enc
+		}
+		info.URL = "data:" + mime + ";base64,(video data available)"
+		return info, nil
+	}
+	if op.Response.Video != "" {
+		info.URL = "data:video/mp4;base64,(video data available)"
 	}
 	return info, nil
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 func (a *geminiTaskAdaptor) BuildClientResponse(task *Task) any {
