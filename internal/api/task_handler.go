@@ -34,9 +34,9 @@ func init() {
 
 // setupTaskRoutes registers async task API routes.
 func (s *Server) setupTaskRoutes(v1 *gin.RouterGroup) {
-	// Sora / OpenAI Video
-	v1.POST("/video/generations", s.taskSubmitHandler("sora"))
-	v1.POST("/videos", s.taskSubmitHandler("sora"))
+	// Video generation (auto-detect platform from model name)
+	v1.POST("/video/generations", s.taskSubmitHandler("auto"))
+	v1.POST("/videos", s.taskSubmitHandler("auto"))
 	v1.GET("/video/generations/:task_id", s.taskFetchHandler())
 	v1.GET("/videos/:task_id", s.taskFetchHandler())
 
@@ -76,19 +76,33 @@ func (s *Server) setupTaskRoutes(v1 *gin.RouterGroup) {
 // taskSubmitHandler returns a handler for submitting async tasks.
 func (s *Server) taskSubmitHandler(platform string) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		adaptor, ok := taskRegistry[platform]
-		if !ok {
+		body, err := c.GetRawData()
+		if err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{
-				"message": fmt.Sprintf("unsupported platform: %s", platform),
+				"message": fmt.Sprintf("failed to read request body: %v", err),
 				"type":    "invalid_request_error",
 			}})
 			return
 		}
 
-		body, err := c.GetRawData()
-		if err != nil {
+		// Extract model name early for auto-detection.
+		modelName := ""
+		var bodyMap map[string]any
+		if json.Unmarshal(body, &bodyMap) == nil {
+			if m, ok := bodyMap["model"].(string); ok {
+				modelName = m
+			}
+		}
+
+		// Auto-detect platform from model name if platform is "auto".
+		if platform == "auto" && modelName != "" {
+			platform = s.detectPlatformForModel(modelName)
+		}
+
+		adaptor, ok := taskRegistry[platform]
+		if !ok {
 			c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{
-				"message": fmt.Sprintf("failed to read request body: %v", err),
+				"message": fmt.Sprintf("unsupported platform: %s for model %s", platform, modelName),
 				"type":    "invalid_request_error",
 			}})
 			return
@@ -102,15 +116,6 @@ func (s *Server) taskSubmitHandler(platform string) gin.HandlerFunc {
 				"type":    "invalid_request_error",
 			}})
 			return
-		}
-
-		// Extract model from body.
-		modelName := ""
-		var bodyMap map[string]any
-		if err := json.Unmarshal(body, &bodyMap); err == nil {
-			if m, ok := bodyMap["model"].(string); ok {
-				modelName = m
-			}
 		}
 
 		// Find provider from openai-compatibility config.
@@ -295,6 +300,63 @@ func (s *Server) taskFetchHandler() gin.HandlerFunc {
 		}
 
 		c.JSON(http.StatusOK, adaptor.BuildClientResponse(task))
+	}
+}
+
+// detectPlatformForModel determines the task platform based on model name and config.
+func (s *Server) detectPlatformForModel(modelName string) string {
+	if s.cfg != nil {
+		for _, compat := range s.cfg.OpenAICompatibility {
+			for _, m := range compat.Models {
+				name := strings.TrimSpace(m.Name)
+				alias := strings.TrimSpace(m.Alias)
+				if !strings.EqualFold(name, modelName) && !strings.EqualFold(alias, modelName) {
+					continue
+				}
+				// gpt-proxy passthrough
+				if strings.Contains(compat.BaseURL, "/gpt-proxy/") {
+					return "gpt-proxy"
+				}
+				// Detect by config entry name prefix
+				entryName := strings.ToLower(compat.Name)
+				switch {
+				case strings.HasPrefix(entryName, "kling"):
+					return "kling"
+				case strings.HasPrefix(entryName, "hailuo") || strings.HasPrefix(entryName, "minimax"):
+					return "hailuo"
+				case strings.HasPrefix(entryName, "doubao") || strings.HasPrefix(entryName, "seedance"):
+					return "doubao"
+				case strings.HasPrefix(entryName, "vidu"):
+					return "vidu"
+				case strings.HasPrefix(entryName, "suno"):
+					return "suno"
+				case strings.HasPrefix(entryName, "gemini") || strings.HasPrefix(entryName, "vertex"):
+					return "gemini"
+				case strings.HasPrefix(entryName, "azure-sora") || strings.Contains(entryName, "sora"):
+					return "sora"
+				}
+			}
+		}
+	}
+	// Fallback: detect by model name pattern
+	lower := strings.ToLower(modelName)
+	switch {
+	case strings.Contains(lower, "veo"):
+		return "gemini"
+	case strings.Contains(lower, "sora"):
+		return "sora"
+	case strings.Contains(lower, "kling"):
+		return "kling"
+	case strings.Contains(lower, "suno"):
+		return "suno"
+	case strings.Contains(lower, "seedance") || strings.Contains(lower, "seedream"):
+		return "doubao"
+	case strings.Contains(lower, "hailuo") || strings.Contains(lower, "minimax"):
+		return "hailuo"
+	case strings.Contains(lower, "vidu"):
+		return "vidu"
+	default:
+		return "sora" // default fallback
 	}
 }
 
