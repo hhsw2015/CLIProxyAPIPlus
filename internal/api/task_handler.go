@@ -26,6 +26,7 @@ func init() {
 	registerTaskAdaptor(&klingAdaptor{})
 	registerTaskAdaptor(&sunoAdaptor{})
 	registerTaskAdaptor(&geminiTaskAdaptor{})
+	registerTaskAdaptor(&gptProxyAdaptor{})
 	registerTaskAdaptor(&doubaoAdaptor{})
 	registerTaskAdaptor(&hailuoAdaptor{})
 	registerTaskAdaptor(&viduAdaptor{})
@@ -182,15 +183,50 @@ func (s *Server) taskSubmitHandler(platform string) gin.HandlerFunc {
 			return
 		}
 
-		// For gpt-proxy passthrough, forward the response directly.
+		// For gpt-proxy passthrough, parse response to extract task ID
+		// and store it in CPA's task store for unified polling.
 		if isPassthrough {
 			respBody, _ := io.ReadAll(resp.Body)
-			for k, vals := range resp.Header {
-				for _, v := range vals {
-					c.Writer.Header().Add(k, v)
+			// Try to extract task ID from gpt-proxy response.
+			var gptProxyResp map[string]any
+			upstreamTaskID := ""
+			if json.Unmarshal(respBody, &gptProxyResp) == nil {
+				// Try common task ID field names.
+				for _, field := range []string{"id", "task_id", "taskId", "data.task_id"} {
+					if v, ok := gptProxyResp[field]; ok {
+						if s, ok := v.(string); ok && s != "" {
+							upstreamTaskID = s
+							break
+						}
+					}
+				}
+				// Check nested data.task_id
+				if upstreamTaskID == "" {
+					if data, ok := gptProxyResp["data"].(map[string]any); ok {
+						if tid, ok := data["task_id"].(string); ok {
+							upstreamTaskID = tid
+						}
+					}
 				}
 			}
-			c.Data(resp.StatusCode, resp.Header.Get("Content-Type"), respBody)
+
+			task := &Task{
+				ID:              generateTaskID(),
+				Model:           modelName,
+				Platform:        "gpt-proxy",
+				Action:          action,
+				Status:          TaskStatusSubmitted,
+				Progress:        "10%",
+				Data:            respBody,
+				CreatedAt:       time.Now(),
+				UpstreamTaskID:  upstreamTaskID,
+				ProviderBaseURL: provider.baseURL,
+				ProviderAPIKey:  provider.apiKey,
+			}
+			globalTaskStore.Insert(task)
+			log.Infof("task created (gpt-proxy): %s model=%s upstream=%s", task.ID, modelName, upstreamTaskID)
+
+			c.JSON(http.StatusOK, (&soraAdaptor{}).BuildClientResponse(task))
 			return
 		}
 
