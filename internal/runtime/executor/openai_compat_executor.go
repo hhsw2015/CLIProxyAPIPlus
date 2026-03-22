@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"net/textproto"
+	"net/url"
 	"regexp"
 	"sort"
 	"strconv"
@@ -246,7 +247,11 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	// are captured even when the upstream is an OpenAI-compatible provider.
 	translated, _ = sjson.SetBytes(translated, "stream_options.include_usage", true)
 
-	url := openAICompatRequestURL(baseURL, "/chat/completions")
+	streamEndpoint := "/chat/completions"
+	if opts.Alt == "responses/compact" {
+		streamEndpoint = "/responses/compact"
+	}
+	url := openAICompatRequestURL(baseURL, streamEndpoint)
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(translated))
 	if err != nil {
 		return nil, err
@@ -712,12 +717,27 @@ func openAICompatRequestURL(baseURL, endpoint string) string {
 	if endpoint == "" {
 		return strings.TrimSuffix(baseURL, "/")
 	}
-	trimmedBase := strings.TrimSuffix(baseURL, "/")
 	trimmedEndpoint := strings.TrimPrefix(endpoint, "/")
-	if strings.EqualFold(trimmedBase, endpoint) || strings.HasSuffix(strings.ToLower(trimmedBase), "/"+strings.ToLower(trimmedEndpoint)) {
-		return trimmedBase
+
+	// Parse URL to separate path from query string so that suffix
+	// matching works correctly for URLs with query parameters (e.g.,
+	// Azure: ...?api-version=2024-08-01-preview).
+	parsed, err := url.Parse(baseURL)
+	if err != nil {
+		trimmedBase := strings.TrimSuffix(baseURL, "/")
+		return trimmedBase + "/" + trimmedEndpoint
 	}
-	return trimmedBase + "/" + trimmedEndpoint
+	trimmedPath := strings.TrimSuffix(parsed.Path, "/")
+	if strings.EqualFold(trimmedPath, endpoint) || strings.HasSuffix(strings.ToLower(trimmedPath), "/"+strings.ToLower(trimmedEndpoint)) {
+		return strings.TrimSuffix(baseURL, "/")
+	}
+	// Azure Responses API uses /responses instead of /responses/compact.
+	// Match if the base path already ends with /responses.
+	if trimmedEndpoint == "responses/compact" && strings.HasSuffix(strings.ToLower(trimmedPath), "/responses") {
+		return strings.TrimSuffix(baseURL, "/")
+	}
+	parsed.Path = trimmedPath + "/" + trimmedEndpoint
+	return parsed.String()
 }
 
 func applySingularityHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string, stream bool) {

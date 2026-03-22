@@ -411,6 +411,16 @@ type ClaudeKey struct {
 	// ProxyURL overrides the global proxy setting for this API key if provided.
 	ProxyURL string `yaml:"proxy-url" json:"proxy-url"`
 
+	// AWSAccessKeyID is the AWS access key for Bedrock authentication (SigV4).
+	// When set, requests use AWS Bedrock instead of the Anthropic API.
+	AWSAccessKeyID string `yaml:"aws-access-key-id,omitempty" json:"aws-access-key-id,omitempty"`
+
+	// AWSSecretAccessKey is the AWS secret key for Bedrock authentication (SigV4).
+	AWSSecretAccessKey string `yaml:"aws-secret-access-key,omitempty" json:"aws-secret-access-key,omitempty"`
+
+	// AWSRegion is the AWS region for Bedrock requests (e.g., "us-east-1").
+	AWSRegion string `yaml:"aws-region,omitempty" json:"aws-region,omitempty"`
+
 	// Models defines upstream model names and aliases for request routing.
 	Models []ClaudeModel `yaml:"models" json:"models"`
 
@@ -424,7 +434,12 @@ type ClaudeKey struct {
 	Cloak *CloakConfig `yaml:"cloak,omitempty" json:"cloak,omitempty"`
 }
 
-func (k ClaudeKey) GetAPIKey() string  { return k.APIKey }
+func (k ClaudeKey) GetAPIKey() string {
+	if k.APIKey != "" {
+		return k.APIKey
+	}
+	return k.AWSAccessKeyID
+}
 func (k ClaudeKey) GetBaseURL() string { return k.BaseURL }
 
 // ClaudeModel describes a mapping between an alias and the actual upstream model name.
@@ -434,6 +449,10 @@ type ClaudeModel struct {
 
 	// Alias is the client-facing model name that maps to Name.
 	Alias string `yaml:"alias" json:"alias"`
+
+	// ModelID is the provider-specific model identifier (e.g., Bedrock inference profile ARN).
+	// When set, Name is used for client routing and ModelID is sent to the provider.
+	ModelID string `yaml:"model-id,omitempty" json:"model-id,omitempty"`
 }
 
 func (m ClaudeModel) GetName() string  { return m.Name }
