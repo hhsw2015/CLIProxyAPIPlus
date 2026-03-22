@@ -363,6 +363,8 @@ func (s *Server) setupRoutes() {
 	s.setupMediaRoutes(v1)
 	// Async task routes (video generation, music, etc.)
 	s.setupTaskRoutes(v1)
+	// gpt-proxy transparent passthrough (Veo, Imagen, etc. via chisel tunnel)
+	s.setupGptProxyRoutes(s.engine)
 
 	// Gemini compatible API routes
 	v1beta := s.engine.Group("/v1beta")

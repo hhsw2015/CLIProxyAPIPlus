@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -122,14 +123,30 @@ func (s *Server) taskSubmitHandler(platform string) gin.HandlerFunc {
 		}
 
 		// Build upstream request.
-		upstreamURL := adaptor.BuildRequestURL(provider.baseURL, action)
-		reqBody, contentType, err := adaptor.BuildRequestBody(c, body, modelName)
-		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{
-				"message": fmt.Sprintf("failed to build request: %v", err),
-				"type":    "invalid_request_error",
-			}})
-			return
+		// If the provider base-url is a gpt-proxy URL (contains /gpt-proxy/),
+		// use it as-is without letting the adaptor append paths.
+		upstreamURL := provider.baseURL
+		isPassthrough := strings.Contains(provider.baseURL, "/gpt-proxy/")
+		if !isPassthrough {
+			upstreamURL = adaptor.BuildRequestURL(provider.baseURL, action)
+		}
+
+		var reqBody io.Reader
+		var contentType string
+		if isPassthrough {
+			// gpt-proxy passthrough: send original body as-is.
+			reqBody = bytes.NewReader(body)
+			contentType = "application/json"
+		} else {
+			var err error
+			reqBody, contentType, err = adaptor.BuildRequestBody(c, body, modelName)
+			if err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{
+					"message": fmt.Sprintf("failed to build request: %v", err),
+					"type":    "invalid_request_error",
+				}})
+				return
+			}
 		}
 
 		upstreamReq, err := http.NewRequestWithContext(c.Request.Context(), http.MethodPost, upstreamURL, reqBody)
@@ -162,6 +179,18 @@ func (s *Server) taskSubmitHandler(platform string) gin.HandlerFunc {
 			errBody, _ := io.ReadAll(resp.Body)
 			log.Errorf("task submit: upstream returned %d for %s/%s: %s", resp.StatusCode, platform, modelName, string(errBody))
 			c.Data(resp.StatusCode, resp.Header.Get("Content-Type"), errBody)
+			return
+		}
+
+		// For gpt-proxy passthrough, forward the response directly.
+		if isPassthrough {
+			respBody, _ := io.ReadAll(resp.Body)
+			for k, vals := range resp.Header {
+				for _, v := range vals {
+					c.Writer.Header().Add(k, v)
+				}
+			}
+			c.Data(resp.StatusCode, resp.Header.Get("Content-Type"), respBody)
 			return
 		}
 
