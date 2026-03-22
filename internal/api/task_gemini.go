@@ -2,6 +2,7 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"golang.org/x/oauth2/google"
 )
 
 type geminiTaskAdaptor struct{}
@@ -23,20 +25,62 @@ func (a *geminiTaskAdaptor) ValidateAndSetAction(c *gin.Context, body []byte) (s
 
 func (a *geminiTaskAdaptor) BuildRequestURL(baseURL, action string) string {
 	base := strings.TrimSuffix(baseURL, "/")
-	// Gemini Veo: POST {base}/v1beta/models/{model}:predictLongRunning
-	// For Imagen: POST {base}/v1beta/models/{model}:predict
-	// We'll use the base URL as-is since it should contain the full path.
 	if strings.Contains(base, ":predictLongRunning") || strings.Contains(base, ":predict") {
 		return base
 	}
+	// Vertex AI endpoint: contains aiplatform.googleapis.com
+	// Needs project ID from credentials — handled in BuildRequestHeader
+	if strings.Contains(base, "aiplatform.googleapis.com") {
+		return base // Full URL already constructed
+	}
+	// Gemini API key mode: generativelanguage.googleapis.com
 	return base + "/v1beta/models/veo-3.0-generate-001:predictLongRunning"
 }
 
 func (a *geminiTaskAdaptor) BuildRequestHeader(req *http.Request, apiKey string) {
 	req.Header.Set("Accept", "application/json")
-	if apiKey != "" {
-		req.Header.Set("x-goog-api-key", apiKey)
+	if apiKey == "" {
+		return
 	}
+	// If apiKey looks like a service account JSON (starts with '{'),
+	// use Vertex OAuth to get a Bearer token.
+	if strings.HasPrefix(strings.TrimSpace(apiKey), "{") {
+		token, projectID, err := acquireVertexOAuthToken(apiKey)
+		if err == nil && token != "" {
+			req.Header.Set("Authorization", "Bearer "+token)
+			if projectID != "" {
+				req.Header.Set("x-goog-user-project", projectID)
+			}
+			return
+		}
+		// Fall through to API key mode on failure.
+	}
+	// Default: Gemini API key mode.
+	req.Header.Set("x-goog-api-key", apiKey)
+}
+
+// acquireVertexOAuthToken exchanges a service account JSON for an OAuth2 access token.
+// The apiKey field contains the full service account JSON.
+func acquireVertexOAuthToken(saJSON string) (token, projectID string, err error) {
+	var sa struct {
+		ProjectID string `json:"project_id"`
+	}
+	if err := json.Unmarshal([]byte(saJSON), &sa); err != nil {
+		return "", "", fmt.Errorf("parse service account: %w", err)
+	}
+	creds, err := google.CredentialsFromJSON(
+		context.Background(),
+		[]byte(saJSON),
+		"https://www.googleapis.com/auth/cloud-platform",
+	)
+	if err != nil {
+		return "", "", fmt.Errorf("credentials from json: %w", err)
+	}
+	tok, err := creds.TokenSource.Token()
+	if err != nil {
+		return "", "", fmt.Errorf("get token: %w", err)
+	}
+	return tok.AccessToken, sa.ProjectID, nil
 }
 
 func (a *geminiTaskAdaptor) BuildRequestBody(c *gin.Context, body []byte, model string) (io.Reader, string, error) {
@@ -91,20 +135,78 @@ func (a *geminiTaskAdaptor) ParseSubmitResponse(resp *http.Response) (string, []
 }
 
 func (a *geminiTaskAdaptor) FetchTask(baseURL, apiKey, upstreamTaskID, action string) (*http.Response, error) {
-	// Decode the operation name.
 	nameBytes, err := base64.RawURLEncoding.DecodeString(upstreamTaskID)
 	if err != nil {
 		return nil, fmt.Errorf("decode task ID: %w", err)
 	}
 	operationName := string(nameBytes)
 
-	url := strings.TrimSuffix(baseURL, "/") + "/v1beta/" + operationName
-	req, err := http.NewRequest(http.MethodGet, url, nil)
+	// For Vertex AI, the operation name contains the full path including project/location.
+	// Use fetchPredictOperation endpoint if it looks like a Vertex operation.
+	var fetchURL string
+	if strings.Contains(operationName, "projects/") {
+		// Vertex AI: POST fetchPredictOperation
+		region := extractRegionFromName(operationName)
+		project := extractProjectFromName(operationName)
+		modelName := extractModelFromName(operationName)
+		if region == "" {
+			region = "us-central1"
+		}
+		if region == "global" {
+			fetchURL = fmt.Sprintf("https://aiplatform.googleapis.com/v1/projects/%s/locations/global/publishers/google/models/%s:fetchPredictOperation", project, modelName)
+		} else {
+			fetchURL = fmt.Sprintf("https://%s-aiplatform.googleapis.com/v1/projects/%s/locations/%s/publishers/google/models/%s:fetchPredictOperation", region, project, region, modelName)
+		}
+		payload, _ := json.Marshal(map[string]string{"operationName": operationName})
+		req, err := http.NewRequest(http.MethodPost, fetchURL, bytes.NewReader(payload))
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Content-Type", "application/json")
+		a.BuildRequestHeader(req, apiKey)
+		return (&http.Client{Timeout: 30 * time.Second}).Do(req)
+	}
+
+	// Gemini API key mode: GET operation status.
+	fetchURL = strings.TrimSuffix(baseURL, "/") + "/v1beta/" + operationName
+	req, err := http.NewRequest(http.MethodGet, fetchURL, nil)
 	if err != nil {
 		return nil, err
 	}
 	a.BuildRequestHeader(req, apiKey)
 	return (&http.Client{Timeout: 30 * time.Second}).Do(req)
+}
+
+// Helper functions for extracting components from Vertex operation names.
+func extractRegionFromName(name string) string {
+	// Pattern: projects/xxx/locations/REGION/...
+	parts := strings.Split(name, "/")
+	for i, p := range parts {
+		if p == "locations" && i+1 < len(parts) {
+			return parts[i+1]
+		}
+	}
+	return ""
+}
+
+func extractProjectFromName(name string) string {
+	parts := strings.Split(name, "/")
+	for i, p := range parts {
+		if p == "projects" && i+1 < len(parts) {
+			return parts[i+1]
+		}
+	}
+	return ""
+}
+
+func extractModelFromName(name string) string {
+	parts := strings.Split(name, "/")
+	for i, p := range parts {
+		if p == "models" && i+1 < len(parts) {
+			return parts[i+1]
+		}
+	}
+	return ""
 }
 
 func (a *geminiTaskAdaptor) ParseTaskResult(respBody []byte) (*TaskInfo, error) {
