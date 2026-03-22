@@ -101,15 +101,21 @@ func (s *ConfigSynthesizer) synthesizeClaudeKeys(ctx *SynthesisContext) []*corea
 	for i := range cfg.ClaudeKey {
 		ck := cfg.ClaudeKey[i]
 		key := strings.TrimSpace(ck.APIKey)
-		if key == "" {
+		ak := strings.TrimSpace(ck.AWSAccessKeyID)
+		if key == "" && ak == "" {
 			continue
 		}
 		prefix := strings.TrimSpace(ck.Prefix)
 		base := strings.TrimSpace(ck.BaseURL)
-		id, token := idGen.Next("claude:apikey", key, base)
+		// For Bedrock entries, use AK as the matching key.
+		idKey := key
+		if idKey == "" {
+			idKey = ak
+		}
+		id, token := idGen.Next("claude:apikey", idKey, base)
 		attrs := map[string]string{
 			"source":  fmt.Sprintf("config:claude[%s]", token),
-			"api_key": key,
+			"api_key": idKey,
 		}
 		if ck.Priority != 0 {
 			attrs["priority"] = strconv.Itoa(ck.Priority)
@@ -121,6 +127,11 @@ func (s *ConfigSynthesizer) synthesizeClaudeKeys(ctx *SynthesisContext) []*corea
 			attrs["models_hash"] = hash
 		}
 		addConfigHeadersToAttrs(ck.Headers, attrs)
+		if ak != "" {
+			attrs["aws_access_key_id"] = ak
+			attrs["aws_secret_access_key"] = strings.TrimSpace(ck.AWSSecretAccessKey)
+			attrs["aws_region"] = strings.TrimSpace(ck.AWSRegion)
+		}
 		proxyURL := strings.TrimSpace(ck.ProxyURL)
 		a := &coreauth.Auth{
 			ID:         id,
