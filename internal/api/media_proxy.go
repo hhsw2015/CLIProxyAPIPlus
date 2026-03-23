@@ -28,6 +28,7 @@ var (
 	mediaAudioTTS   = mediaEndpoint{pathSuffix: "audio/speech", contentType: "application/json"}
 	mediaAudioSTT   = mediaEndpoint{pathSuffix: "audio/transcriptions", contentType: "", isMultipart: true}
 	mediaAudioTrans = mediaEndpoint{pathSuffix: "audio/translations", contentType: "", isMultipart: true}
+	mediaEmbeddings = mediaEndpoint{pathSuffix: "embeddings", contentType: "application/json"}
 )
 
 // mediaProviderConfig holds the resolved upstream provider details.
@@ -42,6 +43,7 @@ func (s *Server) setupMediaRoutes(v1 *gin.RouterGroup) {
 	v1.POST("/audio/speech", s.mediaProxyHandler(mediaAudioTTS))
 	v1.POST("/audio/transcriptions", s.mediaProxyHandler(mediaAudioSTT))
 	v1.POST("/audio/translations", s.mediaProxyHandler(mediaAudioTrans))
+	v1.POST("/embeddings", s.mediaProxyHandler(mediaEmbeddings))
 }
 
 // mediaProxyHandler returns a gin handler that transparently proxies media requests
