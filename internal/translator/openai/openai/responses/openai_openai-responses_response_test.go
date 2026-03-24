@@ -19,7 +19,9 @@ func feedChunks(t *testing.T, chunks []string) []string {
 		events := ConvertOpenAIChatCompletionsResponseToOpenAIResponses(
 			context.Background(), "gpt-5.4", nil, nil, []byte(c), &param,
 		)
-		all = append(all, events...)
+		for _, ev := range events {
+			all = append(all, string(ev))
+		}
 	}
 	return all
 }

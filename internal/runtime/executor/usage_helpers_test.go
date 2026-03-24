@@ -2,6 +2,7 @@ package executor
 
 import (
 	"testing"
+	"time"
 
 	coreusage "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
 )
@@ -101,5 +102,21 @@ func TestPreferRicherUsageDetail(t *testing.T) {
 	}
 	if got.TotalTokens != 613 {
 		t.Fatalf("TotalTokens = %d, want 613", got.TotalTokens)
+	}
+}
+
+func TestUsageReporterBuildRecordIncludesLatency(t *testing.T) {
+	reporter := &usageReporter{
+		provider:    "openai",
+		model:       "gpt-5.4",
+		requestedAt: time.Now().Add(-1500 * time.Millisecond),
+	}
+
+	record := reporter.buildRecord(coreusage.Detail{TotalTokens: 3}, false)
+	if record.Latency < time.Second {
+		t.Fatalf("latency = %v, want >= 1s", record.Latency)
+	}
+	if record.Latency > 3*time.Second {
+		t.Fatalf("latency = %v, want <= 3s", record.Latency)
 	}
 }
