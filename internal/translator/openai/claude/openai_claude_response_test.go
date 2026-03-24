@@ -1,10 +1,15 @@
 package claude
 
 import (
+	"bytes"
 	"context"
 	"strings"
 	"testing"
 )
+
+func joinBytes(parts [][]byte) string {
+	return string(bytes.Join(parts, nil))
+}
 
 func TestConvertOpenAIResponseToClaude_StreamSkipsToolUseStartWhenNameEmpty(t *testing.T) {
 	var param any
@@ -18,7 +23,7 @@ func TestConvertOpenAIResponseToClaude_StreamSkipsToolUseStartWhenNameEmpty(t *t
 		&param,
 	)
 
-	joined := strings.Join(got, "")
+	joined := joinBytes(got)
 	if !strings.Contains(joined, `"type":"message_start"`) {
 		t.Fatalf("expected message_start in output, got %q", joined)
 	}
@@ -48,8 +53,8 @@ func TestConvertOpenAIResponseToClaude_StreamStartsToolUseOnlyOncePerIndex(t *te
 		&param,
 	)
 
-	firstJoined := strings.Join(first, "")
-	secondJoined := strings.Join(second, "")
+	firstJoined := joinBytes(first)
+	secondJoined := joinBytes(second)
 	if count := strings.Count(firstJoined, `"type":"tool_use"`); count != 1 {
 		t.Fatalf("expected first chunk to open one tool_use block, got %d in %q", count, firstJoined)
 	}
@@ -73,7 +78,7 @@ func TestConvertOpenAIResponseToClaude_StreamUsesChoiceIndexAndRootFinishReason(
 
 	var all string
 	for _, chunk := range chunks {
-		all += strings.Join(ConvertOpenAIResponseToClaude(context.Background(), "claude-opus-4.5", originalRequest, nil, chunk, &param), "")
+		all += joinBytes(ConvertOpenAIResponseToClaude(context.Background(), "claude-opus-4.5", originalRequest, nil, chunk, &param))
 	}
 	state := param.(*ConvertOpenAIResponseToAnthropicParams)
 	if got := state.ToolCallsAccumulator[1000].Arguments.String(); got == "" {
