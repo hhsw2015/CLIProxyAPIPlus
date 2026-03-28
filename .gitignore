@@ -1,8 +1,9 @@
 # Binaries
 cli-proxy-api
-cliproxy
+/cliproxy
 CLIProxyAPI
 cpa-new-server
+/server
 *.exe
 
 
