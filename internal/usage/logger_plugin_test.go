@@ -94,3 +94,60 @@ func TestRequestStatisticsMergeSnapshotDedupIgnoresLatency(t *testing.T) {
 		t.Fatalf("details len = %d, want 1", len(details))
 	}
 }
+
+func TestRequestStatisticsMergeSnapshotKeepsDistinctClientIPs(t *testing.T) {
+	stats := NewRequestStatistics()
+	timestamp := time.Date(2026, 3, 20, 12, 0, 0, 0, time.UTC)
+	snapshot := StatisticsSnapshot{
+		APIs: map[string]APISnapshot{
+			"test-key": {
+				Models: map[string]ModelSnapshot{
+					"gpt-5.4": {
+						Details: []RequestDetail{
+							{
+								Timestamp: timestamp,
+								Source:    "user@example.com",
+								ClientIP:  "198.51.100.1",
+								AuthIndex: "0",
+								Tokens: TokenStats{
+									InputTokens:  10,
+									OutputTokens: 20,
+									TotalTokens:  30,
+								},
+							},
+							{
+								Timestamp: timestamp,
+								Source:    "user@example.com",
+								ClientIP:  "198.51.100.2",
+								AuthIndex: "0",
+								Tokens: TokenStats{
+									InputTokens:  10,
+									OutputTokens: 20,
+									TotalTokens:  30,
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	result := stats.MergeSnapshot(snapshot)
+	if result.Added != 2 || result.Skipped != 0 {
+		t.Fatalf("merge = %+v, want added=2 skipped=0", result)
+	}
+
+	details := stats.Snapshot().APIs["test-key"].Models["gpt-5.4"].Details
+	if len(details) != 2 {
+		t.Fatalf("details len = %d, want 2", len(details))
+	}
+
+	seenIPs := make(map[string]bool, len(details))
+	for _, detail := range details {
+		seenIPs[detail.ClientIP] = true
+	}
+	if !seenIPs["198.51.100.1"] || !seenIPs["198.51.100.2"] {
+		t.Fatalf("details client_ip set = %#v, want both client IPs preserved", seenIPs)
+	}
+}
