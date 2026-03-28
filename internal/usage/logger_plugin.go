@@ -34,6 +34,8 @@ type LoggerPlugin struct {
 //   - *LoggerPlugin: A new logger plugin instance wired to the shared statistics store.
 func NewLoggerPlugin() *LoggerPlugin { return &LoggerPlugin{stats: defaultRequestStatistics} }
 
+const ginProviderKey = "__provider__"
+
 // HandleUsage implements coreusage.Plugin.
 // It updates the in-memory statistics store whenever a usage record is received.
 //
@@ -47,7 +49,26 @@ func (p *LoggerPlugin) HandleUsage(ctx context.Context, record coreusage.Record)
 	if p == nil || p.stats == nil {
 		return
 	}
+	// Store provider name in gin context so GinLogrusLogger can include it in the access log.
+	if provider := strings.TrimSpace(record.Provider); provider != "" {
+		if ginCtx, ok := ctx.Value("gin").(*gin.Context); ok && ginCtx != nil {
+			ginCtx.Set(ginProviderKey, provider)
+		}
+	}
 	p.stats.Record(ctx, record)
+}
+
+// GetGinProvider returns the provider name stored in the gin context, or empty string.
+func GetGinProvider(c *gin.Context) string {
+	if c == nil {
+		return ""
+	}
+	val, exists := c.Get(ginProviderKey)
+	if !exists {
+		return ""
+	}
+	s, _ := val.(string)
+	return s
 }
 
 // SetStatisticsEnabled toggles whether in-memory statistics are recorded.
