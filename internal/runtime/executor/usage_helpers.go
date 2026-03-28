@@ -223,6 +223,11 @@ func apiKeyFromContext(ctx context.Context) string {
 
 func resolveUsageSource(auth *cliproxyauth.Auth, ctxAPIKey string) string {
 	if auth != nil {
+		// Prefer label (= config entry name, e.g. "azure-gpt54", "huo-07-gpt52")
+		// so the usage logs show a human-readable provider name instead of a raw key.
+		if label := strings.TrimSpace(auth.Label); label != "" {
+			return label
+		}
 		provider := strings.TrimSpace(auth.Provider)
 		if strings.EqualFold(provider, "gemini-cli") {
 			if id := strings.TrimSpace(auth.ID); id != "" {
