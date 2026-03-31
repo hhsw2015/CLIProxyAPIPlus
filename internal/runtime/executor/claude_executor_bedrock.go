@@ -92,10 +92,12 @@ func (e *ClaudeExecutor) resolveBedrockModelID(auth *cliproxyauth.Auth, clientMo
 }
 
 // prepareBedrockBody adapts an Anthropic Messages API body for Bedrock:
-// removes "model" and "stream" fields, sets "anthropic_version".
+// removes "model", "stream" and any OpenAI-only fields not supported by Bedrock.
 func prepareBedrockBody(body []byte) []byte {
 	body, _ = sjson.DeleteBytes(body, "model")
 	body, _ = sjson.DeleteBytes(body, "stream")
+	// context_management is an OpenAI Responses API field; Bedrock rejects it.
+	body, _ = sjson.DeleteBytes(body, "context_management")
 	if gjson.GetBytes(body, "anthropic_version").String() == "" {
 		body, _ = sjson.SetBytes(body, "anthropic_version", "bedrock-2023-05-31")
 	}
