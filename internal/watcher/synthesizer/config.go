@@ -112,7 +112,10 @@ func (s *ConfigSynthesizer) synthesizeClaudeKeys(ctx *SynthesisContext) []*corea
 		if idKey == "" {
 			idKey = ak
 		}
-		id, token := idGen.Next("claude:apikey", idKey, base)
+		// Include region in ID generation so that multiple entries for the same AK
+		// but different regions get distinct auth IDs and participate in round-robin.
+		region := strings.TrimSpace(ck.AWSRegion)
+		id, token := idGen.Next("claude:apikey", idKey, base, region)
 		attrs := map[string]string{
 			"source":  fmt.Sprintf("config:claude[%s]", token),
 			"api_key": idKey,
