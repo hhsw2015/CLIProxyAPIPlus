@@ -65,8 +65,10 @@ func (e *ClaudeExecutor) resolveBedrockModelID(auth *cliproxyauth.Auth, clientMo
 		return clientModel
 	}
 	attrKey := ""
+	attrRegion := ""
 	if auth != nil && auth.Attributes != nil {
 		attrKey = auth.Attributes["api_key"]
+		attrRegion = strings.TrimSpace(auth.Attributes["aws_region"])
 	}
 	for i := range e.cfg.ClaudeKey {
 		ck := &e.cfg.ClaudeKey[i]
@@ -75,6 +77,11 @@ func (e *ClaudeExecutor) resolveBedrockModelID(auth *cliproxyauth.Auth, clientMo
 		}
 		// Match by AK (stored as api_key in attributes).
 		if strings.TrimSpace(ck.AWSAccessKeyID) != attrKey {
+			continue
+		}
+		// When multiple entries share the same AK (different regions), also match by region
+		// to ensure the ARN corresponds to the correct regional endpoint.
+		if attrRegion != "" && strings.TrimSpace(ck.AWSRegion) != "" && strings.TrimSpace(ck.AWSRegion) != attrRegion {
 			continue
 		}
 		for j := range ck.Models {
