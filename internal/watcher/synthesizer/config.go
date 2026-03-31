@@ -133,10 +133,25 @@ func (s *ConfigSynthesizer) synthesizeClaudeKeys(ctx *SynthesisContext) []*corea
 			attrs["aws_region"] = strings.TrimSpace(ck.AWSRegion)
 		}
 		proxyURL := strings.TrimSpace(ck.ProxyURL)
+		label := "claude-apikey"
+		if ak != "" {
+			label = ak
+		}
+		if base != "" {
+			if strings.Contains(base, "127.0.0.1:18081") && strings.Contains(base, "/gpt-proxy/xmind") {
+				label = "xmind-gpt-proxy"
+			} else if strings.Contains(base, "44.192.254.88:8080") {
+				label = "ccp"
+			} else if strings.Contains(base, "poloai.top") {
+				label = "polo"
+			} else if strings.Contains(base, "yes.vg") {
+				label = "yesvg"
+			}
+		}
 		a := &coreauth.Auth{
 			ID:         id,
 			Provider:   "claude",
-			Label:      "claude-apikey",
+			Label:      label,
 			Prefix:     prefix,
 			Status:     coreauth.StatusActive,
 			ProxyURL:   proxyURL,
