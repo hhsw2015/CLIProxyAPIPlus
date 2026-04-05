@@ -1,6 +1,9 @@
 package cliproxy
 
-import "time"
+import (
+	"context"
+	"time"
+)
 
 // PoolState represents the current membership state of an auth inside the pool manager.
 type PoolState string
@@ -60,4 +63,17 @@ type PoolSnapshot struct {
 	ReserveCount  int
 	LowQuotaCount int
 	LimitCount    int
+}
+
+type dispositionSourceKey struct{}
+
+func WithDispositionSource(ctx context.Context, source string) context.Context {
+	return context.WithValue(ctx, dispositionSourceKey{}, source)
+}
+
+func DispositionSource(ctx context.Context) string {
+	if v, ok := ctx.Value(dispositionSourceKey{}).(string); ok {
+		return v
+	}
+	return ""
 }

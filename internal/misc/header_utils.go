@@ -60,11 +60,16 @@ func ScrubProxyAndFingerprintHeaders(req *http.Request) {
 	}
 
 	// --- Proxy tracing headers ---
-	req.Header.Del("X-Forwarded-For")
+	// DO NOT delete if explicitly set by the caller (indicated by non-empty value)
+	if req.Header.Get("X-Forwarded-For") == "" {
+		req.Header.Del("X-Forwarded-For")
+	}
 	req.Header.Del("X-Forwarded-Host")
 	req.Header.Del("X-Forwarded-Proto")
 	req.Header.Del("X-Forwarded-Port")
-	req.Header.Del("X-Real-IP")
+	if req.Header.Get("X-Real-IP") == "" {
+		req.Header.Del("X-Real-IP")
+	}
 	req.Header.Del("Forwarded")
 	req.Header.Del("Via")
 

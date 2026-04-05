@@ -16,6 +16,7 @@ import (
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
 	log "github.com/sirupsen/logrus"
@@ -209,7 +210,7 @@ func (e *ClaudeExecutor) executeStreamBedrock(ctx context.Context, auth *cliprox
 			// Log and extract usage from the chunk.
 			sseDataLine := bytes.Join([][]byte{[]byte("data: "), jsonBytes}, nil)
 			appendAPIResponseChunk(ctx, e.cfg, sseDataLine)
-			if detail, ok := parseClaudeStreamUsage(sseDataLine); ok {
+			if detail, ok := helps.ParseClaudeStreamUsage(sseDataLine); ok {
 				reporter.publish(ctx, detail)
 			}
 
