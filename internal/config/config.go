@@ -94,6 +94,12 @@ type Config struct {
 	// Default: 2 seconds. Set to 0 to disable the delay.
 	SkyworkThrottleDelaySeconds int `yaml:"skywork-throttle-delay-seconds" json:"skywork-throttle-delay-seconds"`
 
+	// RefusalShield configures automatic refusal detection and retry for streaming responses.
+	// When enabled, the proxy inspects the first bytes of each streaming response for known
+	// refusal patterns and transparently retries with a rewritten conversation history.
+	// Default: disabled (zero-value struct). Enable by setting refusal-shield.enabled: true.
+	RefusalShield RefusalShieldConfig `yaml:"refusal-shield,omitempty" json:"refusal-shield,omitempty"`
+
 	// PoolManager maintains a bounded healthy auth buffer for routing when enabled.
 	PoolManager PoolManagerConfig `yaml:"pool-manager,omitempty" json:"pool-manager,omitempty"`
 
@@ -236,6 +242,73 @@ type RoutingConfig struct {
 	// Strategy selects the credential selection strategy.
 	// Supported values: "round-robin" (default), "fill-first".
 	Strategy string `yaml:"strategy,omitempty" json:"strategy,omitempty"`
+}
+
+// RefusalShieldConfig configures automatic refusal detection and transparent retry.
+// When enabled, the first bytes of each streaming response are inspected for known
+// refusal patterns. On match, the conversation history is rewritten and the request
+// is retried through the normal credential rotation loop.
+type RefusalShieldConfig struct {
+	// Enabled activates refusal detection. Default: false.
+	Enabled bool `yaml:"enabled" json:"enabled"`
+	// MaxRetries limits how many refusal-triggered retries are attempted per request.
+	// Default: 2. The value is capped at 5 to prevent runaway loops.
+	MaxRetries int `yaml:"max-retries,omitempty" json:"max-retries,omitempty"`
+	// PeekBytes controls how many initial response bytes are buffered for refusal
+	// detection. Larger values improve recall at the cost of slightly delayed first
+	// token delivery. Default: 256. Range: 64-1024.
+	PeekBytes int `yaml:"peek-bytes,omitempty" json:"peek-bytes,omitempty"`
+	// AIRewrite enables calling an external model to generate a context-aware
+	// cooperative replacement instead of using static templates.
+	// Requires AIRewriteEndpoint to be set. Default: false.
+	AIRewrite bool `yaml:"ai-rewrite,omitempty" json:"ai-rewrite,omitempty"`
+	// AIRewriteEndpoint is the OpenAI-compatible chat completions URL used for
+	// generating rewritten responses. Any provider that implements the
+	// POST /v1/chat/completions interface works (OpenAI, Ollama, LM Studio,
+	// vLLM, Azure OpenAI, self-hosted, etc.).
+	// Example: "https://api.openai.com/v1/chat/completions"
+	// Example: "http://localhost:11434/v1/chat/completions"  (Ollama)
+	AIRewriteEndpoint string `yaml:"ai-rewrite-endpoint,omitempty" json:"ai-rewrite-endpoint,omitempty"`
+	// AIRewriteKey is the Bearer token for the rewrite endpoint. Leave empty for
+	// local models that don't require authentication (e.g. Ollama).
+	AIRewriteKey string `yaml:"ai-rewrite-key,omitempty" json:"ai-rewrite-key,omitempty"`
+	// AIRewriteModel is the model identifier sent to the rewrite endpoint.
+	// Default: "gpt-4o-mini". Use any model available on your endpoint.
+	AIRewriteModel string `yaml:"ai-rewrite-model,omitempty" json:"ai-rewrite-model,omitempty"`
+	// AIRewriteTimeoutSeconds controls the maximum wait time for the rewrite call.
+	// Default: 10. If the rewrite times out, falls back to static templates.
+	AIRewriteTimeoutSeconds int `yaml:"ai-rewrite-timeout-seconds,omitempty" json:"ai-rewrite-timeout-seconds,omitempty"`
+	// ExtraStrongPatterns adds custom strong-match patterns (matched anywhere in text).
+	ExtraStrongPatterns []string `yaml:"extra-strong-patterns,omitempty" json:"extra-strong-patterns,omitempty"`
+	// ExtraWeakPatterns adds custom weak-match patterns (matched only in prefix).
+	ExtraWeakPatterns []string `yaml:"extra-weak-patterns,omitempty" json:"extra-weak-patterns,omitempty"`
+}
+
+// RefusalShieldDefaults returns a RefusalShieldConfig with sensible defaults applied.
+func RefusalShieldDefaults(c RefusalShieldConfig) RefusalShieldConfig {
+	if c.MaxRetries <= 0 {
+		c.MaxRetries = 2
+	}
+	if c.MaxRetries > 5 {
+		c.MaxRetries = 5
+	}
+	if c.PeekBytes <= 0 {
+		c.PeekBytes = 256
+	}
+	if c.PeekBytes < 64 {
+		c.PeekBytes = 64
+	}
+	if c.PeekBytes > 1024 {
+		c.PeekBytes = 1024
+	}
+	if c.AIRewriteModel == "" {
+		c.AIRewriteModel = "gpt-4o-mini"
+	}
+	if c.AIRewriteTimeoutSeconds <= 0 {
+		c.AIRewriteTimeoutSeconds = 10
+	}
+	// AI rewrite with no endpoint = use CPA's own provider pool (no override needed).
+	return c
 }
 
 // PoolManagerConfig configures the optional runtime auth pool manager.

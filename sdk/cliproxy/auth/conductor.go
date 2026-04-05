@@ -1190,6 +1190,20 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			close(closedCh)
 			remaining = closedCh
 		}
+
+		// Refusal Shield: inspect buffered bootstrap chunks for model refusal.
+		// This check is a no-op when refusal-shield is disabled in config.
+		if shieldCfg := m.refusalShieldConfig(); shieldCfg != nil {
+			if shieldErr := m.refusalShieldCheck(ctx, shieldCfg, buffered, req.Payload); shieldErr != nil {
+				discardStreamChunks(remaining)
+				if rse, ok := shieldErr.(*refusalShieldError); ok {
+					req.Payload = rse.rewrittenPayload
+				}
+				lastErr = shieldErr
+				continue
+			}
+		}
+
 		if IsSkyworkFallbackAuth(auth) {
 			ClearSkyworkModelCooldown(execModel)
 		}
@@ -2325,6 +2339,9 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 					case 408, 500, 502, 503, 504:
 						if quotaCooldownDisabledForAuth(auth) {
 							state.NextRetryAfter = time.Time{}
+						} else if isTemporaryTransportFailure(statusCode, strings.ToLower(strings.TrimSpace(failedAuthArchiveText(result.Error)))) {
+							next := now.Add(3 * time.Minute)
+							state.NextRetryAfter = next
 						} else {
 							next := now.Add(1 * time.Minute)
 							state.NextRetryAfter = next
@@ -2679,6 +2696,7 @@ func isGenericInvalidArchiveCandidate(status int, message string) bool {
 	}
 }
 
+
 func containsAnyFold(value string, targets ...string) bool {
 	if value == "" {
 		return false
@@ -2692,6 +2710,28 @@ func containsAnyFold(value string, targets ...string) bool {
 		}
 	}
 	return false
+}
+
+func isTemporaryTransportFailure(status int, message string) bool {
+	if containsAnyFold(message,
+		"context canceled",
+		"context cancelled",
+		"deadline exceeded",
+		"client.timeout",
+		"timeout",
+		"i/o timeout",
+		"connection reset by peer",
+		"connection refused",
+		"unexpected eof",
+	) {
+		return true
+	}
+	switch status {
+	case http.StatusRequestTimeout, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+		return true
+	default:
+		return false
+	}
 }
 
 func (m *Manager) authIDsForSourcePathLocked(sourcePath string) []string {
@@ -3044,6 +3084,8 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 		auth.StatusMessage = "transient upstream error"
 		if quotaCooldownDisabledForAuth(auth) {
 			auth.NextRetryAfter = time.Time{}
+		} else if isTemporaryTransportFailure(statusCode, strings.ToLower(strings.TrimSpace(failedAuthArchiveText(resultErr)))) {
+			auth.NextRetryAfter = now.Add(3 * time.Minute)
 		} else {
 			auth.NextRetryAfter = now.Add(1 * time.Minute)
 		}
