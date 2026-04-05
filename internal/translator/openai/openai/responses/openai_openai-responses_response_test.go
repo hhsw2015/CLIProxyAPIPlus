@@ -2,226 +2,304 @@ package responses
 
 import (
 	"context"
-	"encoding/json"
 	"strings"
 	"testing"
 
 	"github.com/tidwall/gjson"
 )
 
-// feedChunks sends a sequence of SSE data lines through the streaming converter
-// and returns all emitted response events concatenated.
-func feedChunks(t *testing.T, chunks []string) []string {
+func parseOpenAIResponsesSSEEvent(t *testing.T, chunk []byte) (string, gjson.Result) {
 	t.Helper()
+
+	lines := strings.Split(string(chunk), "\n")
+	if len(lines) < 2 {
+		t.Fatalf("unexpected SSE chunk: %q", chunk)
+	}
+
+	event := strings.TrimSpace(strings.TrimPrefix(lines[0], "event:"))
+	dataLine := strings.TrimSpace(strings.TrimPrefix(lines[1], "data:"))
+	if !gjson.Valid(dataLine) {
+		t.Fatalf("invalid SSE data JSON: %q", dataLine)
+	}
+	return event, gjson.Parse(dataLine)
+}
+
+func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_MultipleToolCallsRemainSeparate(t *testing.T) {
+	in := []string{
+		`data: {"id":"resp_test","object":"chat.completion.chunk","created":1773896263,"model":"model","choices":[{"index":0,"delta":{"role":"assistant","content":null,"reasoning_content":null,"tool_calls":[{"index":0,"id":"call_read","type":"function","function":{"name":"read","arguments":""}}]},"finish_reason":null}]}`,
+		`data: {"id":"resp_test","object":"chat.completion.chunk","created":1773896263,"model":"model","choices":[{"index":0,"delta":{"role":null,"content":null,"reasoning_content":null,"tool_calls":[{"index":0,"function":{"arguments":"{\"filePath\":\"C:\\\\repo\",\"limit\":400,\"offset\":1}"}}]},"finish_reason":null}]}`,
+		`data: {"id":"resp_test","object":"chat.completion.chunk","created":1773896263,"model":"model","choices":[{"index":0,"delta":{"role":"assistant","content":null,"reasoning_content":null,"tool_calls":[{"index":1,"id":"call_glob","type":"function","function":{"name":"glob","arguments":""}}]},"finish_reason":null}]}`,
+		`data: {"id":"resp_test","object":"chat.completion.chunk","created":1773896263,"model":"model","choices":[{"index":0,"delta":{"role":null,"content":null,"reasoning_content":null,"tool_calls":[{"index":1,"function":{"arguments":"{\"path\":\"C:\\\\repo\",\"pattern\":\"*.{yml,yaml}\"}"}}]},"finish_reason":null}]}`,
+		`data: {"id":"resp_test","object":"chat.completion.chunk","created":1773896263,"model":"model","choices":[{"index":0,"delta":{"role":null,"content":null,"reasoning_content":null,"tool_calls":null},"finish_reason":"tool_calls"}],"usage":{"completion_tokens":10,"total_tokens":20,"prompt_tokens":10}}`,
+	}
+
+	request := []byte(`{"model":"gpt-5.4","tool_choice":"auto","parallel_tool_calls":true}`)
+
 	var param any
-	var all []string
-	for _, c := range chunks {
-		events := ConvertOpenAIChatCompletionsResponseToOpenAIResponses(
-			context.Background(), "gpt-5.4", nil, nil, []byte(c), &param,
-		)
-		for _, ev := range events {
-			all = append(all, string(ev))
+	var out [][]byte
+	for _, line := range in {
+		out = append(out, ConvertOpenAIChatCompletionsResponseToOpenAIResponses(context.Background(), "model", request, request, []byte(line), &param)...)
+	}
+
+	addedNames := map[string]string{}
+	doneArgs := map[string]string{}
+	doneNames := map[string]string{}
+	outputItems := map[string]gjson.Result{}
+
+	for _, chunk := range out {
+		ev, data := parseOpenAIResponsesSSEEvent(t, chunk)
+		switch ev {
+		case "response.output_item.added":
+			if data.Get("item.type").String() != "function_call" {
+				continue
+			}
+			addedNames[data.Get("item.call_id").String()] = data.Get("item.name").String()
+		case "response.output_item.done":
+			if data.Get("item.type").String() != "function_call" {
+				continue
+			}
+			callID := data.Get("item.call_id").String()
+			doneArgs[callID] = data.Get("item.arguments").String()
+			doneNames[callID] = data.Get("item.name").String()
+		case "response.completed":
+			output := data.Get("response.output")
+			for _, item := range output.Array() {
+				if item.Get("type").String() == "function_call" {
+					outputItems[item.Get("call_id").String()] = item
+				}
+			}
 		}
 	}
-	return all
+
+	if len(addedNames) != 2 {
+		t.Fatalf("expected 2 function_call added events, got %d", len(addedNames))
+	}
+	if len(doneArgs) != 2 {
+		t.Fatalf("expected 2 function_call done events, got %d", len(doneArgs))
+	}
+
+	if addedNames["call_read"] != "read" {
+		t.Fatalf("unexpected added name for call_read: %q", addedNames["call_read"])
+	}
+	if addedNames["call_glob"] != "glob" {
+		t.Fatalf("unexpected added name for call_glob: %q", addedNames["call_glob"])
+	}
+
+	if !gjson.Valid(doneArgs["call_read"]) {
+		t.Fatalf("invalid JSON args for call_read: %q", doneArgs["call_read"])
+	}
+	if !gjson.Valid(doneArgs["call_glob"]) {
+		t.Fatalf("invalid JSON args for call_glob: %q", doneArgs["call_glob"])
+	}
+	if strings.Contains(doneArgs["call_read"], "}{") {
+		t.Fatalf("call_read args were concatenated: %q", doneArgs["call_read"])
+	}
+	if strings.Contains(doneArgs["call_glob"], "}{") {
+		t.Fatalf("call_glob args were concatenated: %q", doneArgs["call_glob"])
+	}
+
+	if doneNames["call_read"] != "read" {
+		t.Fatalf("unexpected done name for call_read: %q", doneNames["call_read"])
+	}
+	if doneNames["call_glob"] != "glob" {
+		t.Fatalf("unexpected done name for call_glob: %q", doneNames["call_glob"])
+	}
+
+	if got := gjson.Get(doneArgs["call_read"], "filePath").String(); got != `C:\repo` {
+		t.Fatalf("unexpected filePath for call_read: %q", got)
+	}
+	if got := gjson.Get(doneArgs["call_glob"], "path").String(); got != `C:\repo` {
+		t.Fatalf("unexpected path for call_glob: %q", got)
+	}
+	if got := gjson.Get(doneArgs["call_glob"], "pattern").String(); got != "*.{yml,yaml}" {
+		t.Fatalf("unexpected pattern for call_glob: %q", got)
+	}
+
+	if len(outputItems) != 2 {
+		t.Fatalf("expected 2 function_call items in response.output, got %d", len(outputItems))
+	}
+	if outputItems["call_read"].Get("name").String() != "read" {
+		t.Fatalf("unexpected response.output name for call_read: %q", outputItems["call_read"].Get("name").String())
+	}
+	if outputItems["call_glob"].Get("name").String() != "glob" {
+		t.Fatalf("unexpected response.output name for call_glob: %q", outputItems["call_glob"].Get("name").String())
+	}
 }
 
-// extractEventPayloads filters events by type prefix and returns their JSON data payloads.
-func extractEventPayloads(events []string, eventType string) []string {
-	var out []string
-	prefix := "event: " + eventType + "\ndata: "
-	for _, e := range events {
-		if strings.HasPrefix(e, prefix) {
-			data := strings.TrimPrefix(e, "event: "+eventType+"\ndata: ")
-			out = append(out, data)
+func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_MultiChoiceToolCallsUseDistinctOutputIndexes(t *testing.T) {
+	in := []string{
+		`data: {"id":"resp_multi_choice","object":"chat.completion.chunk","created":1773896263,"model":"model","choices":[{"index":0,"delta":{"role":"assistant","content":null,"reasoning_content":null,"tool_calls":[{"index":0,"id":"call_choice0","type":"function","function":{"name":"glob","arguments":""}}]},"finish_reason":null},{"index":1,"delta":{"role":"assistant","content":null,"reasoning_content":null,"tool_calls":[{"index":0,"id":"call_choice1","type":"function","function":{"name":"read","arguments":""}}]},"finish_reason":null}]}`,
+		`data: {"id":"resp_multi_choice","object":"chat.completion.chunk","created":1773896263,"model":"model","choices":[{"index":0,"delta":{"role":null,"content":null,"reasoning_content":null,"tool_calls":[{"index":0,"function":{"arguments":"{\"path\":\"C:\\\\repo\",\"pattern\":\"*.go\"}"}}]},"finish_reason":null},{"index":1,"delta":{"role":null,"content":null,"reasoning_content":null,"tool_calls":[{"index":0,"function":{"arguments":"{\"filePath\":\"C:\\\\repo\\\\README.md\",\"limit\":20,\"offset\":1}"}}]},"finish_reason":null}]}`,
+		`data: {"id":"resp_multi_choice","object":"chat.completion.chunk","created":1773896263,"model":"model","choices":[{"index":0,"delta":{"role":null,"content":null,"reasoning_content":null,"tool_calls":null},"finish_reason":"tool_calls"},{"index":1,"delta":{"role":null,"content":null,"reasoning_content":null,"tool_calls":null},"finish_reason":"tool_calls"}],"usage":{"completion_tokens":10,"total_tokens":20,"prompt_tokens":10}}`,
+	}
+
+	request := []byte(`{"model":"gpt-5.4","tool_choice":"auto","parallel_tool_calls":true}`)
+
+	var param any
+	var out [][]byte
+	for _, line := range in {
+		out = append(out, ConvertOpenAIChatCompletionsResponseToOpenAIResponses(context.Background(), "model", request, request, []byte(line), &param)...)
+	}
+
+	type fcEvent struct {
+		outputIndex int64
+		name        string
+		arguments   string
+	}
+
+	added := map[string]fcEvent{}
+	done := map[string]fcEvent{}
+
+	for _, chunk := range out {
+		ev, data := parseOpenAIResponsesSSEEvent(t, chunk)
+		switch ev {
+		case "response.output_item.added":
+			if data.Get("item.type").String() != "function_call" {
+				continue
+			}
+			callID := data.Get("item.call_id").String()
+			added[callID] = fcEvent{
+				outputIndex: data.Get("output_index").Int(),
+				name:        data.Get("item.name").String(),
+			}
+		case "response.output_item.done":
+			if data.Get("item.type").String() != "function_call" {
+				continue
+			}
+			callID := data.Get("item.call_id").String()
+			done[callID] = fcEvent{
+				outputIndex: data.Get("output_index").Int(),
+				name:        data.Get("item.name").String(),
+				arguments:   data.Get("item.arguments").String(),
+			}
 		}
 	}
-	return out
+
+	if len(added) != 2 {
+		t.Fatalf("expected 2 function_call added events, got %d", len(added))
+	}
+	if len(done) != 2 {
+		t.Fatalf("expected 2 function_call done events, got %d", len(done))
+	}
+
+	if added["call_choice0"].name != "glob" {
+		t.Fatalf("unexpected added name for call_choice0: %q", added["call_choice0"].name)
+	}
+	if added["call_choice1"].name != "read" {
+		t.Fatalf("unexpected added name for call_choice1: %q", added["call_choice1"].name)
+	}
+	if added["call_choice0"].outputIndex == added["call_choice1"].outputIndex {
+		t.Fatalf("expected distinct output indexes for different choices, both got %d", added["call_choice0"].outputIndex)
+	}
+
+	if !gjson.Valid(done["call_choice0"].arguments) {
+		t.Fatalf("invalid JSON args for call_choice0: %q", done["call_choice0"].arguments)
+	}
+	if !gjson.Valid(done["call_choice1"].arguments) {
+		t.Fatalf("invalid JSON args for call_choice1: %q", done["call_choice1"].arguments)
+	}
+	if done["call_choice0"].outputIndex == done["call_choice1"].outputIndex {
+		t.Fatalf("expected distinct done output indexes for different choices, both got %d", done["call_choice0"].outputIndex)
+	}
+	if done["call_choice0"].name != "glob" {
+		t.Fatalf("unexpected done name for call_choice0: %q", done["call_choice0"].name)
+	}
+	if done["call_choice1"].name != "read" {
+		t.Fatalf("unexpected done name for call_choice1: %q", done["call_choice1"].name)
+	}
 }
 
-func TestStreamingParallelToolCalls(t *testing.T) {
-	// Simulate an SSE stream where GPT-5.4 returns 3 parallel tool calls.
-	// Each tool call is announced in its own SSE chunk with a unique index and call_id,
-	// followed by an arguments chunk, then a finish_reason chunk.
-
-	chunks := []string{
-		// Initial chunk — announces the response
-		`data: {"id":"gen-abc","object":"chat.completion.chunk","created":1700000000,"model":"gpt-5.4","choices":[{"index":0,"delta":{"role":"assistant","content":""},"finish_reason":null}]}`,
-
-		// Tool call 0: header with id and name
-		`data: {"id":"gen-abc","object":"chat.completion.chunk","created":1700000000,"model":"gpt-5.4","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_AAA","type":"function","function":{"name":"exec_command","arguments":""}}]},"finish_reason":null}]}`,
-		// Tool call 0: arguments
-		`data: {"id":"gen-abc","object":"chat.completion.chunk","created":1700000000,"model":"gpt-5.4","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"cmd\":\"ls\"}"}}]},"finish_reason":null}]}`,
-
-		// Tool call 1: header with id and name
-		`data: {"id":"gen-abc","object":"chat.completion.chunk","created":1700000000,"model":"gpt-5.4","choices":[{"index":0,"delta":{"tool_calls":[{"index":1,"id":"call_BBB","type":"function","function":{"name":"exec_command","arguments":""}}]},"finish_reason":null}]}`,
-		// Tool call 1: arguments
-		`data: {"id":"gen-abc","object":"chat.completion.chunk","created":1700000000,"model":"gpt-5.4","choices":[{"index":0,"delta":{"tool_calls":[{"index":1,"function":{"arguments":"{\"cmd\":\"pwd\"}"}}]},"finish_reason":null}]}`,
-
-		// Tool call 2: header with id and name
-		`data: {"id":"gen-abc","object":"chat.completion.chunk","created":1700000000,"model":"gpt-5.4","choices":[{"index":0,"delta":{"tool_calls":[{"index":2,"id":"call_CCC","type":"function","function":{"name":"read_file","arguments":""}}]},"finish_reason":null}]}`,
-		// Tool call 2: arguments
-		`data: {"id":"gen-abc","object":"chat.completion.chunk","created":1700000000,"model":"gpt-5.4","choices":[{"index":0,"delta":{"tool_calls":[{"index":2,"function":{"arguments":"{\"path\":\"/tmp/x\"}"}}]},"finish_reason":null}]}`,
-
-		// Finish
-		`data: {"id":"gen-abc","object":"chat.completion.chunk","created":1700000000,"model":"gpt-5.4","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`,
+func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_MixedMessageAndToolUseDistinctOutputIndexes(t *testing.T) {
+	in := []string{
+		`data: {"id":"resp_mixed","object":"chat.completion.chunk","created":1773896263,"model":"model","choices":[{"index":0,"delta":{"role":"assistant","content":"hello","reasoning_content":null,"tool_calls":null},"finish_reason":null},{"index":1,"delta":{"role":"assistant","content":null,"reasoning_content":null,"tool_calls":[{"index":0,"id":"call_choice1","type":"function","function":{"name":"read","arguments":""}}]},"finish_reason":null}]}`,
+		`data: {"id":"resp_mixed","object":"chat.completion.chunk","created":1773896263,"model":"model","choices":[{"index":0,"delta":{"role":null,"content":null,"reasoning_content":null,"tool_calls":null},"finish_reason":"stop"},{"index":1,"delta":{"role":null,"content":null,"reasoning_content":null,"tool_calls":[{"index":0,"function":{"arguments":"{\"filePath\":\"C:\\\\repo\\\\README.md\",\"limit\":20,\"offset\":1}"}}]},"finish_reason":"tool_calls"}],"usage":{"completion_tokens":10,"total_tokens":20,"prompt_tokens":10}}`,
 	}
 
-	events := feedChunks(t, chunks)
+	request := []byte(`{"model":"gpt-5.4","tool_choice":"auto","parallel_tool_calls":true}`)
 
-	// Verify: should have 3 separate output_item.added events for function_call
-	added := extractEventPayloads(events, "response.output_item.added")
-	funcAdded := filterByType(added, "function_call")
-	if len(funcAdded) != 3 {
-		t.Fatalf("expected 3 function_call output_item.added events, got %d\nevents: %v", len(funcAdded), funcAdded)
-	}
-
-	// Verify call_ids are distinct
-	callIDs := make(map[string]bool)
-	for _, fa := range funcAdded {
-		cid := gjson.Get(fa, "item.call_id").String()
-		if callIDs[cid] {
-			t.Errorf("duplicate call_id: %s", cid)
-		}
-		callIDs[cid] = true
-	}
-	if !callIDs["call_AAA"] || !callIDs["call_BBB"] || !callIDs["call_CCC"] {
-		t.Errorf("expected call_ids call_AAA, call_BBB, call_CCC, got %v", callIDs)
+	var param any
+	var out [][]byte
+	for _, line := range in {
+		out = append(out, ConvertOpenAIChatCompletionsResponseToOpenAIResponses(context.Background(), "model", request, request, []byte(line), &param)...)
 	}
 
-	// Verify: should have 3 separate function_call_arguments.done events
-	argsDone := extractEventPayloads(events, "response.function_call_arguments.done")
-	if len(argsDone) != 3 {
-		t.Fatalf("expected 3 function_call_arguments.done events, got %d", len(argsDone))
-	}
+	var messageOutputIndex int64 = -1
+	var toolOutputIndex int64 = -1
 
-	// Verify each arguments.done has valid JSON arguments (not concatenated)
-	expectedArgs := map[string]string{
-		"call_AAA": `{"cmd":"ls"}`,
-		"call_BBB": `{"cmd":"pwd"}`,
-		"call_CCC": `{"path":"/tmp/x"}`,
-	}
-	for _, ad := range argsDone {
-		itemID := gjson.Get(ad, "item_id").String()
-		args := gjson.Get(ad, "arguments").String()
-		// item_id is "fc_call_XXX", extract call_id
-		cid := strings.TrimPrefix(itemID, "fc_")
-		expected, ok := expectedArgs[cid]
-		if !ok {
-			t.Errorf("unexpected call_id in arguments.done: %s", cid)
+	for _, chunk := range out {
+		ev, data := parseOpenAIResponsesSSEEvent(t, chunk)
+		if ev != "response.output_item.added" {
 			continue
 		}
-		if !jsonEqual(t, args, expected) {
-			t.Errorf("call %s: expected args %s, got %s", cid, expected, args)
+		switch data.Get("item.type").String() {
+		case "message":
+			if data.Get("item.id").String() == "msg_resp_mixed_0" {
+				messageOutputIndex = data.Get("output_index").Int()
+			}
+		case "function_call":
+			if data.Get("item.call_id").String() == "call_choice1" {
+				toolOutputIndex = data.Get("output_index").Int()
+			}
 		}
 	}
 
-	// Verify: output_index values are distinct for each function_call
-	outputIndices := make(map[int64]string)
-	for _, fa := range funcAdded {
-		oi := gjson.Get(fa, "output_index").Int()
-		cid := gjson.Get(fa, "item.call_id").String()
-		if prev, exists := outputIndices[oi]; exists {
-			t.Errorf("output_index %d shared by %s and %s", oi, prev, cid)
-		}
-		outputIndices[oi] = cid
+	if messageOutputIndex < 0 {
+		t.Fatal("did not find message output index")
+	}
+	if toolOutputIndex < 0 {
+		t.Fatal("did not find tool output index")
+	}
+	if messageOutputIndex == toolOutputIndex {
+		t.Fatalf("expected distinct output indexes for message and tool call, both got %d", messageOutputIndex)
 	}
 }
 
-func TestStreamingSingleToolCall(t *testing.T) {
-	// Regression test: a single tool call should still work correctly.
-	chunks := []string{
-		`data: {"id":"gen-single","object":"chat.completion.chunk","created":1700000000,"model":"gpt-5.4","choices":[{"index":0,"delta":{"role":"assistant","content":""},"finish_reason":null}]}`,
-		`data: {"id":"gen-single","object":"chat.completion.chunk","created":1700000000,"model":"gpt-5.4","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_ONLY","type":"function","function":{"name":"exec_command","arguments":""}}]},"finish_reason":null}]}`,
-		`data: {"id":"gen-single","object":"chat.completion.chunk","created":1700000000,"model":"gpt-5.4","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"cmd\":"}}]},"finish_reason":null}]}`,
-		`data: {"id":"gen-single","object":"chat.completion.chunk","created":1700000000,"model":"gpt-5.4","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"hello\"}"}}]},"finish_reason":null}]}`,
-		`data: {"id":"gen-single","object":"chat.completion.chunk","created":1700000000,"model":"gpt-5.4","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`,
+func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_FunctionCallDoneAndCompletedOutputStayAscending(t *testing.T) {
+	in := []string{
+		`data: {"id":"resp_order","object":"chat.completion.chunk","created":1773896263,"model":"model","choices":[{"index":0,"delta":{"role":"assistant","content":null,"reasoning_content":null,"tool_calls":[{"index":0,"id":"call_glob","type":"function","function":{"name":"glob","arguments":""}}]},"finish_reason":null}]}`,
+		`data: {"id":"resp_order","object":"chat.completion.chunk","created":1773896263,"model":"model","choices":[{"index":0,"delta":{"role":null,"content":null,"reasoning_content":null,"tool_calls":[{"index":0,"function":{"arguments":"{\"path\":\"C:\\\\repo\",\"pattern\":\"*.go\"}"}}]},"finish_reason":null}]}`,
+		`data: {"id":"resp_order","object":"chat.completion.chunk","created":1773896263,"model":"model","choices":[{"index":0,"delta":{"role":"assistant","content":null,"reasoning_content":null,"tool_calls":[{"index":1,"id":"call_read","type":"function","function":{"name":"read","arguments":""}}]},"finish_reason":null}]}`,
+		`data: {"id":"resp_order","object":"chat.completion.chunk","created":1773896263,"model":"model","choices":[{"index":0,"delta":{"role":null,"content":null,"reasoning_content":null,"tool_calls":[{"index":1,"function":{"arguments":"{\"filePath\":\"C:\\\\repo\\\\README.md\",\"limit\":20,\"offset\":1}"}}]},"finish_reason":null}]}`,
+		`data: {"id":"resp_order","object":"chat.completion.chunk","created":1773896263,"model":"model","choices":[{"index":0,"delta":{"role":null,"content":null,"reasoning_content":null,"tool_calls":null},"finish_reason":"tool_calls"}],"usage":{"completion_tokens":10,"total_tokens":20,"prompt_tokens":10}}`,
 	}
 
-	events := feedChunks(t, chunks)
+	request := []byte(`{"model":"gpt-5.4","tool_choice":"auto","parallel_tool_calls":true}`)
 
-	funcAdded := filterByType(extractEventPayloads(events, "response.output_item.added"), "function_call")
-	if len(funcAdded) != 1 {
-		t.Fatalf("expected 1 function_call, got %d", len(funcAdded))
+	var param any
+	var out [][]byte
+	for _, line := range in {
+		out = append(out, ConvertOpenAIChatCompletionsResponseToOpenAIResponses(context.Background(), "model", request, request, []byte(line), &param)...)
 	}
 
-	cid := gjson.Get(funcAdded[0], "item.call_id").String()
-	if cid != "call_ONLY" {
-		t.Errorf("expected call_id call_ONLY, got %s", cid)
-	}
+	var doneIndexes []int64
+	var completedOrder []string
 
-	argsDone := extractEventPayloads(events, "response.function_call_arguments.done")
-	if len(argsDone) != 1 {
-		t.Fatalf("expected 1 arguments.done, got %d", len(argsDone))
-	}
-
-	args := gjson.Get(argsDone[0], "arguments").String()
-	if !jsonEqual(t, args, `{"cmd":"hello"}`) {
-		t.Errorf("expected args {\"cmd\":\"hello\"}, got %s", args)
-	}
-}
-
-func TestStreamingTextThenParallelToolCalls(t *testing.T) {
-	// Model emits some text content, then parallel tool calls.
-	// Verifies message and function_call items get distinct output_index values.
-	chunks := []string{
-		`data: {"id":"gen-mixed","object":"chat.completion.chunk","created":1700000000,"model":"gpt-5.4","choices":[{"index":0,"delta":{"role":"assistant","content":"Let me check"},"finish_reason":null}]}`,
-		`data: {"id":"gen-mixed","object":"chat.completion.chunk","created":1700000000,"model":"gpt-5.4","choices":[{"index":0,"delta":{"content":" that."},"finish_reason":null}]}`,
-		// Tool call 0
-		`data: {"id":"gen-mixed","object":"chat.completion.chunk","created":1700000000,"model":"gpt-5.4","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_X","type":"function","function":{"name":"cmd","arguments":"{\"a\":1}"}}]},"finish_reason":null}]}`,
-		// Tool call 1
-		`data: {"id":"gen-mixed","object":"chat.completion.chunk","created":1700000000,"model":"gpt-5.4","choices":[{"index":0,"delta":{"tool_calls":[{"index":1,"id":"call_Y","type":"function","function":{"name":"cmd","arguments":"{\"b\":2}"}}]},"finish_reason":null}]}`,
-		// Finish
-		`data: {"id":"gen-mixed","object":"chat.completion.chunk","created":1700000000,"model":"gpt-5.4","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`,
-	}
-
-	events := feedChunks(t, chunks)
-
-	// Should have: 1 message + 2 function_calls = 3 output_item.added events
-	allAdded := extractEventPayloads(events, "response.output_item.added")
-	msgAdded := filterByType(allAdded, "message")
-	funcAdded := filterByType(allAdded, "function_call")
-
-	if len(msgAdded) != 1 {
-		t.Errorf("expected 1 message output_item.added, got %d", len(msgAdded))
-	}
-	if len(funcAdded) != 2 {
-		t.Errorf("expected 2 function_call output_item.added, got %d", len(funcAdded))
-	}
-
-	// All output_index values should be distinct
-	allIndices := make(map[int64]bool)
-	for _, a := range allAdded {
-		oi := gjson.Get(a, "output_index").Int()
-		if allIndices[oi] {
-			t.Errorf("duplicate output_index: %d", oi)
-		}
-		allIndices[oi] = true
-	}
-}
-
-// --- helpers ---
-
-func filterByType(payloads []string, itemType string) []string {
-	var out []string
-	for _, p := range payloads {
-		if gjson.Get(p, "item.type").String() == itemType {
-			out = append(out, p)
+	for _, chunk := range out {
+		ev, data := parseOpenAIResponsesSSEEvent(t, chunk)
+		switch ev {
+		case "response.output_item.done":
+			if data.Get("item.type").String() == "function_call" {
+				doneIndexes = append(doneIndexes, data.Get("output_index").Int())
+			}
+		case "response.completed":
+			for _, item := range data.Get("response.output").Array() {
+				if item.Get("type").String() == "function_call" {
+					completedOrder = append(completedOrder, item.Get("call_id").String())
+				}
+			}
 		}
 	}
-	return out
-}
 
-func jsonEqual(t *testing.T, a, b string) bool {
-	t.Helper()
-	var ja, jb any
-	if err := json.Unmarshal([]byte(a), &ja); err != nil {
-		return false
+	if len(doneIndexes) != 2 {
+		t.Fatalf("expected 2 function_call done indexes, got %d", len(doneIndexes))
 	}
-	if err := json.Unmarshal([]byte(b), &jb); err != nil {
-		return false
+	if doneIndexes[0] >= doneIndexes[1] {
+		t.Fatalf("expected ascending done output indexes, got %v", doneIndexes)
 	}
-	ab, _ := json.Marshal(ja)
-	bb, _ := json.Marshal(jb)
-	return string(ab) == string(bb)
+	if len(completedOrder) != 2 {
+		t.Fatalf("expected 2 function_call items in completed output, got %d", len(completedOrder))
+	}
+	if completedOrder[0] != "call_glob" || completedOrder[1] != "call_read" {
+		t.Fatalf("unexpected completed function_call order: %v", completedOrder)
+	}
 }

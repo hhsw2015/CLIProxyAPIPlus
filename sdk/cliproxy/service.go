@@ -224,7 +224,7 @@ type serviceAuthHook struct {
 	service *Service
 }
 
-func (h *serviceAuthHook) OnAuthDisposition(ctx context.Context, disposition coreauth.AuthDisposition) {
+func (h *serviceAuthHook) OnAuthDisposition(ctx context.Context, disposition AuthDisposition) {
 	if h == nil || h.service == nil {
 		return
 	}
@@ -385,7 +385,7 @@ func (s *Service) seedLoadedCoreAuthModels() {
 		}
 		s.registerModelsForAuth(auth)
 	}
-	s.coreManager.RebuildScheduler()
+	// s.coreManager.RebuildScheduler()
 }
 
 func (s *Service) bootstrapPoolSnapshot(ctx context.Context, watcherWrapper *WatcherWrapper) {
@@ -1057,7 +1057,7 @@ func (s *Service) replaceLowQualityActiveFromReserve(ctx context.Context, maxRep
 			break
 		}
 
-		probeCtx := coreauth.WithDispositionSource(ctx, "pool_probe")
+		probeCtx := WithDispositionSource(ctx, "pool_probe")
 		beforeProbe := auth.Clone()
 		probedAuth, result := poolProbeAuthFunc(probeCtx, s.cfg, auth.Clone())
 		if probedAuth != nil {
@@ -1210,7 +1210,7 @@ func (s *Service) syncPoolActiveToRuntime(ctx context.Context) {
 	}
 }
 
-func (s *Service) handleAuthDisposition(ctx context.Context, disposition coreauth.AuthDisposition) {
+func (s *Service) handleAuthDisposition(ctx context.Context, disposition AuthDisposition) {
 	if s == nil || s.poolManager == nil {
 		return
 	}
@@ -1467,7 +1467,7 @@ func (s *Service) fillWarmReserveFromColdCandidates(ctx context.Context) {
 			}
 			sampled++
 			beforeProbe := auth.Clone()
-			probedAuth, result := poolProbeAuthFunc(coreauth.WithDispositionSource(ctx, "pool_probe"), s.cfg, auth.Clone())
+			probedAuth, result := poolProbeAuthFunc(WithDispositionSource(ctx, "pool_probe"), s.cfg, auth.Clone())
 			if probedAuth != nil {
 				s.storePoolCandidate(probedAuth)
 			}
@@ -1510,7 +1510,7 @@ func (s *Service) handlePoolResult(ctx context.Context, result coreauth.Result) 
 	if s == nil || s.poolManager == nil {
 		return
 	}
-	if coreauth.DispositionSource(ctx) != "request" {
+	if DispositionSource(ctx) != "request" {
 		return
 	}
 	if strings.TrimSpace(result.AuthID) == "" {
@@ -1677,7 +1677,7 @@ func (s *Service) runActiveProbeCycle(ctx context.Context, now time.Time) {
 			s.removePoolMember(authID, auth.Provider, "active_missing")
 			continue
 		}
-		probeCtx := coreauth.WithDispositionSource(ctx, "pool_probe")
+		probeCtx := WithDispositionSource(ctx, "pool_probe")
 		beforeProbe := auth.Clone()
 		probedAuth, result := poolProbeAuthFunc(probeCtx, s.cfg, auth)
 		if probedAuth != nil {
@@ -1753,7 +1753,7 @@ func (s *Service) runActiveQuotaRefreshCycle(ctx context.Context, now time.Time)
 			s.removePoolMember(authID, provider, "active_missing")
 			continue
 		}
-		probeCtx := coreauth.WithDispositionSource(ctx, "pool_probe")
+		probeCtx := WithDispositionSource(ctx, "pool_probe")
 		beforeProbe := auth.Clone()
 		probedAuth, result := poolProbeAuthFunc(probeCtx, s.cfg, auth)
 		if probedAuth != nil {
@@ -1829,7 +1829,7 @@ func (s *Service) runReserveProbeCycle(ctx context.Context, now time.Time) {
 			continue
 		}
 		beforeProbe := auth.Clone()
-		probedAuth, result := poolProbeAuthFunc(coreauth.WithDispositionSource(ctx, "pool_probe"), s.cfg, auth.Clone())
+		probedAuth, result := poolProbeAuthFunc(WithDispositionSource(ctx, "pool_probe"), s.cfg, auth.Clone())
 		if probedAuth != nil {
 			s.storePoolCandidate(probedAuth)
 		}
@@ -1896,7 +1896,7 @@ func (s *Service) runLimitProbeCycle(ctx context.Context, now time.Time) {
 			continue
 		}
 		beforeProbe := auth.Clone()
-		probedAuth, result := poolProbeAuthFunc(coreauth.WithDispositionSource(ctx, "pool_probe"), s.cfg, auth.Clone())
+		probedAuth, result := poolProbeAuthFunc(WithDispositionSource(ctx, "pool_probe"), s.cfg, auth.Clone())
 		if probedAuth != nil {
 			s.storePoolCandidate(probedAuth)
 		}
@@ -2401,10 +2401,12 @@ func (s *Service) applyCoreAuthAddOrUpdate(ctx context.Context, auth *coreauth.A
 	var err error
 	if existing, ok := s.coreManager.GetByID(auth.ID); ok {
 		auth.CreatedAt = existing.CreatedAt
-		auth.LastRefreshedAt = existing.LastRefreshedAt
-		auth.NextRefreshAfter = existing.NextRefreshAfter
-		if len(auth.ModelStates) == 0 && len(existing.ModelStates) > 0 {
-			auth.ModelStates = existing.ModelStates
+		if !existing.Disabled && existing.Status != coreauth.StatusDisabled && !auth.Disabled && auth.Status != coreauth.StatusDisabled {
+			auth.LastRefreshedAt = existing.LastRefreshedAt
+			auth.NextRefreshAfter = existing.NextRefreshAfter
+			if len(auth.ModelStates) == 0 && len(existing.ModelStates) > 0 {
+				auth.ModelStates = existing.ModelStates
+			}
 		}
 		op = "update"
 		_, err = s.coreManager.Update(ctx, auth)
@@ -2448,6 +2450,7 @@ func (s *Service) applyCoreAuthRemoval(ctx context.Context, id string) {
 			log.Errorf("failed to disable auth %s: %v", id, err)
 		}
 		if strings.EqualFold(strings.TrimSpace(existing.Provider), "codex") {
+			executor.CloseCodexWebsocketSessionsForAuthID(existing.ID, "auth_removed")
 			s.ensureExecutorsForAuth(existing)
 		}
 	}

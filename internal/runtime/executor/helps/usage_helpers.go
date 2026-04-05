@@ -1,4 +1,4 @@
-package executor
+package helps
 
 import (
 	"bytes"
@@ -15,7 +15,7 @@ import (
 	"github.com/tidwall/sjson"
 )
 
-type usageReporter struct {
+type UsageReporter struct {
 	provider    string
 	model       string
 	authID      string
@@ -24,14 +24,11 @@ type usageReporter struct {
 	source      string
 	requestedAt time.Time
 	once        sync.Once
-	observedMu  sync.Mutex
-	observed    usage.Detail
-	hasObserved bool
 }
 
-func newUsageReporter(ctx context.Context, provider, model string, auth *cliproxyauth.Auth) *usageReporter {
-	apiKey := apiKeyFromContext(ctx)
-	reporter := &usageReporter{
+func NewUsageReporter(ctx context.Context, provider, model string, auth *cliproxyauth.Auth) *UsageReporter {
+	apiKey := APIKeyFromContext(ctx)
+	reporter := &UsageReporter{
 		provider:    provider,
 		model:       model,
 		requestedAt: time.Now(),
@@ -45,111 +42,47 @@ func newUsageReporter(ctx context.Context, provider, model string, auth *cliprox
 	return reporter
 }
 
-func (r *usageReporter) publish(ctx context.Context, detail usage.Detail) {
-	if r == nil {
-		return
-	}
-	detail = normalizeUsageDetail(detail)
-	if isZeroUsageDetail(detail) {
-		return
-	}
-	r.observe(detail)
+func (r *UsageReporter) Publish(ctx context.Context, detail usage.Detail) {
+	r.publishWithOutcome(ctx, detail, false)
 }
 
-func (r *usageReporter) publishNow(ctx context.Context, detail usage.Detail) {
-	if r == nil {
-		return
-	}
-	detail = normalizeUsageDetail(detail)
-	if !isZeroUsageDetail(detail) {
-		r.observe(detail)
-	}
-	r.once.Do(func() {
-		usage.PublishRecord(ctx, usage.Record{
-			Provider:    r.provider,
-			Model:       r.model,
-			Source:      r.source,
-			APIKey:      r.apiKey,
-			AuthID:      r.authID,
-			AuthIndex:   r.authIndex,
-			RequestedAt: r.requestedAt,
-			Failed:      false,
-			Detail:      r.currentObserved(),
-		})
-	})
+func (r *UsageReporter) PublishFailure(ctx context.Context) {
+	r.publishWithOutcome(ctx, usage.Detail{}, true)
 }
 
-func (r *usageReporter) observe(detail usage.Detail) {
-	if r == nil {
-		return
-	}
-	detail = normalizeUsageDetail(detail)
-	if isZeroUsageDetail(detail) {
-		return
-	}
-	r.observedMu.Lock()
-	defer r.observedMu.Unlock()
-	if r.hasObserved {
-		r.observed = preferRicherUsageDetail(r.observed, detail)
-		return
-	}
-	r.observed = detail
-	r.hasObserved = true
-}
-
-func (r *usageReporter) currentObserved() usage.Detail {
-	if r == nil {
-		return usage.Detail{}
-	}
-	r.observedMu.Lock()
-	defer r.observedMu.Unlock()
-	return r.observed
-}
-
-func (r *usageReporter) hasObservedUsage() bool {
-	if r == nil {
-		return false
-	}
-	r.observedMu.Lock()
-	defer r.observedMu.Unlock()
-	return r.hasObserved
-}
-
-func (r *usageReporter) publishObserved(ctx context.Context) {
-	if r == nil || !r.hasObservedUsage() {
-		return
-	}
-	r.publishNow(ctx, r.currentObserved())
-}
-
-func (r *usageReporter) publishFailure(ctx context.Context) {
-	if r == nil || r.hasObservedUsage() {
-		return
-	}
-	r.once.Do(func() {
-		usage.PublishRecord(ctx, r.buildRecord(usage.Detail{}, true))
-	})
-}
-
-func (r *usageReporter) trackFailure(ctx context.Context, errPtr *error) {
+func (r *UsageReporter) TrackFailure(ctx context.Context, errPtr *error) {
 	if r == nil || errPtr == nil {
 		return
 	}
 	if *errPtr != nil {
-		r.publishFailure(ctx)
+		r.PublishFailure(ctx)
 	}
+}
+
+func (r *UsageReporter) publishWithOutcome(ctx context.Context, detail usage.Detail, failed bool) {
+	if r == nil {
+		return
+	}
+	if detail.TotalTokens == 0 {
+		total := detail.InputTokens + detail.OutputTokens + detail.ReasoningTokens
+		if total > 0 {
+			detail.TotalTokens = total
+		}
+	}
+	if detail.InputTokens == 0 && detail.OutputTokens == 0 && detail.ReasoningTokens == 0 && detail.CachedTokens == 0 && detail.TotalTokens == 0 && !failed {
+		return
+	}
+	r.once.Do(func() {
+		usage.PublishRecord(ctx, r.buildRecord(detail, failed))
+	})
 }
 
 // ensurePublished guarantees that a usage record is emitted exactly once.
 // It is safe to call multiple times; only the first call wins due to once.Do.
 // This is used to ensure request counting even when upstream responses do not
 // include any usage fields (tokens), especially for streaming paths.
-func (r *usageReporter) ensurePublished(ctx context.Context) {
+func (r *UsageReporter) EnsurePublished(ctx context.Context) {
 	if r == nil {
-		return
-	}
-	if r.hasObservedUsage() {
-		r.publishObserved(ctx)
 		return
 	}
 	r.once.Do(func() {
@@ -157,7 +90,7 @@ func (r *usageReporter) ensurePublished(ctx context.Context) {
 	})
 }
 
-func (r *usageReporter) buildRecord(detail usage.Detail, failed bool) usage.Record {
+func (r *UsageReporter) buildRecord(detail usage.Detail, failed bool) usage.Record {
 	if r == nil {
 		return usage.Record{Detail: detail, Failed: failed}
 	}
@@ -175,7 +108,7 @@ func (r *usageReporter) buildRecord(detail usage.Detail, failed bool) usage.Reco
 	}
 }
 
-func (r *usageReporter) latency() time.Duration {
+func (r *UsageReporter) latency() time.Duration {
 	if r == nil || r.requestedAt.IsZero() {
 		return 0
 	}
@@ -186,21 +119,7 @@ func (r *usageReporter) latency() time.Duration {
 	return latency
 }
 
-func normalizeUsageDetail(detail usage.Detail) usage.Detail {
-	if detail.TotalTokens == 0 {
-		total := detail.InputTokens + detail.OutputTokens + detail.ReasoningTokens
-		if total > 0 {
-			detail.TotalTokens = total
-		}
-	}
-	return detail
-}
-
-func isZeroUsageDetail(detail usage.Detail) bool {
-	return detail.InputTokens == 0 && detail.OutputTokens == 0 && detail.ReasoningTokens == 0 && detail.CachedTokens == 0 && detail.TotalTokens == 0
-}
-
-func apiKeyFromContext(ctx context.Context) string {
+func APIKeyFromContext(ctx context.Context) string {
 	if ctx == nil {
 		return ""
 	}
@@ -270,7 +189,7 @@ func resolveUsageSource(auth *cliproxyauth.Auth, ctxAPIKey string) string {
 	return ""
 }
 
-func parseCodexUsage(data []byte) (usage.Detail, bool) {
+func ParseCodexUsage(data []byte) (usage.Detail, bool) {
 	usageNode := gjson.ParseBytes(data).Get("response.usage")
 	if !usageNode.Exists() {
 		return usage.Detail{}, false
@@ -289,7 +208,7 @@ func parseCodexUsage(data []byte) (usage.Detail, bool) {
 	return detail, true
 }
 
-func parseOpenAIUsage(data []byte) usage.Detail {
+func ParseOpenAIUsage(data []byte) usage.Detail {
 	usageNode := gjson.ParseBytes(data).Get("usage")
 	if !usageNode.Exists() {
 		return usage.Detail{}
@@ -321,13 +240,10 @@ func parseOpenAIUsage(data []byte) usage.Detail {
 	if reasoning.Exists() {
 		detail.ReasoningTokens = reasoning.Int()
 	}
-	if detail.TotalTokens == 0 {
-		detail.TotalTokens = detail.InputTokens + detail.OutputTokens + detail.ReasoningTokens
-	}
 	return detail
 }
 
-func parseOpenAIStreamUsage(line []byte) (usage.Detail, bool) {
+func ParseOpenAIStreamUsage(line []byte) (usage.Detail, bool) {
 	payload := jsonPayload(line)
 	if len(payload) == 0 || !gjson.ValidBytes(payload) {
 		return usage.Detail{}, false
@@ -336,62 +252,40 @@ func parseOpenAIStreamUsage(line []byte) (usage.Detail, bool) {
 	if !usageNode.Exists() {
 		return usage.Detail{}, false
 	}
+
+	inputNode := usageNode.Get("prompt_tokens")
+	if !inputNode.Exists() {
+		inputNode = usageNode.Get("input_tokens")
+	}
+	outputNode := usageNode.Get("completion_tokens")
+	if !outputNode.Exists() {
+		outputNode = usageNode.Get("output_tokens")
+	}
 	detail := usage.Detail{
-		InputTokens:  usageNode.Get("prompt_tokens").Int(),
-		OutputTokens: usageNode.Get("completion_tokens").Int(),
+		InputTokens:  inputNode.Int(),
+		OutputTokens: outputNode.Int(),
 		TotalTokens:  usageNode.Get("total_tokens").Int(),
 	}
-	if cached := usageNode.Get("prompt_tokens_details.cached_tokens"); cached.Exists() {
+
+	cached := usageNode.Get("prompt_tokens_details.cached_tokens")
+	if !cached.Exists() {
+		cached = usageNode.Get("input_tokens_details.cached_tokens")
+	}
+	if cached.Exists() {
 		detail.CachedTokens = cached.Int()
 	}
-	if reasoning := usageNode.Get("completion_tokens_details.reasoning_tokens"); reasoning.Exists() {
-		detail.ReasoningTokens = reasoning.Int()
+
+	reasoning := usageNode.Get("completion_tokens_details.reasoning_tokens")
+	if !reasoning.Exists() {
+		reasoning = usageNode.Get("output_tokens_details.reasoning_tokens")
 	}
-	if detail.TotalTokens == 0 {
-		detail.TotalTokens = detail.InputTokens + detail.OutputTokens + detail.ReasoningTokens
+	if reasoning.Exists() {
+		detail.ReasoningTokens = reasoning.Int()
 	}
 	return detail, true
 }
 
-func parseOpenAIResponsesUsageDetail(usageNode gjson.Result) usage.Detail {
-	detail := usage.Detail{
-		InputTokens:  usageNode.Get("input_tokens").Int(),
-		OutputTokens: usageNode.Get("output_tokens").Int(),
-		TotalTokens:  usageNode.Get("total_tokens").Int(),
-	}
-	if detail.TotalTokens == 0 {
-		detail.TotalTokens = detail.InputTokens + detail.OutputTokens
-	}
-	if cached := usageNode.Get("input_tokens_details.cached_tokens"); cached.Exists() {
-		detail.CachedTokens = cached.Int()
-	}
-	if reasoning := usageNode.Get("output_tokens_details.reasoning_tokens"); reasoning.Exists() {
-		detail.ReasoningTokens = reasoning.Int()
-	}
-	return detail
-}
-
-func parseOpenAIResponsesUsage(data []byte) usage.Detail {
-	usageNode := gjson.ParseBytes(data).Get("usage")
-	if !usageNode.Exists() {
-		return usage.Detail{}
-	}
-	return parseOpenAIResponsesUsageDetail(usageNode)
-}
-
-func parseOpenAIResponsesStreamUsage(line []byte) (usage.Detail, bool) {
-	payload := jsonPayload(line)
-	if len(payload) == 0 || !gjson.ValidBytes(payload) {
-		return usage.Detail{}, false
-	}
-	usageNode := gjson.GetBytes(payload, "response.usage")
-	if !usageNode.Exists() {
-		return usage.Detail{}, false
-	}
-	return parseOpenAIResponsesUsageDetail(usageNode), true
-}
-
-func parseClaudeUsage(data []byte) usage.Detail {
+func ParseClaudeUsage(data []byte) usage.Detail {
 	usageNode := gjson.ParseBytes(data).Get("usage")
 	if !usageNode.Exists() {
 		return usage.Detail{}
@@ -409,15 +303,12 @@ func parseClaudeUsage(data []byte) usage.Detail {
 	return detail
 }
 
-func parseClaudeStreamUsage(line []byte) (usage.Detail, bool) {
+func ParseClaudeStreamUsage(line []byte) (usage.Detail, bool) {
 	payload := jsonPayload(line)
 	if len(payload) == 0 || !gjson.ValidBytes(payload) {
 		return usage.Detail{}, false
 	}
 	usageNode := gjson.GetBytes(payload, "usage")
-	if !usageNode.Exists() {
-		usageNode = gjson.GetBytes(payload, "message.usage")
-	}
 	if !usageNode.Exists() {
 		return usage.Detail{}, false
 	}
@@ -431,24 +322,6 @@ func parseClaudeStreamUsage(line []byte) (usage.Detail, bool) {
 	}
 	detail.TotalTokens = detail.InputTokens + detail.OutputTokens
 	return detail, true
-}
-
-func preferRicherUsageDetail(current, candidate usage.Detail) usage.Detail {
-	merged := usage.Detail{
-		InputTokens:     maxInt64(current.InputTokens, candidate.InputTokens),
-		OutputTokens:    maxInt64(current.OutputTokens, candidate.OutputTokens),
-		ReasoningTokens: maxInt64(current.ReasoningTokens, candidate.ReasoningTokens),
-		CachedTokens:    maxInt64(current.CachedTokens, candidate.CachedTokens),
-	}
-	merged.TotalTokens = merged.InputTokens + merged.OutputTokens + merged.ReasoningTokens
-	return merged
-}
-
-func maxInt64(a, b int64) int64 {
-	if a > b {
-		return a
-	}
-	return b
 }
 
 func parseGeminiFamilyUsageDetail(node gjson.Result) usage.Detail {
@@ -465,7 +338,7 @@ func parseGeminiFamilyUsageDetail(node gjson.Result) usage.Detail {
 	return detail
 }
 
-func parseGeminiCLIUsage(data []byte) usage.Detail {
+func ParseGeminiCLIUsage(data []byte) usage.Detail {
 	usageNode := gjson.ParseBytes(data)
 	node := usageNode.Get("response.usageMetadata")
 	if !node.Exists() {
@@ -477,7 +350,7 @@ func parseGeminiCLIUsage(data []byte) usage.Detail {
 	return parseGeminiFamilyUsageDetail(node)
 }
 
-func parseGeminiUsage(data []byte) usage.Detail {
+func ParseGeminiUsage(data []byte) usage.Detail {
 	usageNode := gjson.ParseBytes(data)
 	node := usageNode.Get("usageMetadata")
 	if !node.Exists() {
@@ -489,7 +362,7 @@ func parseGeminiUsage(data []byte) usage.Detail {
 	return parseGeminiFamilyUsageDetail(node)
 }
 
-func parseGeminiStreamUsage(line []byte) (usage.Detail, bool) {
+func ParseGeminiStreamUsage(line []byte) (usage.Detail, bool) {
 	payload := jsonPayload(line)
 	if len(payload) == 0 || !gjson.ValidBytes(payload) {
 		return usage.Detail{}, false
@@ -504,7 +377,7 @@ func parseGeminiStreamUsage(line []byte) (usage.Detail, bool) {
 	return parseGeminiFamilyUsageDetail(node), true
 }
 
-func parseGeminiCLIStreamUsage(line []byte) (usage.Detail, bool) {
+func ParseGeminiCLIStreamUsage(line []byte) (usage.Detail, bool) {
 	payload := jsonPayload(line)
 	if len(payload) == 0 || !gjson.ValidBytes(payload) {
 		return usage.Detail{}, false
@@ -519,7 +392,7 @@ func parseGeminiCLIStreamUsage(line []byte) (usage.Detail, bool) {
 	return parseGeminiFamilyUsageDetail(node), true
 }
 
-func parseAntigravityUsage(data []byte) usage.Detail {
+func ParseAntigravityUsage(data []byte) usage.Detail {
 	usageNode := gjson.ParseBytes(data)
 	node := usageNode.Get("response.usageMetadata")
 	if !node.Exists() {
@@ -534,7 +407,7 @@ func parseAntigravityUsage(data []byte) usage.Detail {
 	return parseGeminiFamilyUsageDetail(node)
 }
 
-func parseAntigravityStreamUsage(line []byte) (usage.Detail, bool) {
+func ParseAntigravityStreamUsage(line []byte) (usage.Detail, bool) {
 	payload := jsonPayload(line)
 	if len(payload) == 0 || !gjson.ValidBytes(payload) {
 		return usage.Detail{}, false
@@ -701,6 +574,10 @@ func isStopChunkWithoutUsage(jsonBytes []byte) bool {
 		return false
 	}
 	return !hasUsageMetadata(jsonBytes)
+}
+
+func JSONPayload(line []byte) []byte {
+	return jsonPayload(line)
 }
 
 func jsonPayload(line []byte) []byte {
