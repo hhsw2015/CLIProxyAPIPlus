@@ -138,7 +138,12 @@ func (s *ConfigSynthesizer) synthesizeClaudeKeys(ctx *SynthesisContext) []*corea
 		proxyURL := strings.TrimSpace(ck.ProxyURL)
 		label := "claude-apikey"
 		if ak != "" {
-			label = ak
+			region := strings.TrimSpace(ck.AWSRegion)
+			if region != "" {
+				label = ak + "/" + region
+			} else {
+				label = ak
+			}
 		}
 		if base != "" {
 			if strings.Contains(base, "127.0.0.1:18081") && strings.Contains(base, "/gpt-proxy/xmind") {
