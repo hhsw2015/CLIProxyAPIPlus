@@ -53,14 +53,7 @@ func (e *OpenAICompatExecutor) PrepareRequest(req *http.Request, auth *cliproxya
 		attrs = auth.Attributes
 	}
 	util.ApplyCustomHeadersFromAttrs(req, attrs)
-	// Pass through special headers that might not have the "header:" prefix in attributes.
-	for k, v := range attrs {
-		lowerK := strings.ToLower(k)
-		if lowerK == "x-forwarded-for" || lowerK == "x-real-ip" || lowerK == "cookie" {
-			req.Header.Set(k, v)
-		}
-	}
-	// Cookie pool: if this auth has a cookie pool, pick a random cookie and inject it.
+	// Cookie pool: if this auth has a cookie pool, pick a cookie and inject its headers.
 	applyCookiePoolHeaders(req, auth)
 	return nil
 }
