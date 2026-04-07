@@ -5,8 +5,11 @@
 package cookiepool
 
 import (
+	"bytes"
 	"encoding/json"
+	"io"
 	"math/rand"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -28,23 +31,26 @@ type Entry map[string]string
 // reuses it for cache locality. On failure (MarkDead), the preferred cookie
 // is cleared and the next Pick selects a new random cookie.
 type Pool struct {
-	mu        sync.RWMutex
-	entries   []Entry
-	dead      map[int]time.Time // index → expiry of dead mark
-	preferred int               // index of sticky preferred cookie, -1 = none
-	filePath  string
-	modTime   time.Time
-	stopCh    chan struct{}
-	stopped   atomic.Bool
+	mu             sync.RWMutex
+	entries        []Entry
+	dead           map[int]time.Time // index → expiry of dead mark
+	preferred      int               // index of sticky preferred cookie, -1 = none
+	filePath       string
+	healthCheckURL string // base URL for zero-token health checks (from config)
+	modTime        time.Time
+	stopCh         chan struct{}
+	stopped        atomic.Bool
 }
 
 // Load creates a new pool from the given JSON file path.
-func Load(filePath string) (*Pool, error) {
+// healthCheckURL is the base URL used for zero-token cookie validation (optional).
+func Load(filePath, healthCheckURL string) (*Pool, error) {
 	p := &Pool{
-		filePath:  filePath,
-		dead:      make(map[int]time.Time),
-		preferred: -1,
-		stopCh:    make(chan struct{}),
+		filePath:       filePath,
+		healthCheckURL: strings.TrimSpace(healthCheckURL),
+		dead:           make(map[int]time.Time),
+		preferred:      -1,
+		stopCh:         make(chan struct{}),
 	}
 	if err := p.reload(); err != nil {
 		return nil, err
@@ -56,26 +62,35 @@ func Load(filePath string) (*Pool, error) {
 // Pick returns a live cookie entry using sticky selection. It prefers the
 // previously successful cookie (for prompt cache locality). If the preferred
 // cookie is dead or unset, a new random cookie is selected and becomes the
-// new preferred. Returns nil if pool is empty or all cookies are dead.
+// new preferred.
+//
+// When a healthCheckURL is configured and a new cookie is being selected
+// (not the sticky preferred), Pick validates the cookie with a zero-token
+// request before returning it. Invalid cookies are marked dead immediately.
+//
+// Returns nil if pool is empty or all cookies are dead.
 func (p *Pool) Pick() *Entry {
 	p.mu.Lock()
-	defer p.mu.Unlock()
 
 	n := len(p.entries)
 	if n == 0 {
+		p.mu.Unlock()
 		return nil
 	}
 
 	now := time.Now()
 
-	// Try preferred cookie first (sticky for cache locality).
+	// Try preferred cookie first (sticky for cache locality, no health check needed).
 	if p.preferred >= 0 && p.preferred < n {
 		if expiry, dead := p.dead[p.preferred]; !dead || now.After(expiry) {
-			return &p.entries[p.preferred]
+			entry := &p.entries[p.preferred]
+			p.mu.Unlock()
+			return entry
 		}
 	}
 
 	// Preferred is dead or unset — pick a new random live cookie.
+	// If healthCheckURL is set, validate before returning.
 	start := rand.Intn(n)
 	for i := 0; i < n; i++ {
 		idx := (start + i) % n
@@ -86,9 +101,24 @@ func (p *Pool) Pick() *Entry {
 				continue
 			}
 		}
+		entry := p.entries[idx]
+		if p.healthCheckURL != "" {
+			// Release lock during network call.
+			p.mu.Unlock()
+			if !p.checkCookieAlive(entry) {
+				p.MarkDead(entryID(entry), 24*time.Hour)
+				log.Debugf("cookie pool: cookie failed health check, trying next")
+				p.mu.Lock()
+				continue
+			}
+			p.mu.Lock()
+		}
 		p.preferred = idx
-		return &p.entries[idx]
+		result := &p.entries[idx]
+		p.mu.Unlock()
+		return result
 	}
+	p.mu.Unlock()
 	return nil
 }
 
@@ -218,4 +248,34 @@ func (p *Pool) checkReload() {
 			log.Warnf("cookie pool reload failed for %s: %v", filepath.Base(absPath), err)
 		}
 	}
+}
+
+// checkCookieAlive sends a zero-token request to verify if a cookie is still valid.
+// Returns true if the cookie is alive (HTTP 500 = auth ok, param error; or 200).
+// Returns false if expired (HTTP 401).
+func (p *Pool) checkCookieAlive(entry Entry) bool {
+	url := p.healthCheckURL
+	body := []byte(`{"model":"x","messages":[]}`)
+
+	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return true // can't check, assume alive
+	}
+	req.Header.Set("Content-Type", "application/json")
+	for key, value := range entry {
+		if strings.TrimSpace(key) != "" && strings.TrimSpace(value) != "" {
+			req.Header.Set(key, value)
+		}
+	}
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return true // network error, assume alive
+	}
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+
+	// 401 = cookie expired; anything else (500, 200, etc.) = alive
+	return resp.StatusCode != http.StatusUnauthorized
 }

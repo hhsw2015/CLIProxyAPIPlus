@@ -281,7 +281,7 @@ func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) []*cor
 		// Cookie pool: if config has a cookie-pool-file, register the pool
 		// and store the pool name in attrs so the executor can pick cookies at runtime.
 		if poolFile := strings.TrimSpace(compat.CookiePoolFile); poolFile != "" {
-			cookiepool.Register(compat.Name, poolFile)
+			cookiepool.Register(compat.Name, poolFile, base)
 			log.Infof("cookie pool registered for %s from %s", compat.Name, poolFile)
 		}
 

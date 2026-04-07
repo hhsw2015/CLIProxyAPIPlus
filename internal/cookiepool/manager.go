@@ -19,8 +19,8 @@ func Get(name string) *Pool {
 }
 
 // Register loads a cookie pool file and associates it with the config entry name.
-// If the entry already has a pool with the same file, it's a no-op.
-func Register(name, filePath string) {
+// healthCheckURL is the base URL for zero-token cookie validation (optional, pass "" to skip).
+func Register(name, filePath, healthCheckURL string) {
 	if name == "" || filePath == "" {
 		return
 	}
@@ -33,7 +33,7 @@ func Register(name, filePath string) {
 		delete(globalPools, name)
 	}
 
-	pool, err := Load(filePath)
+	pool, err := Load(filePath, healthCheckURL)
 	if err != nil {
 		log.Errorf("cookie pool: failed to load %s for %s: %v", filePath, name, err)
 		return
