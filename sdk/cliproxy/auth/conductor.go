@@ -2476,11 +2476,17 @@ func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, op
 		}
 	}
 	registryRef := registry.GetGlobalRegistry()
+	pinnedGroup := pinnedAuthID
+	if pinnedAuthID != "" {
+		if pinnedAuth, ok := m.auths[pinnedAuthID]; ok {
+			pinnedGroup = pinnedAuth.AffinityGroup()
+		}
+	}
 	for _, candidate := range m.auths {
 		if candidate.Provider != provider || candidate.Disabled {
 			continue
 		}
-		if pinnedAuthID != "" && candidate.ID != pinnedAuthID {
+		if pinnedGroup != "" && candidate.AffinityGroup() != pinnedGroup {
 			continue
 		}
 		if _, used := tried[candidate.ID]; used {
@@ -2594,12 +2600,18 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 			modelKey = strings.TrimSpace(parsed.ModelName)
 		}
 	}
+	pinnedGroup := pinnedAuthID
+	if pinnedAuthID != "" {
+		if pinnedAuth, ok := m.auths[pinnedAuthID]; ok {
+			pinnedGroup = pinnedAuth.AffinityGroup()
+		}
+	}
 	registryRef := registry.GetGlobalRegistry()
 	for _, candidate := range m.auths {
 		if candidate == nil || candidate.Disabled {
 			continue
 		}
-		if pinnedAuthID != "" && candidate.ID != pinnedAuthID {
+		if pinnedGroup != "" && candidate.AffinityGroup() != pinnedGroup {
 			continue
 		}
 		providerKey := strings.TrimSpace(strings.ToLower(candidate.Provider))

@@ -125,6 +125,23 @@ type ModelState struct {
 	UpdatedAt time.Time `json:"updated_at"`
 }
 
+// AffinityGroup returns the cache-affinity group key for session pinning.
+// Accounts in the same affinity group share prompt cache and can be treated
+// as interchangeable for sticky session purposes.
+// For Bedrock accounts: returns "claude:<region>" (e.g. "claude:us-east-1").
+// For all other accounts: returns the auth ID (preserving original pinning behavior).
+func (a *Auth) AffinityGroup() string {
+	if a == nil {
+		return ""
+	}
+	if a.Attributes != nil {
+		if region := strings.TrimSpace(a.Attributes["aws_region"]); region != "" {
+			return a.Provider + ":" + region
+		}
+	}
+	return a.ID
+}
+
 // Clone shallow copies the Auth structure, duplicating maps to avoid accidental mutation.
 func (a *Auth) Clone() *Auth {
 	if a == nil {
