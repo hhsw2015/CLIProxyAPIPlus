@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	kiroauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/kiro"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/cookiepool"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/watcher/diff"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
@@ -277,6 +278,13 @@ func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) []*cor
 			out = append(out, a)
 			createdEntries++
 		}
+		// Cookie pool: if config has a cookie-pool-file, register the pool
+		// and store the pool name in attrs so the executor can pick cookies at runtime.
+		if poolFile := strings.TrimSpace(compat.CookiePoolFile); poolFile != "" {
+			cookiepool.Register(compat.Name, poolFile)
+			log.Infof("cookie pool registered for %s from %s", compat.Name, poolFile)
+		}
+
 		// Fallback: create entry without API key if no APIKeyEntries
 		if createdEntries == 0 {
 			idKind := fmt.Sprintf("openai-compatibility:%s", providerName)
@@ -289,6 +297,9 @@ func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) []*cor
 			}
 			if compat.Priority != 0 {
 				attrs["priority"] = strconv.Itoa(compat.Priority)
+			}
+			if poolFile := strings.TrimSpace(compat.CookiePoolFile); poolFile != "" {
+				attrs["cookie_pool_name"] = compat.Name
 			}
 			if hash := diff.ComputeOpenAICompatModelsHash(compat.Models); hash != "" {
 				attrs["models_hash"] = hash

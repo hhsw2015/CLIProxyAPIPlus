@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/cookiepool"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
@@ -52,20 +53,15 @@ func (e *OpenAICompatExecutor) PrepareRequest(req *http.Request, auth *cliproxya
 		attrs = auth.Attributes
 	}
 	util.ApplyCustomHeadersFromAttrs(req, attrs)
-	// Explicitly pass through special headers that might not have the "header:" prefix in attributes
+	// Pass through special headers that might not have the "header:" prefix in attributes.
 	for k, v := range attrs {
 		lowerK := strings.ToLower(k)
 		if lowerK == "x-forwarded-for" || lowerK == "x-real-ip" || lowerK == "cookie" {
 			req.Header.Set(k, v)
 		}
 	}
-	// Explicitly pass through special headers that might not have the "header:" prefix in attributes
-	for k, v := range attrs {
-		lowerK := strings.ToLower(k)
-		if lowerK == "x-forwarded-for" || lowerK == "x-real-ip" || lowerK == "cookie" {
-			req.Header.Set(k, v)
-		}
-	}
+	// Cookie pool: if this auth has a cookie pool, pick a random cookie and inject it.
+	applyCookiePoolHeaders(req, auth)
 	return nil
 }
 
@@ -458,4 +454,32 @@ func detectSSERateLimitError(line []byte) error {
 		return statusErr{code: 429, msg: msg}
 	}
 	return nil
+}
+
+// applyCookiePoolHeaders checks if the auth is backed by a cookie pool and, if so,
+// picks a random cookie to inject into the request headers. This enables the
+// "plugin-style" cookie pool mechanism where thousands of cookies are loaded from
+// an external file without bloating config.yaml.
+func applyCookiePoolHeaders(req *http.Request, auth *cliproxyauth.Auth) {
+	if req == nil || auth == nil || auth.Attributes == nil {
+		return
+	}
+	poolName := strings.TrimSpace(auth.Attributes["cookie_pool_name"])
+	if poolName == "" {
+		return
+	}
+	pool := cookiepool.Get(poolName)
+	if pool == nil {
+		return
+	}
+	entry := pool.Pick()
+	if entry == nil {
+		return
+	}
+	if entry.Cookie != "" {
+		req.Header.Set("X-Skywork-Cookies", entry.Cookie)
+	}
+	if entry.XFF != "" {
+		req.Header.Set("X-Forwarded-For", entry.XFF)
+	}
 }
