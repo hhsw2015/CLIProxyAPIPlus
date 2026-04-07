@@ -18,10 +18,9 @@ import (
 )
 
 // Entry represents one cookie credential in the pool.
-type Entry struct {
-	Cookie string `json:"cookie"`
-	XFF    string `json:"xff"`
-}
+// Keys are HTTP header names, values are header values.
+// Example: {"x-skywork-cookies": "token=...", "X-Forwarded-For": "10.54.12.4"}
+type Entry map[string]string
 
 // Pool holds a set of cookie entries loaded from an external file.
 // It supports concurrent reads and periodic hot-reload.
@@ -94,13 +93,14 @@ func (p *Pool) Pick() *Entry {
 }
 
 // MarkDead marks a cookie as temporarily dead for the specified duration.
+// The cookie is identified by its entry ID (first header value).
 // If the dead cookie was the preferred (sticky) cookie, the preference is
 // cleared so the next Pick selects a new random cookie.
 func (p *Pool) MarkDead(cookie string, duration time.Duration) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	for i, e := range p.entries {
-		if e.Cookie == cookie {
+		if entryID(e) == cookie {
 			p.dead[i] = time.Now().Add(duration)
 			if p.preferred == i {
 				p.preferred = -1
@@ -148,7 +148,7 @@ func (p *Pool) reload() error {
 	// Filter out empty entries
 	clean := make([]Entry, 0, len(entries))
 	for _, e := range entries {
-		if strings.TrimSpace(e.Cookie) != "" {
+		if len(e) > 0 && entryID(e) != "" {
 			clean = append(clean, e)
 		}
 	}
@@ -181,6 +181,29 @@ func (p *Pool) watchLoop() {
 			p.checkReload()
 		}
 	}
+}
+
+// entryID returns a stable identifier for a pool entry (the first non-empty header value).
+// Used for MarkDead matching and sticky preference tracking.
+func entryID(e Entry) string {
+	// Prefer x-skywork-cookies as the canonical ID (it's the account token).
+	for _, key := range []string{"x-skywork-cookies", "X-Skywork-Cookies", "cookie"} {
+		if v := strings.TrimSpace(e[key]); v != "" {
+			return v
+		}
+	}
+	// Fallback: first non-empty value.
+	for _, v := range e {
+		if strings.TrimSpace(v) != "" {
+			return strings.TrimSpace(v)
+		}
+	}
+	return ""
+}
+
+// EntryID returns the stable identifier for this entry (exported for callers like MarkDead).
+func (e Entry) ID() string {
+	return entryID(e)
 }
 
 func (p *Pool) checkReload() {
