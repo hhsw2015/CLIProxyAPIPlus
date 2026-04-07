@@ -21,15 +21,11 @@ func TestIsRefusal_StrongPhrases(t *testing.T) {
 		{"chinese unable to complete", "很抱歉，我无法完成你的请求。", true},
 		{"chinese no way", "我没办法帮你做这件事。", true},
 		{"chinese cannot do", "我做不到这个操作。", true},
-		{"chinese request scoped", "这个请求我无法处理。", true},
 		{"chinese policy violation", "违反规定，我不能执行。", true},
 		{"chinese not conform", "不符合我的使用规范。", true},
-		{"chinese human identity", "作为人工智能，我不能帮你做这个。", true},
 		{"chinese unable to satisfy", "无法满足这个请求，请换个方式提问。", true},
 		{"chinese unable to answer", "无法回答这个问题。", true},
 		{"chinese unable to execute", "无法执行这个操作。", true},
-		{"chinese please understand", "请理解，我不能提供此类帮助。", true},
-		{"chinese please note", "请注意，我无法为您完成该任务。", true},
 		{"chinese unable to process request", "无法处理这个请求。", true},
 	}
 
@@ -43,7 +39,7 @@ func TestIsRefusal_StrongPhrases(t *testing.T) {
 	}
 }
 
-func TestIsRefusal_WeakPrefixMatch(t *testing.T) {
+func TestIsRefusal_WeakScoring(t *testing.T) {
 	d := NewDetector(nil, nil)
 
 	cases := []struct {
@@ -51,17 +47,25 @@ func TestIsRefusal_WeakPrefixMatch(t *testing.T) {
 		text string
 		want bool
 	}{
-		{"sorry at start", "Sorry, I cannot do this for you.", true},
-		{"apologize at start", "I apologize, but this is not possible.", true},
-		{"chinese sorry start", "抱歉，我无法执行该操作。", true},
-		{"chinese regret start", "很遗憾，这是做不到的。", true},
-		{"chinese very sorry", "非常抱歉，这个我帮不了你。", true},
+		// Two signals in the first 150 chars → refusal
+		{"sorry + cannot", "Sorry, I cannot do this for you.", true},
+		{"apologize + unable", "I apologize, but I'm unable to help with this.", true},
+		{"chinese sorry + unable", "抱歉，我无法执行该操作。", true},
+		{"chinese regret + cannot", "很遗憾，这是做不到的。", true},
+		{"chinese very sorry + unable", "非常抱歉，这个我帮不了你。", true},
 		{"chinese extremely sorry", "十分抱歉，我做不到这个。", true},
 		{"chinese really sorry", "实在抱歉，没有办法。", true},
 		{"chinese excuse me", "恕我无法提供此类帮助。", true},
-		{"chinese cannot help", "不能帮助你完成这个任务。", true},
-		{"chinese no way prefix", "我没办法处理你的请求。", true},
-		{"chinese forbidden", "禁止执行此类操作。", true},
+		{"chinese cannot help", "不能帮助你完成这个任务，抱歉。", true},
+		{"chinese forbidden", "禁止执行此类操作，不能帮你。", true},
+		{"chinese please understand", "请理解，我不能提供此类帮助。", true},
+		{"chinese please note", "请注意，我无法为您完成该任务。", true},
+		{"chinese human identity", "作为人工智能，我不能帮你做这个。", true},
+		{"chinese request scoped", "这个请求我无法处理。", true},
+
+		// Short message starting with weak signal → refusal
+		{"short sorry", "Sorry.", true},
+		{"short chinese sorry", "抱歉。", true},
 	}
 
 	for _, tc := range cases {
@@ -107,23 +111,19 @@ func TestIsRefusal_NormalResponses(t *testing.T) {
 func TestIsRefusal_ThinkingStripping(t *testing.T) {
 	d := NewDetector(nil, nil)
 
-	// Model thinks about refusing but ultimately provides a helpful answer.
 	text := `<thinking>
 I'm not sure if I should help with this. This might violate my policy.
 Let me think about this carefully... I must decline... no wait, this is fine.
 </thinking>
 Here is the security analysis you requested. The vulnerability is in the auth module.`
-
 	if d.IsRefusal(text) {
 		t.Error("should not flag as refusal when thinking contains refusal but answer is helpful")
 	}
 
-	// Model thinks and then actually refuses.
 	text2 := `<thinking>
 This seems like a harmful request.
 </thinking>
 I'm sorry, but I cannot assist with this request as it violates my guidelines.`
-
 	if !d.IsRefusal(text2) {
 		t.Error("should flag as refusal when answer text is a refusal")
 	}
@@ -131,7 +131,6 @@ I'm sorry, but I cannot assist with this request as it violates my guidelines.`
 
 func TestIsRefusal_EmptyAndWhitespace(t *testing.T) {
 	d := NewDetector(nil, nil)
-
 	if d.IsRefusal("") {
 		t.Error("empty string should not be refusal")
 	}
@@ -142,7 +141,6 @@ func TestIsRefusal_EmptyAndWhitespace(t *testing.T) {
 
 func TestIsRefusal_OnlyThinkingBlock(t *testing.T) {
 	d := NewDetector(nil, nil)
-
 	text := `<thinking>I cannot assist with this harmful request.</thinking>`
 	if d.IsRefusal(text) {
 		t.Error("text that is only a thinking block should not be flagged")
@@ -158,10 +156,8 @@ func TestIsRefusal_ExtraPatterns(t *testing.T) {
 	if !d.IsRefusal("This contains a custom refusal phrase in the middle.") {
 		t.Error("extra strong pattern should match anywhere")
 	}
-	if !d.IsRefusal("Custom weak start of response") {
-		t.Error("extra weak pattern should match in prefix")
-	}
-	if d.IsRefusal("Some long text that eventually says custom weak at the end, way past the prefix window.") {
-		t.Error("extra weak pattern should not match outside prefix window")
+	// extra weak needs score >= 2 or to be at start of short message
+	if !d.IsRefusal("Custom weak and also sorry about this.") {
+		t.Error("extra weak + another signal should trigger refusal")
 	}
 }
