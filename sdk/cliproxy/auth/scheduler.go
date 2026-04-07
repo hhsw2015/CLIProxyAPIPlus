@@ -829,11 +829,7 @@ func bestAffinityGroup(view *readyView, predicate func(*scheduledAuth) bool, pre
 		}
 		groups[g]++
 	}
-	// Sticky: if the preferred group still has available accounts, use it.
-	if preferred != "" && groups[preferred] > 0 {
-		return preferred
-	}
-	// Otherwise, pick the group with the most accounts.
+	// Pick the group with the most available accounts.
 	bestGroup := ""
 	bestCount := 1 // only return groups with 2+ members
 	for g, count := range groups {
@@ -841,6 +837,12 @@ func bestAffinityGroup(view *readyView, predicate func(*scheduledAuth) bool, pre
 			bestCount = count
 			bestGroup = g
 		}
+	}
+	// Sticky: if the preferred group still has as many accounts as the best,
+	// keep it. This avoids unnecessary region switches when capacity is equal.
+	// But if another region has more available accounts, switch to it.
+	if preferred != "" && groups[preferred] >= bestCount && groups[preferred] >= 2 {
+		return preferred
 	}
 	return bestGroup
 }
