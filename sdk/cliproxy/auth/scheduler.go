@@ -246,16 +246,24 @@ func (s *authScheduler) pickMixed(ctx context.Context, providers []string, model
 		if providerState == nil {
 			return nil, "", &Error{Code: "auth_not_found", Message: "no auth available"}
 		}
+		// Resolve affinity group: accounts sharing prompt cache (same region)
+		// are treated as interchangeable for session pinning.
+		pinnedGroup := pinnedAuthID // default: exact match
+		if pinnedState := s.findAuthLocked(pinnedAuthID); pinnedState != nil {
+			pinnedGroup = pinnedState.auth.AffinityGroup()
+		}
 		shard := providerState.ensureModelLocked(modelKey, time.Now())
 		predicate := func(entry *scheduledAuth) bool {
-			if entry == nil || entry.auth == nil || entry.auth.ID != pinnedAuthID {
+			if entry == nil || entry.auth == nil {
 				return false
 			}
-			if len(tried) == 0 {
-				return true
+			if entry.auth.AffinityGroup() != pinnedGroup {
+				return false
 			}
-			_, ok := tried[pinnedAuthID]
-			return !ok
+			if _, ok := tried[entry.auth.ID]; ok {
+				return false
+			}
+			return true
 		}
 		if picked := shard.pickReadyLocked(false, s.strategy, predicate); picked != nil {
 			return picked, providerKey, nil
@@ -359,6 +367,20 @@ func (s *authScheduler) pickMixed(ctx context.Context, providers []string, model
 		return picked, providerKey, nil
 	}
 	return nil, "", s.mixedUnavailableErrorLocked(normalized, model, tried)
+}
+
+// findAuthLocked looks up a scheduledAuthMeta by auth ID across all providers.
+// Caller must hold s.mu.
+func (s *authScheduler) findAuthLocked(authID string) *scheduledAuthMeta {
+	providerKey := s.authProviders[authID]
+	if providerKey == "" {
+		return nil
+	}
+	ps := s.providers[providerKey]
+	if ps == nil {
+		return nil
+	}
+	return ps.auths[authID]
 }
 
 // mixedUnavailableErrorLocked synthesizes the mixed-provider cooldown or unavailable error.
