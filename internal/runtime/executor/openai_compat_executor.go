@@ -194,7 +194,7 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 					if httpResp.StatusCode == 429 {
 						duration = 10 * time.Minute
 					}
-					pool.MarkDead(cookieEntry.Cookie, duration)
+					pool.MarkDead(cookieEntry.ID(), duration)
 					log.Warnf("openai compat executor: cookie failed with status %d, marking dead and retrying", httpResp.StatusCode)
 					continue
 				}
@@ -328,7 +328,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 					if httpResp.StatusCode == 429 {
 						duration = 10 * time.Minute
 					}
-					pool.MarkDead(cookieEntry.Cookie, duration)
+					pool.MarkDead(cookieEntry.ID(), duration)
 					log.Warnf("openai compat executor (stream): cookie failed with status %d, marking dead and retrying", httpResp.StatusCode)
 					continue
 				}
@@ -531,7 +531,8 @@ func detectSSERateLimitError(line []byte) error {
 }
 
 // applyCookiePoolHeaders checks if the auth is backed by a cookie pool and, if so,
-// picks a random cookie to inject into the request headers. Returns the picked
+// picks a cookie to inject into the request headers. The pool entry is a map of
+// header names to values, applied directly to the request. Returns the picked
 // entry or nil.
 func applyCookiePoolHeaders(req *http.Request, auth *cliproxyauth.Auth) *cookiepool.Entry {
 	if req == nil || auth == nil || auth.Attributes == nil {
@@ -549,11 +550,10 @@ func applyCookiePoolHeaders(req *http.Request, auth *cliproxyauth.Auth) *cookiep
 	if entry == nil {
 		return nil
 	}
-	if entry.Cookie != "" {
-		req.Header.Set("X-Skywork-Cookies", entry.Cookie)
-	}
-	if entry.XFF != "" {
-		req.Header.Set("X-Forwarded-For", entry.XFF)
+	for key, value := range *entry {
+		if strings.TrimSpace(key) != "" && strings.TrimSpace(value) != "" {
+			req.Header.Set(key, value)
+		}
 	}
 	return entry
 }
