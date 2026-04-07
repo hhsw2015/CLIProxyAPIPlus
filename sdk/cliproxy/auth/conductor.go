@@ -680,7 +680,7 @@ func readStreamBootstrap(ctx context.Context, ch <-chan cliproxyexecutor.StreamC
 // If it is 0 (unconfigured), a safe default of 50 seconds is applied.
 // The caller must call the returned cancel function to release resources.
 func (m *Manager) ttfbContext(parent context.Context) (context.Context, context.CancelFunc) {
-	const defaultTTFBTimeout = 50 * time.Second
+	const defaultTTFBTimeout = 55 * time.Second
 
 	ttfb := defaultTTFBTimeout
 	cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
