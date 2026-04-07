@@ -106,6 +106,11 @@ func prepareBedrockBody(body []byte) []byte {
 	body, _ = sjson.DeleteBytes(body, "stream")
 	// context_management is an OpenAI Responses API field; Bedrock rejects it.
 	body, _ = sjson.DeleteBytes(body, "context_management")
+	// response_format and parallel_tool_calls may survive the OpenAI→Claude
+	// translation layer; Bedrock returns 400 ValidationException for both.
+	// Confirmed present in GPT Proxy's ModifyClaudeParams (IDA 0xd95ed4, 0xd95f14).
+	body, _ = sjson.DeleteBytes(body, "response_format")
+	body, _ = sjson.DeleteBytes(body, "parallel_tool_calls")
 	if gjson.GetBytes(body, "anthropic_version").String() == "" {
 		body, _ = sjson.SetBytes(body, "anthropic_version", "bedrock-2023-05-31")
 	}

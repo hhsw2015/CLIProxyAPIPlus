@@ -1900,11 +1900,25 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 					}
 
 					statusCode := statusCodeFromResult(result.Error)
+					errMessage := failedAuthArchiveText(result.Error)
 					if isModelSupportResultError(result.Error) {
 						next := now.Add(12 * time.Hour)
 						state.NextRetryAfter = next
 						suspendReason = "model_not_supported"
 						shouldSuspendModel = true
+					} else if isBedrockThrottlingError(errMessage) {
+						// AWS Bedrock throttling: cooldown but don't mark as quota exceeded.
+						next := now.Add(30 * time.Second)
+						state.NextRetryAfter = next
+					} else if isBedrockAccessDeniedError(errMessage) {
+						// AWS credentials revoked: immediately suspend for a long time.
+						next := now.Add(24 * time.Hour)
+						state.NextRetryAfter = next
+						suspendReason = "access_denied"
+						shouldSuspendModel = true
+					} else if isClientParamError(statusCode, errMessage) {
+						// User's fault (bad input), not a key problem. Don't penalize the key.
+						state.NextRetryAfter = time.Time{}
 					} else {
 						switch statusCode {
 						case 401:
@@ -3310,6 +3324,49 @@ func failedAuthArchiveText(resultErr *Error) string {
 		parts = append(parts, msg)
 	}
 	return strings.Join(parts, ": ")
+}
+
+// isBedrockThrottlingError detects AWS Bedrock throttling which returns HTTP 400
+// (not 429) with ThrottlingException. GPT Proxy misclassifies this as a client
+// parameter error; CPA handles it correctly as rate limiting.
+func isBedrockThrottlingError(message string) bool {
+	return containsAnyFold(message, "throttlingexception", "throttling")
+}
+
+// isBedrockAccessDeniedError detects revoked AWS credentials. GPT Proxy doesn't
+// handle this specifically; CPA immediately disables the key.
+func isBedrockAccessDeniedError(message string) bool {
+	return containsAnyFold(message,
+		"accessdeniedexception",
+		"access denied",
+		"not authorized to perform",
+		"security token included in the request is invalid",
+	)
+}
+
+// isClientParamError returns true when the failure is caused by the user's input,
+// not by a key/credential problem. Matching keys are NOT penalized.
+// Based on GPT Proxy's isClientParamError (IDA 0x15df440) with corrections.
+func isClientParamError(status int, message string) bool {
+	if status == 400 && containsAnyFold(message, "validationexception") {
+		// Only treat as client error if it's NOT a throttling exception
+		// (ThrottlingException also returns 400 but should be handled as rate limiting)
+		if !isBedrockThrottlingError(message) {
+			return true
+		}
+	}
+	return containsAnyFold(message,
+		"prompt is too long",
+		"maximum context length",
+		"the maximum number of tokens allowed",
+		"too many images",
+		"could not process image",
+		"invalid image",
+		"your input is too long",
+		"exceeds the maximum",
+		"content filtering",
+		"image too large",
+	)
 }
 
 func isTemporaryTransportFailure(status int, message string) bool {
