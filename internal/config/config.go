@@ -719,6 +719,16 @@ type OpenAICompatibility struct {
 
 	// Headers optionally adds extra HTTP headers for requests sent to this provider.
 	Headers map[string]string `yaml:"headers,omitempty" json:"headers,omitempty"`
+
+	// CookiePoolFile points to an external JSON file containing a list of cookie
+	// credentials. When set, CPA picks a random cookie from the pool for each
+	// request instead of registering thousands of individual auth entries.
+	// The file format is: [{"cookie":"token=...","xff":"10.x.x.x"}, ...]
+	// Supports hot-reload: updating the file refreshes the pool without restart.
+	CookiePoolFile string `yaml:"cookie-pool-file,omitempty" json:"cookie-pool-file,omitempty"`
+
+	// ExcludedModels lists model names to exclude from this provider.
+	ExcludedModels []string `yaml:"excluded-models,omitempty" json:"excluded-models,omitempty"`
 }
 
 // OpenAICompatibilityAPIKey represents an API key configuration with optional proxy setting.
