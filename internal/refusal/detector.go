@@ -1,8 +1,4 @@
 // Package refusal provides lightweight refusal detection for LLM streaming responses.
-//
-// The detector uses a two-tier matching strategy ported from codex-session-patcher
-// (strong phrases + weak prefix keywords) combined with thinking-block stripping
-// to achieve high precision with near-zero false positives.
 package refusal
 
 import (
@@ -10,205 +6,83 @@ import (
 	"strings"
 )
 
-// strongPhrases are high-confidence indicators matched anywhere in the response text.
-// A single hit is sufficient to classify the response as a refusal.
+// strongPhrases remain matched anywhere in text.
 var strongPhrases = []string{
-	// English — canonical refusal sentences
-	"i cannot assist",
-	"i can't assist",
-	"i'm unable to assist",
-	"i cannot help with",
-	"i can't help with",
-	"i'm unable to help",
-	"i must decline",
-	"i must refuse",
-	"i have to decline",
-	"against my guidelines",
-	"against my safety policy",
-	"against my policy",
-	"violates my guidelines",
-	"violates my policy",
-	"i won't help",
-	"i won't assist",
-	"i'm not able to help",
-	"i'm not able to assist",
-	"i'm not allowed to",
-	"not able to provide",
-	"not able to assist",
-	"i apologize, but i can't",
-	"i'm sorry, but i can't",
-	"i'm sorry, but i cannot",
-	"my programming prevents",
-	"cannot fulfill this request",
-	"can't fulfill this request",
+	"i cannot assist", "i can't assist", "i'm unable to assist", "i cannot help with",
+	"i can't help with", "i'm unable to help", "i must decline", "i must refuse",
+	"i have to decline", "against my guidelines", "against my safety policy",
+	"against my policy", "violates my guidelines", "violates my policy",
+	"i won't help", "i won't assist", "i'm not able to help", "as an ai",
+	"as a language model", "as an ai assistant", "as a helpful assistant",
+	"as an artificial intelligence", "my programming prevents", "cannot fulfill this request",
 
-	// English — identity-based refusals
-	"as an ai",
-	"as a language model",
-	"as an ai assistant",
-	"as a helpful assistant",
-
-	// Chinese — canonical refusal sentences
-	"我无法协助",
-	"我无法帮助",
-	"我不能协助",
-	"我不能帮助",
-	"我不能做",
-	"我无法做",
-	"我不会帮",
-	"我无法提供",
-	"我无法完成",
-	"我没办法",
-	"我做不到",
-	"我不能帮",
-	"无法帮助你",
-	"无法协助你",
-	"不能帮助你",
-	"不能协助你",
-	"违反了我的",
-	"违反我的",
-	"这违反",
-	"违反规定",
-	"违反政策",
-	"违反规则",
-	"不符合我的",
-	"不符合我们的",
-	"我拒绝",
-	"我必须拒绝",
-
-	// Chinese — identity-based refusals
-	"作为ai",
-	"作为 ai",
-	"作为ai助手",
-	"作为 ai 助手",
-	"作为语言模型",
-	"作为 ai 语言模型",
-	"作为人工智能",
-	"ai助手无法",
-	"ai 助手无法",
-
-	// Chinese — request-scoped refusals (from refusal-relay)
-	"这个请求我无法",
-	"这个请求我不能",
-	"这个问题我无法",
-	"这个问题我不能",
-	"无法满足这个请求",
-	"不能满足这个请求",
-	"无法处理这个请求",
-	"不能处理这个请求",
-	"无法回答这个问题",
-	"不能回答这个问题",
-	"无法执行这个",
-	"不能执行这个",
-	"请注意，我",
-	"请理解，我",
+	"我无法协助", "我无法帮助", "我不能协助", "我不能帮助", "我不能做", "我无法做",
+	"我不会帮", "我无法提供", "我无法完成", "我没办法", "我做不到", "违反了我的",
+	"违反我的", "这违反", "违反规定", "违反政策", "违反规则", "不符合我的",
+	"不符合我们的", "不符合规定", "不符合政策", "我拒绝", "我必须拒绝",
+	"作为ai", "作为 ai", "作为ai助手", "作为 ai 助手", "作为语言模型",
+	"人工智能无法", "作为人工智能", "我的编程限制", "我的安全准则",
+	"无法满足这个请求", "无法处理这个请求", "无法回答这个问题", "无法执行这个",
+	"这个请求我无法", "这个请求我不能", "这个问题我无法", "这个问题我不能",
+	"请注意，我", "请理解，我", "非常抱歉，", "十分抱歉，", "实在抱歉，",
+	"恕我无法", "恕我不能", "帮不了你",
 }
 
-// weakPrefixes are lower-confidence keywords that only indicate refusal when they
-// appear near the very beginning of the response (within the first prefixWindow chars).
-// This prevents false positives like "Sorry, I found a bug on line 10".
-var weakPrefixes = []string{
-	// English
-	"i'm sorry",
-	"i am sorry",
-	"i apologize",
-	"sorry,",
-	"unfortunately,",
-	"i cannot",
-	"i can't",
-	"i'm unable",
-	"unable to",
-	"not permitted",
-	"not allowed",
-	"refuse to",
-
-	// Chinese
-	"抱歉",
-	"很抱歉",
-	"对不起",
-	"不好意思",
-	"我无法",
-	"我不能",
-	"我没办法",
-	"不允许",
-	"禁止",
-	"不能帮你",
-	"不会帮你",
-	"不会帮助",
-	"无法帮你",
-	"无法协助",
-	"不能为你",
-	"无法为你",
-	"不能帮助",
-	"很遗憾",
-	"非常抱歉",
-	"十分抱歉",
-	"实在抱歉",
-	"恕我无法",
-	"恕我不能",
+// weakSignalGroups groups related signals so that overlapping phrases
+// (e.g. "抱歉" and "很抱歉") only count as a single score point.
+var weakSignalGroups = [][]string{
+	{"sorry", "apologize"},
+	{"unfortunately"},
+	{"i cannot", "i can't", "i'm unable"},
+	{"抱歉", "很抱歉", "非常抱歉", "十分抱歉", "实在抱歉"},
+	{"对不起", "不好意思"},
+	{"很遗憾"},
+	{"无法", "做不到", "没办法"},
+	{"不能"},
+	{"禁止", "不允许"},
+	{"不符合", "违反"},
 }
 
-// safePassthroughPatterns indicate the response contains real content even if a weak
-// keyword matched. If any of these appear in the inspected text, we skip detection.
+// safePassthroughPatterns: skip detection if these appear.
 var safePassthroughPatterns = []string{
-	"```",     // code block — model is producing code
-	"import ", // code statement
-	"func ",   // Go function
-	"def ",    // Python function
-	"class ",  // class definition
+	"```", "import ", "func ", "def ", "class ", "package ", "namespace ",
 }
-
-const (
-	// prefixWindow is the number of characters examined for weak-prefix matching.
-	prefixWindow = 30
-)
 
 // thinkingStripRegex removes <thinking>...</thinking> blocks before detection.
 var thinkingStripRegex = regexp.MustCompile(`(?si)<thinking>.*?</thinking>`)
 
-// Detector provides refusal detection with configurable extra patterns.
 type Detector struct {
 	extraStrong []string
 	extraWeak   []string
 }
 
-// NewDetector creates a Detector with optional extra patterns from config.
 func NewDetector(extraStrong, extraWeak []string) *Detector {
-	return &Detector{
-		extraStrong: extraStrong,
-		extraWeak:   extraWeak,
-	}
+	return &Detector{extraStrong: extraStrong, extraWeak: extraWeak}
 }
 
-// IsRefusal returns true if the given text is classified as a model refusal.
-//
-// The detection pipeline is:
-//  1. Strip <thinking> blocks so internal reasoning doesn't cause false positives.
-//  2. Check safe-passthrough patterns (code blocks, etc.) — if found, return false.
-//  3. Strong phrase match — full-text scan for high-confidence indicators.
-//  4. Weak prefix match — scan only the first 30 characters for lower-confidence keywords.
 func (d *Detector) IsRefusal(text string) bool {
-	if len(strings.TrimSpace(text)) == 0 {
+	text = strings.TrimSpace(text)
+	if text == "" {
 		return false
 	}
 
-	// Step 1: strip thinking blocks.
+	// 1. Strip thinking
 	cleaned := thinkingStripRegex.ReplaceAllString(text, "")
 	cleaned = strings.TrimSpace(cleaned)
-	if len(cleaned) == 0 {
+	if cleaned == "" {
 		return false
 	}
 
 	lower := strings.ToLower(cleaned)
 
-	// Step 2: safe passthrough — if the text contains code/structured content, skip.
+	// 2. Immediate passthrough for code
 	for _, safe := range safePassthroughPatterns {
 		if strings.Contains(lower, safe) {
 			return false
 		}
 	}
 
-	// Step 3: strong phrase match — anywhere in text.
+	// 3. Strong phrase match (Direct hit)
 	for _, phrase := range strongPhrases {
 		if strings.Contains(lower, phrase) {
 			return true
@@ -220,17 +94,43 @@ func (d *Detector) IsRefusal(text string) bool {
 		}
 	}
 
-	// Step 4: weak prefix match — the response must *start with* a weak keyword.
-	// We trim leading whitespace and check if the lowered text begins with the keyword.
-	// This prevents "I analyzed the code. Sorry, bug on line 10" from being a false positive.
-	for _, kw := range weakPrefixes {
-		if strings.HasPrefix(lower, kw) {
-			return true
+	// 4. Scoring system for weak signals in the first 150 chars.
+	// Each signal GROUP scores at most 1 point.
+	// "抱歉" and "很抱歉" in the same text = 1 point (same group), not 2.
+	// "抱歉" + "无法" = 2 points (different groups) → refusal.
+	scanEnd := len(lower)
+	if scanEnd > 150 {
+		scanEnd = 150
+	}
+	scanArea := lower[:scanEnd]
+
+	score := 0
+	for _, group := range weakSignalGroups {
+		for _, sig := range group {
+			if strings.Contains(scanArea, sig) {
+				score++
+				break // only count one per group
+			}
 		}
 	}
-	for _, kw := range d.extraWeak {
-		if strings.HasPrefix(lower, strings.ToLower(kw)) {
-			return true
+	for _, sig := range d.extraWeak {
+		if strings.Contains(scanArea, strings.ToLower(sig)) {
+			score++
+		}
+	}
+
+	if score >= 2 {
+		return true
+	}
+
+	// SPECIAL CASE: short message starting with any weak signal → refusal.
+	if len(cleaned) < 40 && score >= 1 {
+		for _, group := range weakSignalGroups {
+			for _, sig := range group {
+				if strings.HasPrefix(lower, sig) {
+					return true
+				}
+			}
 		}
 	}
 
