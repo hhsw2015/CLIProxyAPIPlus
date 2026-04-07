@@ -110,13 +110,15 @@ type modelStats struct {
 
 // RequestDetail stores the timestamp, latency, and token usage for a single request.
 type RequestDetail struct {
-	Timestamp time.Time  `json:"timestamp"`
-	LatencyMs int64      `json:"latency_ms"`
-	Source    string     `json:"source"`
-	AuthIndex string     `json:"auth_index"`
-	Provider  string     `json:"provider,omitempty"`
-	Tokens    TokenStats `json:"tokens"`
-	Failed    bool       `json:"failed"`
+	Timestamp  time.Time  `json:"timestamp"`
+	LatencyMs  int64      `json:"latency_ms"`
+	Source     string     `json:"source"`
+	AuthIndex  string     `json:"auth_index"`
+	Provider   string     `json:"provider,omitempty"`
+	Tokens     TokenStats `json:"tokens"`
+	Failed     bool       `json:"failed"`
+	MediaType  string     `json:"media_type,omitempty"`  // image, video, audio, embedding
+	MediaCount int        `json:"media_count,omitempty"` // number of items generated
 }
 
 // TokenStats captures the token usage breakdown for a request.
@@ -233,6 +235,47 @@ func (s *RequestStatistics) Record(ctx context.Context, record coreusage.Record)
 	s.requestsByHour[hourKey]++
 	s.tokensByDay[dayKey] += totalTokens
 	s.tokensByHour[hourKey] += totalTokens
+}
+
+// RecordMedia records a media generation request (image, video, audio, embedding)
+// in the usage statistics. Called by the task system when a media task completes.
+func (s *RequestStatistics) RecordMedia(apiKey, model, mediaType string, mediaCount int, failed bool, latency time.Duration) {
+	if s == nil || !statisticsEnabled.Load() {
+		return
+	}
+	now := time.Now()
+	dayKey := now.Format("2006-01-02")
+	hourKey := now.Hour()
+	statsKey := apiKey
+	if statsKey == "" {
+		statsKey = "media"
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.totalRequests++
+	if !failed {
+		s.successCount++
+	} else {
+		s.failureCount++
+	}
+
+	stats, ok := s.apis[statsKey]
+	if !ok {
+		stats = &apiStats{Models: make(map[string]*modelStats)}
+		s.apis[statsKey] = stats
+	}
+	s.updateAPIStats(stats, model, RequestDetail{
+		Timestamp:  now,
+		LatencyMs:  latency.Milliseconds(),
+		Failed:     failed,
+		MediaType:  mediaType,
+		MediaCount: mediaCount,
+	})
+
+	s.requestsByDay[dayKey]++
+	s.requestsByHour[hourKey]++
 }
 
 func (s *RequestStatistics) updateAPIStats(stats *apiStats, model string, detail RequestDetail) {

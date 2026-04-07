@@ -25,6 +25,12 @@ var aiAPIPrefixes = []string{
 	"/v1/responses",
 	"/v1beta/models/",
 	"/api/provider/",
+	"/v1/images/",
+	"/v1/audio/",
+	"/v1/embeddings",
+	"/v1/video/",
+	"/v1/videos",
+	"/v1/tasks/",
 }
 
 const skipGinLogKey = "__gin_skip_request_logging__"

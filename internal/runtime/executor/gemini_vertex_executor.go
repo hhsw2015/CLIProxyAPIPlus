@@ -389,24 +389,60 @@ func (e *GeminiVertexExecutor) executeWithServiceAccount(ctx context.Context, au
 	})
 
 	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
-	httpResp, errDo := httpClient.Do(httpReq)
-	if errDo != nil {
-		helps.RecordAPIResponseError(ctx, e.cfg, errDo)
-		return resp, errDo
+
+	// Imagen models: retry up to 3 times with backoff on transient errors.
+	maxRetries := 1
+	if isImagenModel(baseModel) {
+		maxRetries = 3
+	}
+	var httpResp *http.Response
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		if attempt > 0 {
+			backoff := time.Duration(1<<uint(attempt-1)) * time.Second
+			log.Infof("vertex executor: imagen retry %d/%d after %v", attempt+1, maxRetries, backoff)
+			select {
+			case <-ctx.Done():
+				return resp, ctx.Err()
+			case <-time.After(backoff):
+			}
+			httpReq, _ = http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+			httpReq.Header.Set("Content-Type", "application/json")
+			if token, errTok := vertexAccessToken(ctx, e.cfg, auth, saJSON); errTok == nil && token != "" {
+				httpReq.Header.Set("Authorization", "Bearer "+token)
+			}
+			applyGeminiHeaders(httpReq, auth)
+			util.ApplyCustomHeadersFromAttrs(httpReq, attrs)
+		}
+		var errDo error
+		httpResp, errDo = httpClient.Do(httpReq)
+		if errDo != nil {
+			helps.RecordAPIResponseError(ctx, e.cfg, errDo)
+			if attempt < maxRetries-1 && ctx.Err() == nil {
+				continue
+			}
+			return resp, errDo
+		}
+		helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+		if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
+			b, _ := io.ReadAll(httpResp.Body)
+			httpResp.Body.Close()
+			helps.AppendAPIResponseChunk(ctx, e.cfg, b)
+			helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
+			if httpResp.StatusCode == 400 || httpResp.StatusCode == 401 || httpResp.StatusCode == 403 || attempt >= maxRetries-1 {
+				err = statusErr{code: httpResp.StatusCode, msg: string(b)}
+				return resp, err
+			}
+			continue
+		}
+		break
 	}
 	defer func() {
-		if errClose := httpResp.Body.Close(); errClose != nil {
-			log.Errorf("vertex executor: close response body error: %v", errClose)
+		if httpResp != nil {
+			if errClose := httpResp.Body.Close(); errClose != nil {
+				log.Errorf("vertex executor: close response body error: %v", errClose)
+			}
 		}
 	}()
-	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
-	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-		b, _ := io.ReadAll(httpResp.Body)
-		helps.AppendAPIResponseChunk(ctx, e.cfg, b)
-		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
-		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
-		return resp, err
-	}
 	data, errRead := io.ReadAll(httpResp.Body)
 	if errRead != nil {
 		helps.RecordAPIResponseError(ctx, e.cfg, errRead)

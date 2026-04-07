@@ -1889,7 +1889,6 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 			if result.Model != "" {
 				if !isRequestScopedNotFoundResultError(result.Error) {
 					state := ensureModelState(auth, result.Model)
-					state.Unavailable = true
 					state.Status = StatusError
 					state.UpdatedAt = now
 					if result.Error != nil {
@@ -1902,16 +1901,19 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 					statusCode := statusCodeFromResult(result.Error)
 					errMessage := failedAuthArchiveText(result.Error)
 					if isModelSupportResultError(result.Error) {
+						state.Unavailable = true
 						next := now.Add(12 * time.Hour)
 						state.NextRetryAfter = next
 						suspendReason = "model_not_supported"
 						shouldSuspendModel = true
 					} else if isBedrockThrottlingError(errMessage) {
-						// AWS Bedrock throttling: cooldown but don't mark as quota exceeded.
+						// AWS Bedrock throttling: cooldown the specific credential only.
+						state.Unavailable = true
 						next := now.Add(30 * time.Second)
 						state.NextRetryAfter = next
 					} else if isBedrockAccessDeniedError(errMessage) {
 						// AWS credentials revoked: immediately suspend for a long time.
+						state.Unavailable = true
 						next := now.Add(24 * time.Hour)
 						state.NextRetryAfter = next
 						suspendReason = "access_denied"
@@ -1921,22 +1923,26 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 						state.NextRetryAfter = time.Time{}
 					} else {
 						switch statusCode {
-						case 401:
+						case 401, 403:
+							// Credential-specific auth failure: cooldown this credential
+							// but do NOT mark state.Unavailable so the scheduler can still
+							// pick other healthy credentials in the same priority tier.
 							next := now.Add(30 * time.Minute)
 							state.NextRetryAfter = next
-							suspendReason = "unauthorized"
-							shouldSuspendModel = true
-						case 402, 403:
+						case 402:
+							state.Unavailable = true
 							next := now.Add(30 * time.Minute)
 							state.NextRetryAfter = next
 							suspendReason = "payment_required"
 							shouldSuspendModel = true
 						case 404:
+							state.Unavailable = true
 							next := now.Add(12 * time.Hour)
 							state.NextRetryAfter = next
 							suspendReason = "not_found"
 							shouldSuspendModel = true
 						case 429:
+							state.Unavailable = true
 							var next time.Time
 							backoffLevel := state.Quota.BackoffLevel
 							if result.RetryAfter != nil {
@@ -1959,6 +1965,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 							shouldSuspendModel = true
 							setModelQuota = true
 						case 408, 500, 502, 503, 504:
+							state.Unavailable = true
 							if quotaCooldownDisabledForAuth(auth) {
 								state.NextRetryAfter = time.Time{}
 							} else if isTemporaryTransportFailure(statusCodeFromResult(result.Error), strings.ToLower(strings.TrimSpace(failedAuthArchiveText(result.Error)))) {

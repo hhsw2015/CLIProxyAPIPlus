@@ -66,13 +66,12 @@ func (p *Pool) Pick() *Entry {
 		idx := (start + i) % n
 		if expiry, dead := p.dead[idx]; dead {
 			if now.After(expiry) {
-				// Expired dead mark — treat as alive (will be cleaned on next write)
+				// Expired dead mark
 			} else {
 				continue
 			}
 		}
-		entry := p.entries[idx]
-		return &entry
+		return &p.entries[idx]
 	}
 	return nil
 }
