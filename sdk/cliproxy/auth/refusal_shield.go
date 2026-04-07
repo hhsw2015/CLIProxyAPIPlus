@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"time"
 
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v6/internal/config"
@@ -59,13 +60,34 @@ func (m *Manager) refusalShieldCheck(ctx context.Context, shieldCfg *internalcon
 		return nil
 	}
 
-	if !detector.IsRefusal(text) {
-		return nil
-	}
+	level := detector.Analyze(text)
 
-	// Refusal detected — rewrite the payload for retry.
-	entry := log.WithContext(ctx).WithField("refusal_text_preview", truncateStr(text, 80))
-	entry.Info("[refusal-shield] refusal detected, rewriting payload for retry")
+	switch level {
+	case refusal.LevelNone:
+		return nil
+
+	case refusal.LevelUncertain:
+		// Score == 1: borderline case. If AI verify is enabled, ask a model to confirm.
+		if !shieldCfg.AIVerify {
+			// AI verify disabled — treat uncertain as non-refusal (conservative, avoid false positives).
+			log.WithContext(ctx).WithField("text_preview", truncateStr(text, 60)).
+				Debug("[refusal-shield] uncertain signal (score=1), ai-verify disabled, passing through")
+			return nil
+		}
+
+		verified := m.aiVerifyRefusal(ctx, shieldCfg, text)
+		if !verified {
+			log.WithContext(ctx).WithField("text_preview", truncateStr(text, 60)).
+				Debug("[refusal-shield] AI verify says NOT a refusal, passing through")
+			return nil
+		}
+		log.WithContext(ctx).WithField("text_preview", truncateStr(text, 60)).
+			Info("[refusal-shield] AI verify confirmed refusal (score=1), rewriting")
+
+	case refusal.LevelConfirmed:
+		log.WithContext(ctx).WithField("refusal_text_preview", truncateStr(text, 80)).
+			Info("[refusal-shield] refusal detected (confirmed), rewriting payload for retry")
+	}
 
 	rewritten := m.rewriteWithStrategy(ctx, shieldCfg, originalPayload, text)
 	return &refusalShieldError{rewrittenPayload: rewritten}
@@ -189,6 +211,71 @@ func extractContentFromChatResponse(payload []byte) string {
 		return ""
 	}
 	return resp.Choices[0].Message.Content
+}
+
+// aiVerifyRefusal calls the AI verify endpoint to confirm whether a borderline
+// text is truly a refusal. Uses the same endpoint/model config as AI rewrite.
+// If no external endpoint is set, routes through CPA's own pool.
+// Returns false on any error (fail-open: don't block on verify failure).
+func (m *Manager) aiVerifyRefusal(ctx context.Context, shieldCfg *internalconfig.RefusalShieldConfig, text string) bool {
+	timeout := time.Duration(shieldCfg.AIRewriteTimeoutSeconds) * time.Second
+	if timeout <= 0 {
+		timeout = 5 * time.Second
+	}
+
+	model := shieldCfg.AIRewriteModel
+	if model == "" {
+		model = "gpt-4o-mini"
+	}
+
+	if shieldCfg.AIRewriteEndpoint != "" {
+		// Path 1: external endpoint.
+		return refusal.AIVerify(ctx, refusal.AIVerifyConfig{
+			Endpoint: shieldCfg.AIRewriteEndpoint,
+			APIKey:   shieldCfg.AIRewriteKey,
+			Model:    model,
+			Timeout:  timeout,
+		}, text)
+	}
+
+	// Path 2: CPA's own pool.
+	return m.aiVerifyViaCPAPool(ctx, model, text, timeout)
+}
+
+// aiVerifyViaCPAPool routes the verify request through CPA's provider pool.
+func (m *Manager) aiVerifyViaCPAPool(ctx context.Context, model, text string, timeout time.Duration) bool {
+	if len(text) > 300 {
+		text = text[:300]
+	}
+
+	payload, err := json.Marshal(map[string]interface{}{
+		"model": model,
+		"messages": []map[string]string{
+			{"role": "system", "content": refusal.VerifySystemPrompt},
+			{"role": "user", "content": text},
+		},
+		"max_tokens":  3,
+		"temperature": 0,
+		"stream":      false,
+	})
+	if err != nil {
+		return false
+	}
+
+	reqCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	providers := m.registeredProviderKeys()
+	req := cliproxyexecutor.Request{Model: model, Payload: payload}
+	opts := cliproxyexecutor.Options{Stream: false}
+
+	resp, err := m.Execute(reqCtx, providers, req, opts)
+	if err != nil {
+		return false
+	}
+
+	content := extractContentFromChatResponse(resp.Payload)
+	return strings.TrimSpace(strings.ToUpper(content)) == "YES"
 }
 
 // truncateStr returns the first n characters of s, appending "..." if truncated.

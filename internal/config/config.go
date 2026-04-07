@@ -282,6 +282,13 @@ type RefusalShieldConfig struct {
 	// AIRewriteTimeoutSeconds controls the maximum wait time for the rewrite call.
 	// Default: 10. If the rewrite times out, falls back to static templates.
 	AIRewriteTimeoutSeconds int `yaml:"ai-rewrite-timeout-seconds,omitempty" json:"ai-rewrite-timeout-seconds,omitempty"`
+	// AIVerify enables AI-assisted refusal verification for uncertain cases.
+	// When the scoring system produces a borderline result (score == 1), an
+	// additional lightweight model call is made to confirm whether the text is
+	// truly a refusal. This eliminates both false positives and false negatives
+	// at the cost of one extra API call on edge cases only.
+	// Reuses AIRewriteEndpoint/Key/Model settings. Default: false.
+	AIVerify bool `yaml:"ai-verify,omitempty" json:"ai-verify,omitempty"`
 	// ExtraStrongPatterns adds custom strong-match patterns (matched anywhere in text).
 	ExtraStrongPatterns []string `yaml:"extra-strong-patterns,omitempty" json:"extra-strong-patterns,omitempty"`
 	// ExtraWeakPatterns adds custom weak-match patterns (matched only in prefix).

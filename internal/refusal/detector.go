@@ -6,7 +6,18 @@ import (
 	"strings"
 )
 
-// strongPhrases remain matched anywhere in text.
+// RefusalLevel indicates the confidence level of refusal detection.
+type RefusalLevel int
+
+const (
+	// LevelNone means no refusal detected.
+	LevelNone RefusalLevel = iota
+	// LevelUncertain means weak signals found (score == 1). May or may not be a refusal.
+	LevelUncertain
+	// LevelConfirmed means strong match or multiple weak signals. Definitely a refusal.
+	LevelConfirmed
+)
+
 var strongPhrases = []string{
 	"i cannot assist", "i can't assist", "i'm unable to assist", "i cannot help with",
 	"i can't help with", "i'm unable to help", "i must decline", "i must refuse",
@@ -28,8 +39,6 @@ var strongPhrases = []string{
 	"恕我无法", "恕我不能", "帮不了你",
 }
 
-// weakSignalGroups groups related signals so that overlapping phrases
-// (e.g. "抱歉" and "很抱歉") only count as a single score point.
 var weakSignalGroups = [][]string{
 	{"sorry", "apologize"},
 	{"unfortunately"},
@@ -43,12 +52,10 @@ var weakSignalGroups = [][]string{
 	{"不符合", "违反"},
 }
 
-// safePassthroughPatterns: skip detection if these appear.
 var safePassthroughPatterns = []string{
 	"```", "import ", "func ", "def ", "class ", "package ", "namespace ",
 }
 
-// thinkingStripRegex removes <thinking>...</thinking> blocks before detection.
 var thinkingStripRegex = regexp.MustCompile(`(?si)<thinking>.*?</thinking>`)
 
 type Detector struct {
@@ -60,44 +67,49 @@ func NewDetector(extraStrong, extraWeak []string) *Detector {
 	return &Detector{extraStrong: extraStrong, extraWeak: extraWeak}
 }
 
+// IsRefusal returns true only for confirmed refusals (strong match or score >= 2).
+// Uncertain cases (score == 1) return false here. Use Analyze() to get fine-grained
+// levels, then call AI verify for uncertain cases at the shield layer.
 func (d *Detector) IsRefusal(text string) bool {
+	return d.Analyze(text) == LevelConfirmed
+}
+
+// Analyze returns the refusal confidence level for the given text.
+//
+//   - LevelConfirmed: strong phrase match or score >= 2. Definitely a refusal.
+//   - LevelUncertain: score == 1. Might be a refusal, AI verify recommended.
+//   - LevelNone: no signals found. Safe to pass through.
+func (d *Detector) Analyze(text string) RefusalLevel {
 	text = strings.TrimSpace(text)
 	if text == "" {
-		return false
+		return LevelNone
 	}
 
-	// 1. Strip thinking
 	cleaned := thinkingStripRegex.ReplaceAllString(text, "")
 	cleaned = strings.TrimSpace(cleaned)
 	if cleaned == "" {
-		return false
+		return LevelNone
 	}
 
 	lower := strings.ToLower(cleaned)
 
-	// 2. Immediate passthrough for code
 	for _, safe := range safePassthroughPatterns {
 		if strings.Contains(lower, safe) {
-			return false
+			return LevelNone
 		}
 	}
 
-	// 3. Strong phrase match (Direct hit)
 	for _, phrase := range strongPhrases {
 		if strings.Contains(lower, phrase) {
-			return true
+			return LevelConfirmed
 		}
 	}
 	for _, phrase := range d.extraStrong {
 		if strings.Contains(lower, strings.ToLower(phrase)) {
-			return true
+			return LevelConfirmed
 		}
 	}
 
-	// 4. Scoring system for weak signals in the first 150 chars.
-	// Each signal GROUP scores at most 1 point.
-	// "抱歉" and "很抱歉" in the same text = 1 point (same group), not 2.
-	// "抱歉" + "无法" = 2 points (different groups) → refusal.
 	scanEnd := len(lower)
 	if scanEnd > 150 {
 		scanEnd = 150
@@ -109,7 +121,7 @@ func (d *Detector) IsRefusal(text string) bool {
 		for _, sig := range group {
 			if strings.Contains(scanArea, sig) {
 				score++
-				break // only count one per group
+				break
 			}
 		}
 	}
@@ -120,19 +132,22 @@ func (d *Detector) IsRefusal(text string) bool {
 	}
 
 	if score >= 2 {
-		return true
+		return LevelConfirmed
 	}
 
-	// SPECIAL CASE: short message starting with any weak signal → refusal.
 	if len(cleaned) < 40 && score >= 1 {
 		for _, group := range weakSignalGroups {
 			for _, sig := range group {
 				if strings.HasPrefix(lower, sig) {
-					return true
+					return LevelConfirmed
 				}
 			}
 		}
 	}
 
-	return false
+	if score == 1 {
+		return LevelUncertain
+	}
+
+	return LevelNone
 }
