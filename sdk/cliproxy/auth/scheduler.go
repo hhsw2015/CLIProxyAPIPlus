@@ -211,7 +211,13 @@ func (s *authScheduler) pickSingle(ctx context.Context, provider, model string, 
 		}
 		return true
 	}
-	if picked := shard.pickReadyLocked(preferWebsocket, s.strategy, predicate); picked != nil {
+	// When affinity group contains multiple accounts, use round-robin
+	// to distribute load across accounts sharing the same prompt cache.
+	singleStrategy := s.strategy
+	if pinnedGroup != pinnedAuthID {
+		singleStrategy = schedulerStrategyRoundRobin
+	}
+	if picked := shard.pickReadyLocked(preferWebsocket, singleStrategy, predicate); picked != nil {
 		return picked, nil
 	}
 	return nil, shard.unavailableErrorLocked(provider, model, predicate)
@@ -272,7 +278,13 @@ func (s *authScheduler) pickMixed(ctx context.Context, providers []string, model
 			}
 			return true
 		}
-		if picked := shard.pickReadyLocked(false, s.strategy, predicate); picked != nil {
+		// When affinity group contains multiple accounts, use round-robin
+		// to distribute load across accounts sharing the same prompt cache.
+		strategy := s.strategy
+		if pinnedGroup != pinnedAuthID {
+			strategy = schedulerStrategyRoundRobin
+		}
+		if picked := shard.pickReadyLocked(false, strategy, predicate); picked != nil {
 			return picked, providerKey, nil
 		}
 		return nil, "", shard.unavailableErrorLocked("mixed", model, predicate)
