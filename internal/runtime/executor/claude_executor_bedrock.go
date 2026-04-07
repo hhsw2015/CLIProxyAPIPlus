@@ -218,6 +218,15 @@ func (e *ClaudeExecutor) executeStreamBedrock(ctx context.Context, auth *cliprox
 			if detail, ok := helps.ParseClaudeStreamUsage(sseDataLine); ok {
 				reporter.publish(ctx, detail)
 			}
+			// Detect rate_limit_error or throttling embedded in stream events.
+			if errType := gjson.GetBytes(jsonBytes, "error.type").String(); errType == "rate_limit_error" {
+				msg := gjson.GetBytes(jsonBytes, "error.message").String()
+				if msg == "" {
+					msg = "rate limited (detected in Bedrock stream)"
+				}
+				out <- cliproxyexecutor.StreamChunk{Err: statusErr{code: 429, msg: msg}}
+				return
+			}
 
 			// Re-wrap Bedrock JSON as SSE: event type + data + blank line separator.
 			eventType := gjson.GetBytes(jsonBytes, "type").String()
