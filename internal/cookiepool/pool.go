@@ -25,22 +25,27 @@ type Entry struct {
 
 // Pool holds a set of cookie entries loaded from an external file.
 // It supports concurrent reads and periodic hot-reload.
+// Pick uses sticky selection: it remembers the last successful cookie and
+// reuses it for cache locality. On failure (MarkDead), the preferred cookie
+// is cleared and the next Pick selects a new random cookie.
 type Pool struct {
-	mu       sync.RWMutex
-	entries  []Entry
-	dead     map[int]time.Time // index → expiry of dead mark
-	filePath string
-	modTime  time.Time
-	stopCh   chan struct{}
-	stopped  atomic.Bool
+	mu        sync.RWMutex
+	entries   []Entry
+	dead      map[int]time.Time // index → expiry of dead mark
+	preferred int               // index of sticky preferred cookie, -1 = none
+	filePath  string
+	modTime   time.Time
+	stopCh    chan struct{}
+	stopped   atomic.Bool
 }
 
 // Load creates a new pool from the given JSON file path.
 func Load(filePath string) (*Pool, error) {
 	p := &Pool{
-		filePath: filePath,
-		dead:     make(map[int]time.Time),
-		stopCh:   make(chan struct{}),
+		filePath:  filePath,
+		dead:      make(map[int]time.Time),
+		preferred: -1,
+		stopCh:    make(chan struct{}),
 	}
 	if err := p.reload(); err != nil {
 		return nil, err
@@ -49,10 +54,13 @@ func Load(filePath string) (*Pool, error) {
 	return p, nil
 }
 
-// Pick returns a random live cookie entry. Returns nil if pool is empty or all dead.
+// Pick returns a live cookie entry using sticky selection. It prefers the
+// previously successful cookie (for prompt cache locality). If the preferred
+// cookie is dead or unset, a new random cookie is selected and becomes the
+// new preferred. Returns nil if pool is empty or all cookies are dead.
 func (p *Pool) Pick() *Entry {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
+	p.mu.Lock()
+	defer p.mu.Unlock()
 
 	n := len(p.entries)
 	if n == 0 {
@@ -60,7 +68,15 @@ func (p *Pool) Pick() *Entry {
 	}
 
 	now := time.Now()
-	// Try up to n times to find a live entry
+
+	// Try preferred cookie first (sticky for cache locality).
+	if p.preferred >= 0 && p.preferred < n {
+		if expiry, dead := p.dead[p.preferred]; !dead || now.After(expiry) {
+			return &p.entries[p.preferred]
+		}
+	}
+
+	// Preferred is dead or unset — pick a new random live cookie.
 	start := rand.Intn(n)
 	for i := 0; i < n; i++ {
 		idx := (start + i) % n
@@ -71,18 +87,24 @@ func (p *Pool) Pick() *Entry {
 				continue
 			}
 		}
+		p.preferred = idx
 		return &p.entries[idx]
 	}
 	return nil
 }
 
-// MarkDead marks a cookie at the given index as temporarily dead for the specified duration.
+// MarkDead marks a cookie as temporarily dead for the specified duration.
+// If the dead cookie was the preferred (sticky) cookie, the preference is
+// cleared so the next Pick selects a new random cookie.
 func (p *Pool) MarkDead(cookie string, duration time.Duration) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	for i, e := range p.entries {
 		if e.Cookie == cookie {
 			p.dead[i] = time.Now().Add(duration)
+			if p.preferred == i {
+				p.preferred = -1
+			}
 			return
 		}
 	}
@@ -134,6 +156,7 @@ func (p *Pool) reload() error {
 	p.mu.Lock()
 	p.entries = clean
 	p.modTime = info.ModTime()
+	p.preferred = -1 // reset sticky preference on reload
 	// Clear dead marks for entries that no longer exist
 	for idx := range p.dead {
 		if idx >= len(clean) {
