@@ -190,18 +190,11 @@ func (s *authScheduler) pickSingle(ctx context.Context, provider, model string, 
 	if shard == nil {
 		return nil, &Error{Code: "auth_not_found", Message: "no auth available"}
 	}
-	// Resolve affinity group for region-level pinning.
-	pinnedGroup := pinnedAuthID
-	if pinnedAuthID != "" {
-		if meta := s.findAuthLocked(pinnedAuthID); meta != nil {
-			pinnedGroup = meta.auth.AffinityGroup()
-		}
-	}
 	predicate := func(entry *scheduledAuth) bool {
 		if entry == nil || entry.auth == nil {
 			return false
 		}
-		if pinnedGroup != "" && entry.auth.AffinityGroup() != pinnedGroup {
+		if pinnedAuthID != "" && entry.auth.ID != pinnedAuthID {
 			return false
 		}
 		if len(tried) > 0 {
@@ -211,13 +204,7 @@ func (s *authScheduler) pickSingle(ctx context.Context, provider, model string, 
 		}
 		return true
 	}
-	// When affinity group contains multiple accounts, use round-robin
-	// to distribute load across accounts sharing the same prompt cache.
-	singleStrategy := s.strategy
-	if pinnedGroup != pinnedAuthID {
-		singleStrategy = schedulerStrategyRoundRobin
-	}
-	if picked := shard.pickReadyLocked(preferWebsocket, singleStrategy, predicate); picked != nil {
+	if picked := shard.pickReadyLocked(preferWebsocket, s.strategy, predicate); picked != nil {
 		return picked, nil
 	}
 	return nil, shard.unavailableErrorLocked(provider, model, predicate)
@@ -259,32 +246,18 @@ func (s *authScheduler) pickMixed(ctx context.Context, providers []string, model
 		if providerState == nil {
 			return nil, "", &Error{Code: "auth_not_found", Message: "no auth available"}
 		}
-		// Resolve affinity group: accounts sharing prompt cache (same region)
-		// are treated as interchangeable for session pinning.
-		pinnedGroup := pinnedAuthID // default: exact match
-		if pinnedState := s.findAuthLocked(pinnedAuthID); pinnedState != nil {
-			pinnedGroup = pinnedState.auth.AffinityGroup()
-		}
 		shard := providerState.ensureModelLocked(modelKey, time.Now())
 		predicate := func(entry *scheduledAuth) bool {
-			if entry == nil || entry.auth == nil {
+			if entry == nil || entry.auth == nil || entry.auth.ID != pinnedAuthID {
 				return false
 			}
-			if entry.auth.AffinityGroup() != pinnedGroup {
-				return false
+			if len(tried) == 0 {
+				return true
 			}
-			if _, ok := tried[entry.auth.ID]; ok {
-				return false
-			}
-			return true
+			_, ok := tried[pinnedAuthID]
+			return !ok
 		}
-		// When affinity group contains multiple accounts, use round-robin
-		// to distribute load across accounts sharing the same prompt cache.
-		strategy := s.strategy
-		if pinnedGroup != pinnedAuthID {
-			strategy = schedulerStrategyRoundRobin
-		}
-		if picked := shard.pickReadyLocked(false, strategy, predicate); picked != nil {
+		if picked := shard.pickReadyLocked(false, s.strategy, predicate); picked != nil {
 			return picked, providerKey, nil
 		}
 		return nil, "", shard.unavailableErrorLocked("mixed", model, predicate)
@@ -796,7 +769,20 @@ func (m *modelScheduler) pickReadyAtPriorityLocked(preferWebsocket bool, priorit
 	}
 	var picked *scheduledAuth
 	if strategy == schedulerStrategyFillFirst {
-		picked = view.pickFirst(predicate)
+		// Region-aware fill-first: when the bucket contains accounts that share
+		// AffinityGroups (e.g. same AWS region = shared prompt cache), prefer the
+		// group with the most accounts for the requested model, and round-robin
+		// within that group for load distribution.
+		bestGroup := bestAffinityGroup(view, predicate)
+		if bestGroup != "" {
+			groupPredicate := func(entry *scheduledAuth) bool {
+				return predicate(entry) && entry.auth.AffinityGroup() == bestGroup
+			}
+			picked = view.pickRoundRobin(groupPredicate)
+		}
+		if picked == nil {
+			picked = view.pickFirst(predicate)
+		}
 	} else {
 		picked = view.pickRoundRobin(predicate)
 	}
@@ -804,6 +790,35 @@ func (m *modelScheduler) pickReadyAtPriorityLocked(preferWebsocket bool, priorit
 		return nil
 	}
 	return picked.auth
+}
+
+// bestAffinityGroup returns the AffinityGroup with the most matching accounts
+// in the view. Returns "" if no shared groups exist (all groups have size 1).
+// This ensures fill-first prefers the region with the most capacity for the model.
+func bestAffinityGroup(view *readyView, predicate func(*scheduledAuth) bool) string {
+	if view == nil || len(view.flat) < 2 {
+		return ""
+	}
+	groups := make(map[string]int, len(view.flat))
+	for _, entry := range view.flat {
+		if entry == nil || entry.auth == nil || !predicate(entry) {
+			continue
+		}
+		g := entry.auth.AffinityGroup()
+		if g == entry.auth.ID {
+			continue // not a shared group
+		}
+		groups[g]++
+	}
+	bestGroup := ""
+	bestCount := 1 // only return groups with 2+ members
+	for g, count := range groups {
+		if count > bestCount {
+			bestCount = count
+			bestGroup = g
+		}
+	}
+	return bestGroup
 }
 
 func (m *modelScheduler) readyCountAtPriorityLocked(preferWebsocket bool, priority int) int {
