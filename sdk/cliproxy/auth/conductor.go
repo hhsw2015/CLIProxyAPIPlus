@@ -792,6 +792,10 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 				result.RetryAfter = retryAfterFromError(bootstrapErr)
 				m.MarkResult(ctx, result)
 				discardStreamChunks(streamResult.Chunks)
+				// Release session pinning so the retry can pick a different, healthy account.
+				// This preserves pinning for normal requests but allows failover when an
+				// account is unresponsive, avoiding the "stuck on a dead account" problem.
+				delete(opts.Metadata, cliproxyexecutor.PinnedAuthMetadataKey)
 				lastErr = ttfbErr
 				continue
 			}
