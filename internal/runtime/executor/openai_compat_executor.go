@@ -18,6 +18,7 @@ import (
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
 	log "github.com/sirupsen/logrus"
+	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
 
@@ -293,6 +294,13 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 			if detail, ok := helps.ParseOpenAIStreamUsage(line); ok {
 				reporter.Publish(ctx, detail)
 			}
+			// Detect rate_limit_error hidden inside SSE JSON lines (GPT Proxy §4).
+			// The upstream may return HTTP 200 but embed a rate limit error in the stream.
+			if rateLimitErr := detectSSERateLimitError(line); rateLimitErr != nil {
+				reporter.PublishFailure(ctx)
+				out <- cliproxyexecutor.StreamChunk{Err: rateLimitErr}
+				return
+			}
 			if len(line) == 0 {
 				continue
 			}
@@ -425,4 +433,29 @@ func (e *OpenAICompatExecutor) requiresAnthropicImageContent(auth *cliproxyauth.
 		return true
 	}
 	return strings.EqualFold(strings.TrimSpace(auth.Provider), "skywork")
+}
+
+// detectSSERateLimitError checks an SSE line for an embedded rate_limit_error.
+// GPT Proxy detects this via exact 16-byte match on error.type (IDA §4).
+// Returns a statusErr with 429 if detected, nil otherwise.
+func detectSSERateLimitError(line []byte) error {
+	trimmed := bytes.TrimSpace(line)
+	if len(trimmed) == 0 {
+		return nil
+	}
+	if bytes.HasPrefix(trimmed, []byte("data:")) {
+		trimmed = bytes.TrimSpace(trimmed[5:])
+	}
+	if len(trimmed) == 0 || trimmed[0] != '{' {
+		return nil
+	}
+	errType := gjson.GetBytes(trimmed, "error.type").String()
+	if errType == "rate_limit_error" {
+		msg := gjson.GetBytes(trimmed, "error.message").String()
+		if msg == "" {
+			msg = "rate limited (detected in SSE stream)"
+		}
+		return statusErr{code: 429, msg: msg}
+	}
+	return nil
 }
