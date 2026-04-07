@@ -183,16 +183,9 @@ func (p *Pool) watchLoop() {
 	}
 }
 
-// entryID returns a stable identifier for a pool entry (the first non-empty header value).
+// entryID returns a stable identifier for a pool entry (the first non-empty value).
 // Used for MarkDead matching and sticky preference tracking.
 func entryID(e Entry) string {
-	// Prefer x-skywork-cookies as the canonical ID (it's the account token).
-	for _, key := range []string{"x-skywork-cookies", "X-Skywork-Cookies", "cookie"} {
-		if v := strings.TrimSpace(e[key]); v != "" {
-			return v
-		}
-	}
-	// Fallback: first non-empty value.
 	for _, v := range e {
 		if strings.TrimSpace(v) != "" {
 			return strings.TrimSpace(v)
