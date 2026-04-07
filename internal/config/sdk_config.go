@@ -46,4 +46,9 @@ type StreamingConfig struct {
 	// to allow auth rotation / transient recovery.
 	// <= 0 disables bootstrap retries. Default is 0.
 	BootstrapRetries int `yaml:"bootstrap-retries,omitempty" json:"bootstrap-retries,omitempty"`
+
+	// TTFBTimeoutSeconds controls the maximum time to wait for the first byte of a stream response
+	// before triggering a retry/fallback.
+	// <= 0 disables TTFB timeout. Default is 0.
+	TTFBTimeoutSeconds int `yaml:"ttfb-timeout-seconds,omitempty" json:"ttfb-timeout-seconds,omitempty"`
 }
