@@ -190,11 +190,18 @@ func (s *authScheduler) pickSingle(ctx context.Context, provider, model string, 
 	if shard == nil {
 		return nil, &Error{Code: "auth_not_found", Message: "no auth available"}
 	}
+	// Resolve affinity group for region-level pinning.
+	pinnedGroup := pinnedAuthID
+	if pinnedAuthID != "" {
+		if meta := s.findAuthLocked(pinnedAuthID); meta != nil {
+			pinnedGroup = meta.auth.AffinityGroup()
+		}
+	}
 	predicate := func(entry *scheduledAuth) bool {
 		if entry == nil || entry.auth == nil {
 			return false
 		}
-		if pinnedAuthID != "" && entry.auth.ID != pinnedAuthID {
+		if pinnedGroup != "" && entry.auth.AffinityGroup() != pinnedGroup {
 			return false
 		}
 		if len(tried) > 0 {
