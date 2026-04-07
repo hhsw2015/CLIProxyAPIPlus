@@ -24,10 +24,11 @@ type Task struct {
 	FinishedAt time.Time `json:"finished_at,omitempty"`
 
 	// Private fields for polling (not exposed to client).
-	UpstreamTaskID string `json:"-"`
+	UpstreamTaskID  string `json:"-"`
 	ProviderBaseURL string `json:"-"`
 	ProviderAPIKey  string `json:"-"`
 	ProviderProxy   string `json:"-"`
+	PollingActive   bool   `json:"-"` // true when a dedicated goroutine is polling this task
 }
 
 // Task status constants.

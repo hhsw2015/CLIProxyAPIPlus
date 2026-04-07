@@ -11,6 +11,8 @@ import (
 
 	"github.com/gin-gonic/gin"
 	log "github.com/sirupsen/logrus"
+
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 )
 
 // taskRegistry maps platform names to their adaptors.
@@ -30,6 +32,7 @@ func init() {
 	registerTaskAdaptor(&doubaoAdaptor{})
 	registerTaskAdaptor(&hailuoAdaptor{})
 	registerTaskAdaptor(&viduAdaptor{})
+	registerTaskAdaptor(&falAdaptor{})
 }
 
 // setupTaskRoutes registers async task API routes.
@@ -238,6 +241,7 @@ func (s *Server) taskSubmitHandler(platform string) gin.HandlerFunc {
 				ProviderAPIKey:  provider.apiKey,
 			}
 			globalTaskStore.Insert(task)
+			go s.pollTaskUntilDone(task.ID)
 			log.Infof("task created (gpt-proxy): %s model=%s upstream=%s", task.ID, modelName, upstreamTaskID)
 
 			c.JSON(http.StatusOK, (&soraAdaptor{}).BuildClientResponse(task))
@@ -270,6 +274,7 @@ func (s *Server) taskSubmitHandler(platform string) gin.HandlerFunc {
 			ProviderAPIKey:  provider.apiKey,
 		}
 		globalTaskStore.Insert(task)
+		go s.pollTaskUntilDone(task.ID)
 
 		log.Infof("task created: %s platform=%s model=%s upstream=%s", task.ID, platform, modelName, upstreamTaskID)
 
@@ -343,6 +348,8 @@ func (s *Server) detectPlatformForModel(modelName string) string {
 					return "gemini"
 				case strings.HasPrefix(entryName, "azure-sora") || strings.Contains(entryName, "sora"):
 					return "sora"
+				case strings.HasPrefix(entryName, "fal"):
+					return "fal"
 				}
 			}
 		}
@@ -364,6 +371,8 @@ func (s *Server) detectPlatformForModel(modelName string) string {
 		return "hailuo"
 	case strings.Contains(lower, "vidu"):
 		return "vidu"
+	case strings.Contains(lower, "fal"):
+		return "fal"
 	default:
 		return "sora" // default fallback
 	}
@@ -437,10 +446,15 @@ func (s *Server) taskPollingLoop() {
 	}
 }
 
-// pollUnfinishedTasks polls all unfinished tasks for status updates.
+// pollUnfinishedTasks polls unfinished tasks that don't have a dedicated polling goroutine.
+// Acts as a fallback for tasks that were created before the per-task polling was added,
+// or whose goroutine exited unexpectedly.
 func (s *Server) pollUnfinishedTasks() {
 	tasks := globalTaskStore.GetUnfinished()
 	for _, task := range tasks {
+		if task.PollingActive {
+			continue
+		}
 		adaptor, ok := taskRegistry[task.Platform]
 		if !ok {
 			continue
@@ -498,4 +512,108 @@ func (s *Server) pollUnfinishedTasks() {
 			log.Warnf("task failed: %s reason=%s", task.ID, info.Reason)
 		}
 	}
+}
+
+// pollTaskUntilDone polls a single task in a dedicated goroutine with adaptive backoff.
+// Initial interval 5s, gradually increasing to 15s. Gives up after 30 minutes.
+func (s *Server) pollTaskUntilDone(taskID string) {
+	const maxPollDuration = 30 * time.Minute
+
+	globalTaskStore.Update(taskID, func(t *Task) {
+		t.PollingActive = true
+	})
+	defer globalTaskStore.Update(taskID, func(t *Task) {
+		t.PollingActive = false
+	})
+
+	deadline := time.Now().Add(maxPollDuration)
+	interval := 5 * time.Second
+
+	for time.Now().Before(deadline) {
+		time.Sleep(interval)
+
+		task := globalTaskStore.Get(taskID)
+		if task == nil {
+			return
+		}
+		if task.Status == TaskStatusSuccess || task.Status == TaskStatusFailure {
+			return
+		}
+
+		adaptor, ok := taskRegistry[task.Platform]
+		if !ok {
+			return
+		}
+
+		resp, err := adaptor.FetchTask(task.ProviderBaseURL, task.ProviderAPIKey, task.UpstreamTaskID, task.Action)
+		if err != nil {
+			log.Debugf("task poll (dedicated): failed to fetch %s: %v", taskID, err)
+			if interval < 15*time.Second {
+				interval += 2 * time.Second
+			}
+			continue
+		}
+
+		respBody, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			continue
+		}
+
+		info, err := adaptor.ParseTaskResult(respBody)
+		if err != nil {
+			log.Debugf("task poll (dedicated): failed to parse %s: %v", taskID, err)
+			continue
+		}
+
+		globalTaskStore.Update(taskID, func(t *Task) {
+			if info.Status != "" {
+				t.Status = info.Status
+			}
+			if info.Progress != "" {
+				t.Progress = info.Progress
+			}
+			if info.URL != "" {
+				t.ResultURL = info.URL
+			}
+			if info.Status == TaskStatusSuccess {
+				t.Data = respBody
+			}
+			if info.Reason != "" {
+				t.FailReason = info.Reason
+			}
+			if t.Status == TaskStatusSuccess || t.Status == TaskStatusFailure {
+				t.FinishedAt = time.Now()
+			}
+			if t.Status == TaskStatusInProgress && t.StartedAt.IsZero() {
+				t.StartedAt = time.Now()
+			}
+		})
+
+		if info.Status == TaskStatusSuccess {
+			log.Infof("task completed (dedicated): %s url=%s", taskID, info.URL)
+			usage.GetRequestStatistics().RecordMedia("", task.Model, "video", 1, false, time.Since(task.CreatedAt))
+			return
+		}
+		if info.Status == TaskStatusFailure {
+			log.Warnf("task failed (dedicated): %s reason=%s", taskID, info.Reason)
+			usage.GetRequestStatistics().RecordMedia("", task.Model, "video", 0, true, time.Since(task.CreatedAt))
+			return
+		}
+
+		// Adaptive backoff: increase interval up to 15s
+		if interval < 15*time.Second {
+			interval += 2 * time.Second
+		}
+	}
+
+	// Timeout: mark as failure
+	globalTaskStore.Update(taskID, func(t *Task) {
+		if t.Status != TaskStatusSuccess && t.Status != TaskStatusFailure {
+			t.Status = TaskStatusFailure
+			t.FailReason = "polling timeout (30 minutes)"
+			t.FinishedAt = time.Now()
+		}
+	})
+	log.Warnf("task timeout (dedicated): %s", taskID)
 }
