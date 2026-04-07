@@ -712,12 +712,23 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 			}
 		}
 
+		bootstrapKeepAlive := StreamingKeepAliveInterval(h.Cfg)
+
 	outer:
 		for {
 			for {
 				var chunk coreexecutor.StreamChunk
 				var ok bool
-				if ctx != nil {
+				if ctx != nil && !sentPayload && bootstrapKeepAlive > 0 {
+					select {
+					case <-ctx.Done():
+						return
+					case chunk, ok = <-chunks:
+					case <-time.After(bootstrapKeepAlive):
+						sendData([]byte(": keep-alive\n\n"))
+						continue
+					}
+				} else if ctx != nil {
 					select {
 					case <-ctx.Done():
 						return
