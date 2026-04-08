@@ -37,8 +37,9 @@ type authScheduler struct {
 	providers          map[string]*providerScheduler
 	authProviders      map[string]string
 	mixedCursors       map[string]int
-	affinityPreference map[string]string // model → preferred affinity group (e.g. "claude:us-east-2")
-	affinityFailures   map[string]int    // model → consecutive failure count in preferred group
+	affinityPreference map[string]string    // model → preferred affinity group (e.g. "claude:us-east-2")
+	affinityFailures   map[string]int       // model → consecutive failure count in preferred group
+	affinityBlacklist  map[string]time.Time // "model:group" → expiry; temporarily banned regions
 }
 
 // providerScheduler stores auth metadata and model shards for a single provider.
@@ -296,25 +297,66 @@ func (s *authScheduler) pickMixed(ctx context.Context, providers []string, model
 
 	if s.strategy == schedulerStrategyFillFirst {
 		preferred := s.affinityPreference[modelKey]
+		// Determine the best affinity group (region) across all provider shards.
+		var bestGroup string
+		for _, shard := range candidateShards {
+			if shard == nil {
+				continue
+			}
+			bucket := shard.readyByPriority[bestPriority]
+			if bucket == nil {
+				continue
+			}
+			g := bestAffinityGroup(&bucket.all, predicate, preferred, s.affinityBlacklist, modelKey)
+			if g != "" {
+				bestGroup = g
+				break
+			}
+		}
+		// Build a group-scoped predicate for round-robin within the chosen region.
+		effectivePredicate := predicate
+		effectiveStrategy := s.strategy
+		if bestGroup != "" {
+			effectivePredicate = func(entry *scheduledAuth) bool {
+				return predicate(entry) && entry.auth.AffinityGroup() == bestGroup
+			}
+			effectiveStrategy = schedulerStrategyRoundRobin
+		}
 		for providerIndex, providerKey := range normalized {
 			shard := candidateShards[providerIndex]
 			if shard == nil {
 				continue
 			}
-			picked := shard.pickReadyAtPriorityLocked(false, bestPriority, s.strategy, predicate, preferred)
+			picked := shard.pickReadyAtPriorityLocked(false, bestPriority, effectiveStrategy, effectivePredicate)
 			if picked != nil {
-				// Remember the chosen affinity group for sticky region behavior.
-				// If the group changed (failover), the new group is recorded.
 				if g := picked.AffinityGroup(); g != picked.ID {
 					if s.affinityPreference == nil {
 						s.affinityPreference = make(map[string]string)
 					}
 					s.affinityPreference[modelKey] = g
 				} else if preferred != "" {
-					// Picked a non-grouped auth; clear stale preference.
 					delete(s.affinityPreference, modelKey)
 				}
 				return picked, providerKey, nil
+			}
+		}
+		// If group-scoped pick failed (all in group cooldown), try without group filter.
+		if bestGroup != "" {
+			for providerIndex, providerKey := range normalized {
+				shard := candidateShards[providerIndex]
+				if shard == nil {
+					continue
+				}
+				picked := shard.pickReadyAtPriorityLocked(false, bestPriority, s.strategy, predicate)
+				if picked != nil {
+					if g := picked.AffinityGroup(); g != picked.ID {
+						if s.affinityPreference == nil {
+							s.affinityPreference = make(map[string]string)
+						}
+						s.affinityPreference[modelKey] = g
+					}
+					return picked, providerKey, nil
+				}
 			}
 		}
 		return nil, "", s.mixedUnavailableErrorLocked(normalized, model, tried)
@@ -408,6 +450,11 @@ func (s *authScheduler) RecordAffinityResult(authID, model string, success bool)
 	}
 	s.affinityFailures[modelKey]++
 	if s.affinityFailures[modelKey] >= 3 {
+		// Blacklist the failing region for 5 minutes to prevent immediate re-selection.
+		if s.affinityBlacklist == nil {
+			s.affinityBlacklist = make(map[string]time.Time)
+		}
+		s.affinityBlacklist[modelKey+":"+preferred] = time.Now().Add(5 * time.Minute)
 		delete(s.affinityPreference, modelKey)
 		delete(s.affinityFailures, modelKey)
 	}
@@ -807,7 +854,7 @@ func (m *modelScheduler) highestReadyPriorityLocked(preferWebsocket bool, predic
 
 // pickReadyAtPriorityLocked selects the next ready auth from a specific priority bucket.
 // The caller must ensure expired entries are already promoted when needed.
-func (m *modelScheduler) pickReadyAtPriorityLocked(preferWebsocket bool, priority int, strategy schedulerStrategy, predicate func(*scheduledAuth) bool, preferredGroups ...string) *Auth {
+func (m *modelScheduler) pickReadyAtPriorityLocked(preferWebsocket bool, priority int, strategy schedulerStrategy, predicate func(*scheduledAuth) bool) *Auth {
 	if m == nil {
 		return nil
 	}
@@ -821,24 +868,7 @@ func (m *modelScheduler) pickReadyAtPriorityLocked(preferWebsocket bool, priorit
 	}
 	var picked *scheduledAuth
 	if strategy == schedulerStrategyFillFirst {
-		// Region-aware fill-first: when the bucket contains accounts that share
-		// AffinityGroups (e.g. same AWS region = shared prompt cache), prefer the
-		// group with the most accounts for the requested model, and round-robin
-		// within that group for load distribution.
-		preferred := ""
-		if len(preferredGroups) > 0 {
-			preferred = preferredGroups[0]
-		}
-		bestGroup := bestAffinityGroup(view, predicate, preferred)
-		if bestGroup != "" {
-			groupPredicate := func(entry *scheduledAuth) bool {
-				return predicate(entry) && entry.auth.AffinityGroup() == bestGroup
-			}
-			picked = view.pickRoundRobin(groupPredicate)
-		}
-		if picked == nil {
-			picked = view.pickFirst(predicate)
-		}
+		picked = view.pickFirst(predicate)
 	} else {
 		picked = view.pickRoundRobin(predicate)
 	}
@@ -852,7 +882,7 @@ func (m *modelScheduler) pickReadyAtPriorityLocked(preferWebsocket bool, priorit
 // If a preferred group is provided and still has available accounts, it is returned
 // (sticky behavior). Otherwise, the group with the most matching accounts is selected.
 // Returns "" if no shared groups exist (all groups have size 1).
-func bestAffinityGroup(view *readyView, predicate func(*scheduledAuth) bool, preferred string) string {
+func bestAffinityGroup(view *readyView, predicate func(*scheduledAuth) bool, preferred string, blacklist map[string]time.Time, modelKey string) string {
 	if view == nil || len(view.flat) < 2 {
 		return ""
 	}
@@ -867,19 +897,37 @@ func bestAffinityGroup(view *readyView, predicate func(*scheduledAuth) bool, pre
 		}
 		groups[g]++
 	}
-	// Pick the group with the most available accounts.
+	// Check blacklist: skip groups that recently failed consecutively.
+	now := time.Now()
+	isBlacklisted := func(group string) bool {
+		if len(blacklist) == 0 {
+			return false
+		}
+		expiry, ok := blacklist[modelKey+":"+group]
+		if !ok {
+			return false
+		}
+		if now.After(expiry) {
+			delete(blacklist, modelKey+":"+group)
+			return false
+		}
+		return true
+	}
+
+	// Pick the group with the most available accounts, skipping blacklisted ones.
 	bestGroup := ""
 	bestCount := 1 // only return groups with 2+ members
 	for g, count := range groups {
+		if isBlacklisted(g) {
+			continue
+		}
 		if count > bestCount {
 			bestCount = count
 			bestGroup = g
 		}
 	}
-	// Sticky: if the preferred group still has as many accounts as the best,
-	// keep it. This avoids unnecessary region switches when capacity is equal.
-	// But if another region has more available accounts, switch to it.
-	if preferred != "" && groups[preferred] >= bestCount && groups[preferred] >= 2 {
+	// Sticky: if the preferred group is not blacklisted and still has enough accounts, keep it.
+	if preferred != "" && !isBlacklisted(preferred) && groups[preferred] >= bestCount && groups[preferred] >= 2 {
 		return preferred
 	}
 	return bestGroup
