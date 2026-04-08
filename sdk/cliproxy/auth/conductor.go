@@ -2105,6 +2105,11 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	}
 
 	m.hook.OnResult(ctx, result)
+
+	// Notify scheduler of affinity group success/failure for region switching.
+	if m.scheduler != nil && result.Model != "" {
+		m.scheduler.RecordAffinityResult(result.AuthID, result.Model, result.Success)
+	}
 }
 
 func ensureModelState(auth *Auth, model string) *ModelState {

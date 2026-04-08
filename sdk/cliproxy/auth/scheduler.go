@@ -38,6 +38,7 @@ type authScheduler struct {
 	authProviders      map[string]string
 	mixedCursors       map[string]int
 	affinityPreference map[string]string // model → preferred affinity group (e.g. "claude:us-east-2")
+	affinityFailures   map[string]int    // model → consecutive failure count in preferred group
 }
 
 // providerScheduler stores auth metadata and model shards for a single provider.
@@ -373,6 +374,43 @@ func (s *authScheduler) pickMixed(ctx context.Context, providers []string, model
 		return picked, providerKey, nil
 	}
 	return nil, "", s.mixedUnavailableErrorLocked(normalized, model, tried)
+}
+
+// RecordAffinityResult tracks success/failure for the affinity group preference.
+// On success, resets the failure counter. On failure, increments it and clears
+// the preference after 3 consecutive failures to force a region switch.
+func (s *authScheduler) RecordAffinityResult(authID, model string, success bool) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	modelKey := canonicalModelKey(model)
+	preferred := s.affinityPreference[modelKey]
+	if preferred == "" {
+		return
+	}
+
+	// Check if the auth belongs to the preferred group.
+	meta := s.findAuthLocked(authID)
+	if meta == nil || meta.auth.AffinityGroup() != preferred {
+		return
+	}
+
+	if success {
+		delete(s.affinityFailures, modelKey)
+		return
+	}
+
+	if s.affinityFailures == nil {
+		s.affinityFailures = make(map[string]int)
+	}
+	s.affinityFailures[modelKey]++
+	if s.affinityFailures[modelKey] >= 3 {
+		delete(s.affinityPreference, modelKey)
+		delete(s.affinityFailures, modelKey)
+	}
 }
 
 // findAuthLocked looks up a scheduledAuthMeta by auth ID across all providers.
