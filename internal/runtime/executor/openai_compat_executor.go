@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"regexp"
 	"strings"
 	"time"
 
@@ -120,10 +121,15 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	if auth != nil && auth.Attributes != nil {
 		if poolName := strings.TrimSpace(auth.Attributes["cookie_pool_name"]); poolName != "" {
 			pool = cookiepool.Get(poolName)
-			// Cookie pool backends may forward to strict validators that reject
-			// reasoning_content. Strip it since it's a thinking output, not valid input.
-			translated = stripReasoningContent(translated)
 		}
+	}
+
+	// For Claude models going through proxied backends (cookie pool or entries with
+	// custom headers), convert reasoning_effort to native thinking object format.
+	// These backends forward to Bedrock which rejects reasoning_effort but accepts
+	// the thinking object.
+	if isProxiedBackend(auth) && isClaudeModel(baseModel) {
+		translated = stripReasoningContent(translated)
 	}
 
 	for {
@@ -206,6 +212,15 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 			helps.RecordAPIResponseError(ctx, e.cfg, errReadAll)
 			return resp, errReadAll
 		}
+
+		// Detect embedded errors in HTTP 200 responses (e.g. proxy backends
+		// wrapping upstream errors as 200). For cookie pool, retry with next cookie.
+		if pool != nil && cookieEntry != nil && isEmbeddedErrorResponse(body) {
+			log.Warnf("openai compat executor: 200 with embedded error, retrying with next cookie")
+			pool.MarkDead(cookieEntry.ID(), 10*time.Minute)
+			continue
+		}
+
 		helps.AppendAPIResponseChunk(ctx, e.cfg, body)
 		reporter.Publish(ctx, helps.ParseOpenAIUsage(body))
 		reporter.EnsurePublished(ctx)
@@ -256,8 +271,11 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	if auth != nil && auth.Attributes != nil {
 		if poolName := strings.TrimSpace(auth.Attributes["cookie_pool_name"]); poolName != "" {
 			pool = cookiepool.Get(poolName)
-			translated = stripReasoningContent(translated)
 		}
+	}
+
+	if isProxiedBackend(auth) && isClaudeModel(baseModel) {
+		translated = stripReasoningContent(translated)
 	}
 
 	for {
@@ -333,6 +351,22 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 
 			err = statusErr{code: httpResp.StatusCode, msg: string(b)}
 			return nil, err
+		}
+
+		// For cookie pool: peek at the first bytes to detect embedded errors
+		// before committing to the streaming goroutine.
+		if pool != nil && cookieEntry != nil {
+			peek := make([]byte, 512)
+			n, _ := httpResp.Body.Read(peek)
+			peek = peek[:n]
+			if isEmbeddedErrorResponse(peek) {
+				httpResp.Body.Close()
+				log.Warnf("openai compat executor (stream): 200 with embedded error, retrying with next cookie")
+				pool.MarkDead(cookieEntry.ID(), 10*time.Minute)
+				continue
+			}
+			// Prepend peeked bytes back for the scanner.
+			httpResp.Body = io.NopCloser(io.MultiReader(bytes.NewReader(peek), httpResp.Body))
 		}
 
 		out := make(chan cliproxyexecutor.StreamChunk)
@@ -527,6 +561,41 @@ func detectSSERateLimitError(line []byte) error {
 	return nil
 }
 
+// isProxiedBackend checks if the auth entry routes through a proxy backend
+// that requires thinking format conversion (reasoning_effort → thinking object).
+var proxiedBackendPattern = regexp.MustCompile(`(?i)_llm/v\d+/proxy/?$`)
+
+// isEmbeddedErrorResponse detects error responses wrapped in HTTP 200.
+// Some proxy backends return 200 with an error body like:
+//   {"type":"error","error":{"type":"api_error","message":"..."}}
+func isEmbeddedErrorResponse(body []byte) bool {
+	if len(body) == 0 {
+		return false
+	}
+	// Trim SSE prefix if present
+	trimmed := bytes.TrimSpace(body)
+	if bytes.HasPrefix(trimmed, []byte("data:")) {
+		trimmed = bytes.TrimSpace(trimmed[5:])
+	}
+	if len(trimmed) == 0 || trimmed[0] != '{' {
+		return false
+	}
+	return gjson.GetBytes(trimmed, "type").String() == "error"
+}
+
+func isProxiedBackend(auth *cliproxyauth.Auth) bool {
+	if auth == nil || auth.Attributes == nil {
+		return false
+	}
+	return proxiedBackendPattern.MatchString(auth.Attributes["base_url"])
+}
+
+// isClaudeModel checks if the model name refers to a Claude/Anthropic model.
+func isClaudeModel(model string) bool {
+	lower := strings.ToLower(model)
+	return strings.Contains(lower, "claude")
+}
+
 // stripReasoningContent removes the reasoning_content field from all messages
 // in the request payload. This field is a thinking/reasoning output and should
 // not be included as input. Some backends reject it with validation errors.
@@ -535,18 +604,42 @@ func stripReasoningContent(payload []byte) []byte {
 	if !messages.Exists() || !messages.IsArray() {
 		return payload
 	}
-	modified := false
 	messages.ForEach(func(idx, msg gjson.Result) bool {
 		if msg.Get("reasoning_content").Exists() {
 			path := fmt.Sprintf("messages.%d.reasoning_content", idx.Int())
 			if updated, err := sjson.DeleteBytes(payload, path); err == nil {
 				payload = updated
-				modified = true
 			}
 		}
 		return true
 	})
-	_ = modified
+	// Convert reasoning_effort to Anthropic thinking object format.
+	// Cookie pool backends forward to Bedrock which rejects reasoning_effort
+	// but accepts the native thinking object {type: "enabled", budget_tokens: N}.
+	if effort := gjson.GetBytes(payload, "reasoning_effort"); effort.Exists() {
+		budget := 31999
+		switch strings.ToLower(effort.String()) {
+		case "low":
+			budget = 5000
+		case "medium", "med":
+			budget = 16000
+		case "none":
+			budget = 0
+		}
+		payload, _ = sjson.DeleteBytes(payload, "reasoning_effort")
+		if budget > 0 {
+			payload, _ = sjson.SetBytes(payload, "thinking.type", "enabled")
+			payload, _ = sjson.SetBytes(payload, "thinking.budget_tokens", budget)
+		}
+	}
+	// Strip other non-standard fields that backends reject.
+	for _, field := range []string{"effortLevel", "context_management"} {
+		if gjson.GetBytes(payload, field).Exists() {
+			if updated, err := sjson.DeleteBytes(payload, field); err == nil {
+				payload = updated
+			}
+		}
+	}
 	return payload
 }
 
