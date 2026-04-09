@@ -564,14 +564,7 @@ func (e statusErr) StatusCode() int            { return e.code }
 func (e statusErr) RetryAfter() *time.Duration { return e.retryAfter }
 
 func (e *OpenAICompatExecutor) requiresAnthropicImageContent(auth *cliproxyauth.Auth) bool {
-	if auth == nil {
-		return false
-	}
-	baseURL, _ := e.resolveCredentials(auth)
-	if strings.Contains(strings.ToLower(strings.TrimSpace(baseURL)), "desktop-llm.skywork.ai") {
-		return true
-	}
-	return strings.EqualFold(strings.TrimSpace(auth.Provider), "skywork")
+	return isProxiedBackend(auth)
 }
 
 // detectSSERateLimitError checks an SSE line for an embedded rate_limit_error.
