@@ -214,11 +214,26 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 		}
 
 		// Detect embedded errors in HTTP 200 responses (e.g. proxy backends
-		// wrapping upstream errors as 200). For cookie pool, retry with next cookie.
-		if pool != nil && cookieEntry != nil && isEmbeddedErrorResponse(body) {
-			log.Warnf("openai compat executor: 200 with embedded error, retrying with next cookie")
-			pool.MarkDead(cookieEntry.ID(), 10*time.Minute)
-			continue
+		// wrapping upstream errors as 200 with error in body).
+		if isEmbeddedErrorResponse(body) {
+			embeddedCode := int(gjson.GetBytes(body, "code").Int())
+			if embeddedCode == 0 {
+				embeddedCode = 502
+			}
+			embeddedMsg := gjson.GetBytes(body, "error.message").String()
+			if embeddedMsg == "" {
+				embeddedMsg = gjson.GetBytes(body, "data.error_message").String()
+			}
+			if embeddedMsg == "" {
+				embeddedMsg = string(body[:min(len(body), 200)])
+			}
+			log.Warnf("openai compat executor: 200 with embedded error (code=%d): %s", embeddedCode, embeddedMsg)
+			if pool != nil && cookieEntry != nil {
+				pool.MarkDead(cookieEntry.ID(), 10*time.Minute)
+				continue
+			}
+			err = statusErr{code: embeddedCode, msg: embeddedMsg}
+			return resp, err
 		}
 
 		helps.AppendAPIResponseChunk(ctx, e.cfg, body)
@@ -353,17 +368,29 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 			return nil, err
 		}
 
-		// For cookie pool: peek at the first bytes to detect embedded errors
+		// Peek at the first bytes to detect embedded errors in HTTP 200 responses
 		// before committing to the streaming goroutine.
-		if pool != nil && cookieEntry != nil {
+		{
 			peek := make([]byte, 512)
 			n, _ := httpResp.Body.Read(peek)
 			peek = peek[:n]
 			if isEmbeddedErrorResponse(peek) {
 				httpResp.Body.Close()
-				log.Warnf("openai compat executor (stream): 200 with embedded error, retrying with next cookie")
-				pool.MarkDead(cookieEntry.ID(), 10*time.Minute)
-				continue
+				embeddedCode := int(gjson.GetBytes(peek, "code").Int())
+				if embeddedCode == 0 {
+					embeddedCode = 502
+				}
+				log.Warnf("openai compat executor (stream): 200 with embedded error (code=%d)", embeddedCode)
+				if pool != nil && cookieEntry != nil {
+					pool.MarkDead(cookieEntry.ID(), 10*time.Minute)
+					continue
+				}
+				msg := gjson.GetBytes(peek, "data.error_message").String()
+				if msg == "" {
+					msg = string(peek[:min(len(peek), 200)])
+				}
+				err = statusErr{code: embeddedCode, msg: msg}
+				return nil, err
 			}
 			// Prepend peeked bytes back for the scanner.
 			httpResp.Body = io.NopCloser(io.MultiReader(bytes.NewReader(peek), httpResp.Body))
@@ -580,7 +607,15 @@ func isEmbeddedErrorResponse(body []byte) bool {
 	if len(trimmed) == 0 || trimmed[0] != '{' {
 		return false
 	}
-	return gjson.GetBytes(trimmed, "type").String() == "error"
+	// Pattern 1: {"type":"error","error":{...}} — upstream error wrapped as 200
+	if gjson.GetBytes(trimmed, "type").String() == "error" {
+		return true
+	}
+	// Pattern 2: {"code":4xx/5xx,...} — proxy returning error status in body
+	if code := gjson.GetBytes(trimmed, "code").Int(); code >= 400 && code < 600 {
+		return true
+	}
+	return false
 }
 
 func isProxiedBackend(auth *cliproxyauth.Auth) bool {
