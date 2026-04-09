@@ -229,7 +229,11 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 			}
 			log.Warnf("openai compat executor: 200 with embedded error (code=%d): %s", embeddedCode, embeddedMsg)
 			if pool != nil && cookieEntry != nil {
-				pool.MarkDead(cookieEntry.ID(), 10*time.Minute)
+				deadDuration := 10 * time.Minute
+				if isDailyLimitError(embeddedMsg) {
+					deadDuration = 24 * time.Hour
+				}
+				pool.MarkDead(cookieEntry.ID(), deadDuration)
 				continue
 			}
 			err = statusErr{code: embeddedCode, msg: embeddedMsg}
@@ -380,16 +384,23 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 				if embeddedCode == 0 {
 					embeddedCode = 502
 				}
-				log.Warnf("openai compat executor (stream): 200 with embedded error (code=%d)", embeddedCode)
+				embeddedMsg := gjson.GetBytes(peek, "data.error_message").String()
+				if embeddedMsg == "" {
+					embeddedMsg = gjson.GetBytes(peek, "error.message").String()
+				}
+				if embeddedMsg == "" {
+					embeddedMsg = string(peek[:min(len(peek), 200)])
+				}
+				log.Warnf("openai compat executor (stream): 200 with embedded error (code=%d): %s", embeddedCode, embeddedMsg)
 				if pool != nil && cookieEntry != nil {
-					pool.MarkDead(cookieEntry.ID(), 10*time.Minute)
+					deadDuration := 10 * time.Minute
+					if isDailyLimitError(embeddedMsg) {
+						deadDuration = 24 * time.Hour
+					}
+					pool.MarkDead(cookieEntry.ID(), deadDuration)
 					continue
 				}
-				msg := gjson.GetBytes(peek, "data.error_message").String()
-				if msg == "" {
-					msg = string(peek[:min(len(peek), 200)])
-				}
-				err = statusErr{code: embeddedCode, msg: msg}
+				err = statusErr{code: embeddedCode, msg: embeddedMsg}
 				return nil, err
 			}
 			// Prepend peeked bytes back for the scanner.
@@ -591,6 +602,12 @@ func detectSSERateLimitError(line []byte) error {
 // isProxiedBackend checks if the auth entry routes through a proxy backend
 // that requires thinking format conversion (reasoning_effort → thinking object).
 var proxiedBackendPattern = regexp.MustCompile(`(?i)_llm/v\d+/proxy/?$`)
+
+// isDailyLimitError checks if the error message indicates a daily usage quota exhaustion.
+func isDailyLimitError(msg string) bool {
+	lower := strings.ToLower(msg)
+	return strings.Contains(lower, "daily") || strings.Contains(lower, "usage limit")
+}
 
 // isEmbeddedErrorResponse detects error responses wrapped in HTTP 200.
 // Some proxy backends return 200 with an error body like:

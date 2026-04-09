@@ -2036,8 +2036,13 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 							state.Unavailable = true
 							var next time.Time
 							backoffLevel := state.Quota.BackoffLevel
+							// Daily/usage limit exhaustion → long cooldown (30 min)
+							// instead of normal exponential backoff.
+							isDailyLimit := isDailyUsageLimitError(errMessage)
 							if !disableCooling {
-								if result.RetryAfter != nil {
+								if isDailyLimit {
+									next = now.Add(30 * time.Minute)
+								} else if result.RetryAfter != nil {
 									next = now.Add(*result.RetryAfter)
 								} else {
 									cooldown, nextLevel := nextQuotaCooldown(backoffLevel, disableCooling)
@@ -3529,6 +3534,13 @@ func isClientParamError(status int, message string) bool {
 		"content filtering",
 		"image too large",
 	)
+}
+
+// isDailyUsageLimitError returns true when the error indicates the credential's
+// daily free-tier quota has been exhausted. These should receive a long cooldown
+// rather than normal exponential backoff, since the limit resets daily.
+func isDailyUsageLimitError(message string) bool {
+	return containsAnyFold(message, "daily", "usage limit")
 }
 
 func isTemporaryTransportFailure(status int, message string) bool {
