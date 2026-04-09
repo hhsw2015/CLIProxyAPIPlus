@@ -11,6 +11,7 @@ import (
 	"math/rand"
 	"net/http"
 	"os"
+	"sort"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -109,9 +110,22 @@ func (p *Pool) Pick() *Entry {
 				p.MarkDead(entryID(entry), 24*time.Hour)
 				log.Debugf("cookie pool: cookie failed health check, trying next")
 				p.mu.Lock()
+				// entries may have been replaced by reload() while unlocked.
+				if n != len(p.entries) {
+					n = len(p.entries)
+					if n == 0 {
+						p.mu.Unlock()
+						return nil
+					}
+				}
 				continue
 			}
 			p.mu.Lock()
+			// Guard against reload() replacing entries while unlocked.
+			if idx >= len(p.entries) {
+				p.mu.Unlock()
+				return nil
+			}
 		}
 		p.preferred = idx
 		result := &p.entries[idx]
@@ -213,12 +227,18 @@ func (p *Pool) watchLoop() {
 	}
 }
 
-// entryID returns a stable identifier for a pool entry (the first non-empty value).
-// Used for MarkDead matching and sticky preference tracking.
+// entryID returns a stable identifier for a pool entry.
+// Uses a deterministic key order to avoid Go map iteration randomness.
 func entryID(e Entry) string {
-	for _, v := range e {
-		if strings.TrimSpace(v) != "" {
-			return strings.TrimSpace(v)
+	// Try keys in sorted order for deterministic results.
+	keys := make([]string, 0, len(e))
+	for k := range e {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		if v := strings.TrimSpace(e[k]); v != "" {
+			return v
 		}
 	}
 	return ""

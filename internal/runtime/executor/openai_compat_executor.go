@@ -656,15 +656,20 @@ func stripReasoningContent(payload []byte) []byte {
 	if !messages.Exists() || !messages.IsArray() {
 		return payload
 	}
+	// Collect indices first, then delete in reverse order to avoid offset shifts.
+	var toDelete []int64
 	messages.ForEach(func(idx, msg gjson.Result) bool {
 		if msg.Get("reasoning_content").Exists() {
-			path := fmt.Sprintf("messages.%d.reasoning_content", idx.Int())
-			if updated, err := sjson.DeleteBytes(payload, path); err == nil {
-				payload = updated
-			}
+			toDelete = append(toDelete, idx.Int())
 		}
 		return true
 	})
+	for i := len(toDelete) - 1; i >= 0; i-- {
+		path := fmt.Sprintf("messages.%d.reasoning_content", toDelete[i])
+		if updated, err := sjson.DeleteBytes(payload, path); err == nil {
+			payload = updated
+		}
+	}
 	// Convert reasoning_effort to Anthropic thinking object format.
 	// Cookie pool backends forward to Bedrock which rejects reasoning_effort
 	// but accepts the native thinking object {type: "enabled", budget_tokens: N}.
