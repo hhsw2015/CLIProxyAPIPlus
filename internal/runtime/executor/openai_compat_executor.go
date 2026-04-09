@@ -120,6 +120,9 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	if auth != nil && auth.Attributes != nil {
 		if poolName := strings.TrimSpace(auth.Attributes["cookie_pool_name"]); poolName != "" {
 			pool = cookiepool.Get(poolName)
+			// Cookie pool backends may forward to strict validators that reject
+			// reasoning_content. Strip it since it's a thinking output, not valid input.
+			translated = stripReasoningContent(translated)
 		}
 	}
 
@@ -253,6 +256,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	if auth != nil && auth.Attributes != nil {
 		if poolName := strings.TrimSpace(auth.Attributes["cookie_pool_name"]); poolName != "" {
 			pool = cookiepool.Get(poolName)
+			translated = stripReasoningContent(translated)
 		}
 	}
 
@@ -521,6 +525,29 @@ func detectSSERateLimitError(line []byte) error {
 		return statusErr{code: 429, msg: msg}
 	}
 	return nil
+}
+
+// stripReasoningContent removes the reasoning_content field from all messages
+// in the request payload. This field is a thinking/reasoning output and should
+// not be included as input. Some backends reject it with validation errors.
+func stripReasoningContent(payload []byte) []byte {
+	messages := gjson.GetBytes(payload, "messages")
+	if !messages.Exists() || !messages.IsArray() {
+		return payload
+	}
+	modified := false
+	messages.ForEach(func(idx, msg gjson.Result) bool {
+		if msg.Get("reasoning_content").Exists() {
+			path := fmt.Sprintf("messages.%d.reasoning_content", idx.Int())
+			if updated, err := sjson.DeleteBytes(payload, path); err == nil {
+				payload = updated
+				modified = true
+			}
+		}
+		return true
+	})
+	_ = modified
+	return payload
 }
 
 // applyCookiePoolHeaders checks if the auth is backed by a cookie pool and, if so,
