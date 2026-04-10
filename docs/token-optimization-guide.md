@@ -2,7 +2,7 @@
 
 ## Overview
 
-Four layers of token savings, each targeting different parts of the request lifecycle.
+Four active layers of token savings, targeting different parts of the request lifecycle. Combined savings ~93% per request.
 
 ## Layer 1: RTK (Input Compression)
 
@@ -10,21 +10,22 @@ Four layers of token savings, each targeting different parts of the request life
 
 **Savings**: Input tokens -46%
 
-**How it works**: Intercepts `git status`, `git diff` etc., strips redundant output (whitespace, headers, repeated context). Claude sees compressed version.
+**How it works**: Intercepts `git status`, `git diff` etc., strips redundant output (whitespace, headers, repeated context). Claude sees compressed version, reasoning unaffected.
 
-**Setup**: Already installed as shell hook. `rtk gain` shows savings.
+**Setup**: Installed as shell hook. `rtk gain` shows savings analytics.
 
 ## Layer 2: CPA Region Affinity (Prompt Cache)
 
 **What**: Keeps requests in the same AWS region to maximize Bedrock prompt cache hits.
 
-**Savings**: Cached tokens billed at $1.875/1M (vs $15/1M full price) = -87.5% on cached portion
+**Savings**: Cached tokens at $1.875/1M (vs $15/1M full price) = -87.5% on cached portion
 
 **How it works**:
-- Anthropic Bedrock prompt cache is shared per-region across AWS accounts (verified)
+- Anthropic Bedrock prompt cache is shared per-region across AWS accounts (verified with production data)
 - CPA's fill-first strategy enhanced with sticky region + round-robin within region
-- Same conversation prefix cached once, reused across multiple accounts
-- Typical cache hit rate: 99%+ (only new delta charged at full price)
+- Same conversation prefix cached once, reused across multiple accounts in same region
+- Typical cache hit rate: 99%+ (only new message delta charged at full price)
+- Region auto-switch: if preferred region degrades, switch to healthiest region
 
 **Config**: Automatic when `routing.strategy: fill-first` and multiple Bedrock accounts configured.
 
@@ -34,7 +35,7 @@ Four layers of token savings, each targeting different parts of the request life
 
 **What**: Behavioral rules that reduce verbose/wasteful output.
 
-**Savings**: Output -17% to -63% depending on rules
+**Savings**: Output -17%
 
 ### Current rules (`~/.claude/CLAUDE.md`):
 ```
@@ -60,7 +61,7 @@ Four layers of token savings, each targeting different parts of the request life
 
 **Savings**: Output tokens -65% average (22%-87% range)
 
-**How it works**: Drops articles, filler words, pleasantries. Uses fragments and short synonyms. Code blocks unchanged.
+**How it works**: Drops articles, filler words, pleasantries. Uses fragments and short synonyms. Code blocks unchanged. Thinking/reasoning tokens unaffected.
 
 **Setup**:
 ```bash
@@ -82,36 +83,86 @@ claude plugin install caveman@caveman
 
 **Deactivation**: "normal mode" or "stop caveman"
 
-## Combined Savings Estimate
+## Combined Savings: Real-World Numbers
 
-For a typical CPA development session (long conversation, ~60K context):
+Based on actual production data (62K context, Opus 4.6):
 
-| Layer | Target | Savings | Example |
-|-------|--------|---------|---------|
-| RTK | Input (CLI output) | -46% | 1.2M -> 659K tokens |
-| Region Cache | Input (repeated context) | -87.5% on cached | 659K -> ~100 new + 559K cached at 1/8 price |
-| CLAUDE.md | Output | -17% | Less verbose explanations |
-| Caveman | Output | -65% | Telegram-style responses |
+### Per-Request Cost
 
-**Without any optimization**: ~$18/session (input) + ~$5 (output) = ~$23
-**With all layers**: ~$2.50 (input) + ~$1.75 (output) = ~$4.25
+| Scenario | Input Cost | Output Cost | Total |
+|----------|-----------|-------------|-------|
+| No optimization | $1.80 | $0.038 | **$1.84** |
+| All 4 layers | $0.114 | $0.013 | **$0.127** |
+| **Savings** | **94%** | **65%** | **93%** |
 
-**Total savings: ~82%**
+### 100-Turn Session
 
-## Additional Techniques (Not Yet Applied)
+| Scenario | Cost |
+|----------|------|
+| No optimization | ~$184 |
+| All 4 layers | ~$12.7 |
 
-### db8 Session Fix
+### Where Each Layer Contributes
+
+```
+Request lifecycle:
+
+[User types message]
+    |
+[RTK compresses CLI output]           ← Layer 1: -46% input base size
+    |
+[CPA routes to cached region]         ← Layer 2: 99% cache hit, 1/8 price
+    |
+[Claude thinks (extended thinking)]   ← NOT optimized (quality priority)
+    |
+[Claude generates response]
+    |
+[CLAUDE.md rules reduce verbosity]    ← Layer 3: -17% output
+    |
+[Caveman compresses text]             ← Layer 4: -65% output
+    |
+[User receives response]
+```
+
+## Remaining Optimization Opportunities
+
+### Already Near-Optimal
+| Area | Status | Why |
+|------|--------|-----|
+| Input (history) | Optimized | RTK + Cache = 94% savings |
+| Output (text) | Optimized | Caveman + Rules = 65% savings |
+| Thinking | Keep as-is | Quality priority, need strongest reasoning |
+| MCP tools | Fine | Lazy-loaded, minimal overhead |
+
+### Possible Further Savings
+| Area | Method | Trade-off |
+|------|--------|-----------|
+| Model selection | Sonnet for simple tasks (5x cheaper) | Slightly lower quality |
+| Tool call count | Fewer Read/Grep calls per task | Depends on usage patterns |
+| /compact timing | Compact earlier to keep context small | Lose some conversation history |
+
+### Model Selection Guide (If Cost-Sensitive)
+| Task Type | Recommended Model | Cost vs Opus |
+|-----------|------------------|-------------|
+| Complex architecture, debugging | Opus 4.6 | 1x (baseline) |
+| Routine coding, file edits | Sonnet 4.6 | 1/5x |
+| Simple queries, git ops | Haiku 4.5 | 1/19x |
+
+## Pending Fixes (Not Yet Available)
+
+### db8 Session Cache Fix
 - Claude Code bug: session save filters out `deferred_tools_delta` attachments
 - Causes prompt cache miss on session resume (26% hit rate instead of 99%)
-- Fix confirmed by Anthropic engineer, expected in next Claude Code release
-- Current workaround: avoid `/resume`, start fresh sessions
-- Status: Waiting for official fix (cannot patch compiled binary)
+- Fix confirmed by Anthropic engineer Boris, expected in next Claude Code release
+- Cannot patch: Claude Code v2.1.97 is compiled Mach-O binary
+- Workaround: avoid `/resume` on long sessions, start fresh
 
-### Token-Efficient Prompt Patterns
+### Token-Efficient Patterns (Best Practices)
 - Structured output (JSON/tables) cheaper than prose
 - System prompt at beginning maximizes cache prefix length
 - Avoid repeating context in follow-up messages
-- Use `/compact` before context gets too large (reduces future input cost)
+- Use `/compact` before context gets too large
+- Use Agent subagents for heavy exploration (separate context window)
 
 ## References
 
@@ -120,3 +171,4 @@ For a typical CPA development session (long conversation, ~60K context):
 - drona23 rules: `github.com/drona23/claude-token-efficient`
 - Caveman: `github.com/JuliusBrussee/caveman`
 - db8 analysis: `reddit.com/r/ClaudeAI/comments/1s8zxt4/`
+- Token savings script: `scripts/fix_session_tool_pairing.py`
