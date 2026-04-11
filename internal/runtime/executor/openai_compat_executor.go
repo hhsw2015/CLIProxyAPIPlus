@@ -470,6 +470,11 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 			if errScan := scanner.Err(); errScan != nil {
 				helps.RecordAPIResponseError(ctx, e.cfg, errScan)
 				reporter.PublishFailure(ctx)
+				// Mark cookie dead on stream interruption so next request picks a different one.
+				if pool != nil && cookieEntry != nil && ctx.Err() != nil {
+					pool.MarkDead(cookieEntry.ID(), 3*time.Minute)
+					log.Warnf("openai compat executor (stream): stream interrupted, marking cookie dead for 3m")
+				}
 				out <- cliproxyexecutor.StreamChunk{Err: errScan}
 			} else {
 				// In case the upstream closes the stream without a terminal [DONE] marker.
