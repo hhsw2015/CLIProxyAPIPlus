@@ -2049,8 +2049,8 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 			// the pool rotates to a different cookie. Only penalize on auth-level
 			// errors (401/403) which indicate all cookies are exhausted.
 			isCookiePoolAuth := auth.Attributes != nil && strings.TrimSpace(auth.Attributes["cookie_pool_name"]) != ""
-			skipCookiePoolPenalty := isCookiePoolAuth && result.Error != nil &&
-				result.Error.HTTPStatus != 401 && result.Error.HTTPStatus != 403
+			skipCookiePoolPenalty := isCookiePoolAuth &&
+				(result.Error == nil || (result.Error.HTTPStatus != 401 && result.Error.HTTPStatus != 403))
 
 			if result.Model != "" && !skipCookiePoolPenalty {
 				if !isRequestScopedNotFoundResultError(result.Error) {
