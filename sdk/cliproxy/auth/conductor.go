@@ -2043,7 +2043,13 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 				clearAuthStateOnSuccess(auth, now)
 			}
 		} else {
-			if result.Model != "" {
+			// Cookie pool auth entries manage retries internally via pool rotation.
+			// Don't penalize the auth entry for individual cookie failures; the pool
+			// will Pick() a different cookie on the next request. Only penalize when
+			// all cookies are exhausted (which surfaces as auth_not_found).
+			isCookiePoolAuth := auth.Attributes != nil && strings.TrimSpace(auth.Attributes["cookie_pool_name"]) != ""
+
+			if result.Model != "" && !isCookiePoolAuth {
 				if !isRequestScopedNotFoundResultError(result.Error) {
 					disableCooling := quotaCooldownDisabledForAuth(auth)
 					state := ensureModelState(auth, result.Model)
