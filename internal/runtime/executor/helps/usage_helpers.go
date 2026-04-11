@@ -42,6 +42,24 @@ func NewUsageReporter(ctx context.Context, provider, model string, auth *cliprox
 	return reporter
 }
 
+// SetSourceSuffix replaces the source suffix with a short identifier
+// (e.g. cookie ID) so the management panel can distinguish pool entries.
+// Safe to call multiple times in a retry loop; only the last value is kept.
+func (r *UsageReporter) SetSourceSuffix(suffix string) {
+	if r == nil {
+		return
+	}
+	base := r.source
+	if i := strings.LastIndex(base, "/"); i >= 0 {
+		base = base[:i]
+	}
+	if suffix != "" {
+		r.source = base + "/" + suffix
+	} else {
+		r.source = base
+	}
+}
+
 func (r *UsageReporter) Publish(ctx context.Context, detail usage.Detail) {
 	r.publishWithOutcome(ctx, detail, false)
 }
