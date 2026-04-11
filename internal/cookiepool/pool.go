@@ -154,6 +154,15 @@ func (p *Pool) MarkDead(cookie string, duration time.Duration) {
 	}
 }
 
+// ClearPreferred resets the sticky cookie preference so the next Pick()
+// selects a random cookie. Use this when the current cookie might be slow
+// but we can't be sure (e.g. context canceled by user vs timeout).
+func (p *Pool) ClearPreferred() {
+	p.mu.Lock()
+	p.preferred = -1
+	p.mu.Unlock()
+}
+
 // Size returns the total number of entries (including dead ones).
 func (p *Pool) Size() int {
 	p.mu.RLock()
