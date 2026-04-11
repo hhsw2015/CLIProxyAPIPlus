@@ -160,6 +160,14 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 			authLabel = auth.Label
 			authType, authValue = auth.AccountInfo()
 		}
+		// Append short cookie ID so the management panel shows which cookie was picked.
+		if cookieEntry != nil {
+			cid := cookieEntry.ID()
+			if len(cid) > 8 {
+				cid = cid[:8]
+			}
+			authLabel = authLabel + "/" + cid
+		}
 		helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
 			URL:       url,
 			Method:    http.MethodPost,
@@ -333,6 +341,13 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 			authID = auth.ID
 			authLabel = auth.Label
 			authType, authValue = auth.AccountInfo()
+		}
+		if cookieEntry != nil {
+			cid := cookieEntry.ID()
+			if len(cid) > 8 {
+				cid = cid[:8]
+			}
+			authLabel = authLabel + "/" + cid
 		}
 		helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
 			URL:       url,
