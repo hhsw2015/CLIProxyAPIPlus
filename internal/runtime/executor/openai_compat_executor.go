@@ -755,6 +755,10 @@ func shortCookieHash(entry *cookiepool.Entry) string {
 			longest = value
 		}
 	}
+	// Strip common prefixes like "token=", "session=" to maximize uniqueness.
+	if i := strings.IndexByte(longest, '='); i >= 0 && i < 16 {
+		longest = longest[i+1:]
+	}
 	if len(longest) > 16 {
 		return longest[:6] + ".." + longest[len(longest)-6:]
 	}
