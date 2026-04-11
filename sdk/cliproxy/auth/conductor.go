@@ -2574,6 +2574,10 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 			auth.NextRetryAfter = now.Add(1 * time.Minute)
 		}
 	default:
+		// Unknown status codes: don't leave Unavailable=true permanently.
+		// Apply a brief cooldown and let the auth recover on the next attempt.
+		auth.Unavailable = false
+		auth.NextRetryAfter = time.Time{}
 		if auth.StatusMessage == "" {
 			auth.StatusMessage = "request failed"
 		}
@@ -3610,6 +3614,12 @@ func isClientParamError(status int, message string) bool {
 			return true
 		}
 	}
+	// Only match string patterns on 400 (client error) status codes.
+	// Avoids misclassifying 429 rate-limit messages (e.g. "exceeds the maximum
+	// requests per minute") as user parameter errors.
+	if status != 0 && status != 400 {
+		return false
+	}
 	return containsAnyFold(message,
 		"prompt is too long",
 		"maximum context length",
@@ -3628,7 +3638,10 @@ func isClientParamError(status int, message string) bool {
 // daily free-tier quota has been exhausted. These should receive a long cooldown
 // rather than normal exponential backoff, since the limit resets daily.
 func isDailyUsageLimitError(message string) bool {
-	return containsAnyFold(message, "daily", "usage limit")
+	lower := strings.ToLower(message)
+	// Both "daily" AND "limit" must appear to avoid false positives
+	// on messages that merely contain the word "daily".
+	return strings.Contains(lower, "daily") && (strings.Contains(lower, "limit") || strings.Contains(lower, "usage"))
 }
 
 func isTemporaryTransportFailure(status int, message string) bool {
