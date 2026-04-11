@@ -454,6 +454,8 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 				helps.AppendAPIResponseChunk(ctx, e.cfg, line)
 				if detail, ok := helps.ParseOpenAIStreamUsage(line); ok {
 					reporter.Publish(ctx, detail)
+				} else if detail, ok := helps.ParseClaudeStreamUsage(line); ok {
+					reporter.Publish(ctx, detail)
 				}
 				// Detect rate_limit_error hidden inside SSE JSON lines (GPT Proxy §4).
 				// The upstream may return HTTP 200 but embed a rate limit error in the stream.
