@@ -755,8 +755,8 @@ func shortCookieHash(entry *cookiepool.Entry) string {
 			longest = value
 		}
 	}
-	if len(longest) > 28 {
-		return longest[:12] + ".." + longest[len(longest)-12:]
+	if len(longest) > 16 {
+		return longest[:6] + ".." + longest[len(longest)-6:]
 	}
 	return longest
 }
