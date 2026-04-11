@@ -2044,12 +2044,15 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 			}
 		} else {
 			// Cookie pool auth entries manage retries internally via pool rotation.
-			// Don't penalize the auth entry for individual cookie failures; the pool
-			// will Pick() a different cookie on the next request. Only penalize when
-			// all cookies are exhausted (which surfaces as auth_not_found).
+			// Skip penalizing the whole auth for transient cookie failures (timeout,
+			// rate limit, server error) so the conductor keeps picking this pool and
+			// the pool rotates to a different cookie. Only penalize on auth-level
+			// errors (401/403) which indicate all cookies are exhausted.
 			isCookiePoolAuth := auth.Attributes != nil && strings.TrimSpace(auth.Attributes["cookie_pool_name"]) != ""
+			skipCookiePoolPenalty := isCookiePoolAuth && result.Error != nil &&
+				result.Error.HTTPStatus != 401 && result.Error.HTTPStatus != 403
 
-			if result.Model != "" && !isCookiePoolAuth {
+			if result.Model != "" && !skipCookiePoolPenalty {
 				if !isRequestScopedNotFoundResultError(result.Error) {
 					disableCooling := quotaCooldownDisabledForAuth(auth)
 					state := ensureModelState(auth, result.Model)
