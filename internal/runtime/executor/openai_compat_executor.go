@@ -190,8 +190,8 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 				if ctx.Err() != nil {
 					pool.ClearPreferred()
 				} else {
-					pool.ClearPreferred()
-					log.Warnf("openai compat executor: request error: %v, retrying with next cookie", errExec)
+					pool.MarkDead(cookieEntry.ID(), 1*time.Minute)
+					log.Warnf("openai compat executor: request error: %v, marking cookie dead 1m, retrying", errExec)
 					continue
 				}
 			}
@@ -370,8 +370,8 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 				if ctx.Err() != nil {
 					pool.ClearPreferred()
 				} else {
-					pool.ClearPreferred()
-					log.Warnf("openai compat executor (stream): request error: %v, retrying with next cookie", errExec)
+					pool.MarkDead(cookieEntry.ID(), 1*time.Minute)
+					log.Warnf("openai compat executor (stream): request error: %v, marking cookie dead 1m, retrying", errExec)
 					continue
 				}
 			}
