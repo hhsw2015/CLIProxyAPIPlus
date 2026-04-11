@@ -188,10 +188,7 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 			helps.RecordAPIResponseError(ctx, e.cfg, errExec)
 			if pool != nil && cookieEntry != nil {
 				if ctx.Err() != nil {
-					// Context canceled (client timeout). Mark cookie dead briefly
-					// so the next request picks a different cookie from the pool.
-					pool.MarkDead(cookieEntry.ID(), 3*time.Minute)
-					log.Warnf("openai compat executor: context canceled, marking cookie dead for 3m")
+					pool.ClearPreferred()
 				} else {
 					log.Warnf("openai compat executor: request error: %v, retrying with next cookie", errExec)
 					continue
@@ -370,8 +367,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 			helps.RecordAPIResponseError(ctx, e.cfg, errExec)
 			if pool != nil && cookieEntry != nil {
 				if ctx.Err() != nil {
-					pool.MarkDead(cookieEntry.ID(), 3*time.Minute)
-					log.Warnf("openai compat executor (stream): context canceled, marking cookie dead for 3m")
+					pool.ClearPreferred()
 				} else {
 					log.Warnf("openai compat executor (stream): request error: %v, retrying with next cookie", errExec)
 					continue
@@ -440,7 +436,6 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 
 		out := make(chan cliproxyexecutor.StreamChunk)
 		go func() {
-			streamStart := time.Now()
 			defer close(out)
 			defer func() {
 				if errClose := httpResp.Body.Close(); errClose != nil {
@@ -483,12 +478,11 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 			if errScan := scanner.Err(); errScan != nil {
 				helps.RecordAPIResponseError(ctx, e.cfg, errScan)
 				reporter.PublishFailure(ctx)
-				// Only mark cookie dead on likely timeout (stream ran > 30s).
-				// Short cancellations (< 30s) are usually user-initiated (Ctrl+C)
-				// and shouldn't penalize the cookie.
-				if pool != nil && cookieEntry != nil && ctx.Err() != nil && time.Since(streamStart) > 30*time.Second {
-					pool.MarkDead(cookieEntry.ID(), 3*time.Minute)
-					log.Warnf("openai compat executor (stream): stream timed out after %s, marking cookie dead for 3m", time.Since(streamStart).Truncate(time.Second))
+				// On context canceled, clear sticky preference so next Pick() selects
+				// a random cookie. Don't MarkDead because we can't distinguish user
+				// cancel (Ctrl+C) from timeout — both are context.Canceled.
+				if pool != nil && ctx.Err() != nil {
+					pool.ClearPreferred()
 				}
 				out <- cliproxyexecutor.StreamChunk{Err: errScan}
 			} else {
