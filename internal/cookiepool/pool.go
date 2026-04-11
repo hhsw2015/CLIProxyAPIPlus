@@ -11,7 +11,6 @@ import (
 	"math/rand"
 	"net/http"
 	"os"
-	"sort"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -34,7 +33,7 @@ type Entry map[string]string
 type Pool struct {
 	mu             sync.RWMutex
 	entries        []Entry
-	dead           map[int]time.Time // index → expiry of dead mark
+	dead           map[string]time.Time // entryID → expiry of dead mark
 	preferred      int               // index of sticky preferred cookie, -1 = none
 	filePath       string
 	healthCheckURL string // base URL for zero-token health checks (from config)
@@ -49,7 +48,7 @@ func Load(filePath, healthCheckURL string) (*Pool, error) {
 	p := &Pool{
 		filePath:       filePath,
 		healthCheckURL: strings.TrimSpace(healthCheckURL),
-		dead:           make(map[int]time.Time),
+		dead:           make(map[string]time.Time),
 		preferred:      -1,
 		stopCh:         make(chan struct{}),
 	}
@@ -83,7 +82,8 @@ func (p *Pool) Pick() *Entry {
 
 	// Try preferred cookie first (sticky for cache locality, no health check needed).
 	if p.preferred >= 0 && p.preferred < n {
-		if expiry, dead := p.dead[p.preferred]; !dead || now.After(expiry) {
+		eid := entryID(p.entries[p.preferred])
+		if expiry, dead := p.dead[eid]; !dead || now.After(expiry) {
 			entry := &p.entries[p.preferred]
 			p.mu.Unlock()
 			return entry
@@ -95,9 +95,10 @@ func (p *Pool) Pick() *Entry {
 	start := rand.Intn(n)
 	for i := 0; i < n; i++ {
 		idx := (start + i) % n
-		if expiry, dead := p.dead[idx]; dead {
+		eid := entryID(p.entries[idx])
+		if expiry, dead := p.dead[eid]; dead {
 			if now.After(expiry) {
-				// Expired dead mark
+				delete(p.dead, eid) // proactively clean expired marks
 			} else {
 				continue
 			}
@@ -137,19 +138,17 @@ func (p *Pool) Pick() *Entry {
 }
 
 // MarkDead marks a cookie as temporarily dead for the specified duration.
-// The cookie is identified by its entry ID (first header value).
+// The cookie is identified by its entry ID (longest header value / token).
 // If the dead cookie was the preferred (sticky) cookie, the preference is
 // cleared so the next Pick selects a new random cookie.
 func (p *Pool) MarkDead(cookie string, duration time.Duration) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	for i, e := range p.entries {
-		if entryID(e) == cookie {
-			p.dead[i] = time.Now().Add(duration)
-			if p.preferred == i {
-				p.preferred = -1
-			}
-			return
+	p.dead[cookie] = time.Now().Add(duration)
+	// Clear preferred if it matches the dead cookie.
+	if p.preferred >= 0 && p.preferred < len(p.entries) {
+		if entryID(p.entries[p.preferred]) == cookie {
+			p.preferred = -1
 		}
 	}
 }
@@ -210,10 +209,16 @@ func (p *Pool) reload() error {
 	p.entries = clean
 	p.modTime = info.ModTime()
 	p.preferred = -1 // reset sticky preference on reload
-	// Clear dead marks for entries that no longer exist
-	for idx := range p.dead {
-		if idx >= len(clean) {
-			delete(p.dead, idx)
+	// Dead marks are keyed by entryID (token), not index, so they survive
+	// entry reordering across reloads. Only remove marks for entries that
+	// were removed from the file.
+	liveIDs := make(map[string]struct{}, len(clean))
+	for _, e := range clean {
+		liveIDs[entryID(e)] = struct{}{}
+	}
+	for eid := range p.dead {
+		if _, ok := liveIDs[eid]; !ok {
+			delete(p.dead, eid)
 		}
 	}
 	p.mu.Unlock()
@@ -237,20 +242,17 @@ func (p *Pool) watchLoop() {
 }
 
 // entryID returns a stable identifier for a pool entry.
-// Uses a deterministic key order to avoid Go map iteration randomness.
+// Uses the longest header value (typically the session token) to avoid
+// collisions from shared IP addresses in X-Forwarded-For.
 func entryID(e Entry) string {
-	// Try keys in sorted order for deterministic results.
-	keys := make([]string, 0, len(e))
-	for k := range e {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	for _, k := range keys {
-		if v := strings.TrimSpace(e[k]); v != "" {
-			return v
+	var longest string
+	for _, v := range e {
+		v = strings.TrimSpace(v)
+		if len(v) > len(longest) {
+			longest = v
 		}
 	}
-	return ""
+	return longest
 }
 
 // EntryID returns the stable identifier for this entry (exported for callers like MarkDead).
