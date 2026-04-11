@@ -190,6 +190,7 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 				if ctx.Err() != nil {
 					pool.ClearPreferred()
 				} else {
+					pool.ClearPreferred()
 					log.Warnf("openai compat executor: request error: %v, retrying with next cookie", errExec)
 					continue
 				}
@@ -369,6 +370,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 				if ctx.Err() != nil {
 					pool.ClearPreferred()
 				} else {
+					pool.ClearPreferred()
 					log.Warnf("openai compat executor (stream): request error: %v, retrying with next cookie", errExec)
 					continue
 				}
@@ -457,6 +459,9 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 				// The upstream may return HTTP 200 but embed a rate limit error in the stream.
 				if rateLimitErr := detectSSERateLimitError(line); rateLimitErr != nil {
 					reporter.PublishFailure(ctx)
+					if pool != nil && cookieEntry != nil {
+						pool.MarkDead(cookieEntry.ID(), 10*time.Minute)
+					}
 					out <- cliproxyexecutor.StreamChunk{Err: rateLimitErr}
 					return
 				}
