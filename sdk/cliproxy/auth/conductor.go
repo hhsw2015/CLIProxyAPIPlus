@@ -829,6 +829,10 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 		streamResult, errStream := executor.ExecuteStream(ctx, auth, execReq, opts)
 		if errStream != nil {
 			if errCtx := ctx.Err(); errCtx != nil {
+				// Record the failure so affinity tracking can switch regions.
+				result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false,
+					Error: &Error{Message: errCtx.Error(), HTTPStatus: 504}}
+				m.MarkResult(ctx, result)
 				return nil, errCtx
 			}
 			rerr := &Error{Message: errStream.Error()}
@@ -852,6 +856,10 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 		ttfbCancel()
 		if bootstrapErr != nil {
 			if errCtx := ctx.Err(); errCtx != nil {
+				// Record the failure so affinity tracking can switch regions.
+				result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false,
+					Error: &Error{Message: errCtx.Error(), HTTPStatus: 504}}
+				m.MarkResult(ctx, result)
 				discardStreamChunks(streamResult.Chunks)
 				return nil, errCtx
 			}
@@ -1345,6 +1353,9 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: errExec == nil}
 			if errExec != nil {
 				if errCtx := execCtx.Err(); errCtx != nil {
+					// Record the failure so affinity tracking can switch regions.
+					result.Error = &Error{Message: errCtx.Error(), HTTPStatus: 504}
+					m.MarkResult(execCtx, result)
 					return cliproxyexecutor.Response{}, errCtx
 				}
 				result.Error = &Error{Message: errExec.Error()}
@@ -1423,6 +1434,8 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: errExec == nil}
 			if errExec != nil {
 				if errCtx := execCtx.Err(); errCtx != nil {
+					result.Error = &Error{Message: errCtx.Error(), HTTPStatus: 504}
+					m.MarkResult(execCtx, result)
 					return cliproxyexecutor.Response{}, errCtx
 				}
 				result.Error = &Error{Message: errExec.Error()}
@@ -1502,6 +1515,10 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 		streamResult, errStream := m.executeStreamWithModelPool(execCtx, executor, auth, provider, req, opts, routeModel, models, pooled)
 		if errStream != nil {
 			if errCtx := execCtx.Err(); errCtx != nil {
+				resultModel := m.stateModelForExecution(auth, routeModel, "", pooled)
+				result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false,
+					Error: &Error{Message: errCtx.Error(), HTTPStatus: 504}}
+				m.MarkResult(execCtx, result)
 				return nil, errCtx
 			}
 			if isRequestInvalidError(errStream) {

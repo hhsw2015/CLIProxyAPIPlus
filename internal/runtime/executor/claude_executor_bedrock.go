@@ -157,6 +157,10 @@ func (e *ClaudeExecutor) executeBedrock(ctx context.Context, auth *cliproxyauth.
 
 	resp.Headers = http.Header{"Content-Type": {"application/json"}}
 	resp.Payload = output.Body
+
+	// Publish usage from the non-streaming Bedrock response.
+	reporter.publish(ctx, helps.ParseClaudeUsage(output.Body))
+
 	return resp, nil
 }
 
