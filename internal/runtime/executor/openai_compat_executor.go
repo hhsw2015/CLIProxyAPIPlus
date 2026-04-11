@@ -154,13 +154,9 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 		util.ApplyCustomHeadersFromAttrs(httpReq, attrs)
 		cookieEntry := applyCookiePoolHeaders(httpReq, auth)
 
-		// Update usage reporter source with cookie ID for panel visibility.
+		// Update usage reporter source with cookie hash for panel visibility.
 		if cookieEntry != nil {
-			cid := cookieEntry.ID()
-			if len(cid) > 8 {
-				cid = cid[:8]
-			}
-			reporter.SetSourceSuffix(cid)
+			reporter.SetSourceSuffix(shortCookieHash(cookieEntry))
 		}
 
 		var authID, authLabel, authType, authValue string
@@ -338,11 +334,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		cookieEntry := applyCookiePoolHeaders(httpReq, auth)
 
 		if cookieEntry != nil {
-			cid := cookieEntry.ID()
-			if len(cid) > 8 {
-				cid = cid[:8]
-			}
-			reporter.SetSourceSuffix(cid)
+			reporter.SetSourceSuffix(shortCookieHash(cookieEntry))
 		}
 
 		var authID, authLabel, authType, authValue string
@@ -748,4 +740,23 @@ func applyCookiePoolHeaders(req *http.Request, auth *cliproxyauth.Auth) *cookiep
 		}
 	}
 	return entry
+}
+
+// shortCookieHash returns a short identifier from the cookie entry's longest
+// header value (typically the session token), formatted as "head..tail" so the
+// cookie can be located by grepping the pool JSON file.
+func shortCookieHash(entry *cookiepool.Entry) string {
+	if entry == nil {
+		return ""
+	}
+	var longest string
+	for _, value := range *entry {
+		if len(value) > len(longest) {
+			longest = value
+		}
+	}
+	if len(longest) > 28 {
+		return longest[:12] + ".." + longest[len(longest)-12:]
+	}
+	return longest
 }
