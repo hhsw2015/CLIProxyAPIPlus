@@ -154,6 +154,12 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 		util.ApplyCustomHeadersFromAttrs(httpReq, attrs)
 		cookieEntry := applyCookiePoolHeaders(httpReq, auth)
 
+		// All cookies in the pool are dead; signal auth-level failure so the
+		// conductor penalizes this entry and falls back to the next provider.
+		if pool != nil && cookieEntry == nil {
+			return resp, statusErr{code: http.StatusUnauthorized, msg: "cookie pool exhausted, all cookies dead"}
+		}
+
 		// Update usage reporter source with cookie hash for panel visibility.
 		if cookieEntry != nil {
 			reporter.SetSourceSuffix(shortCookieHash(cookieEntry))
@@ -332,6 +338,10 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		httpReq.Header.Set("Accept", "text/event-stream")
 		httpReq.Header.Set("Cache-Control", "no-cache")
 		cookieEntry := applyCookiePoolHeaders(httpReq, auth)
+
+		if pool != nil && cookieEntry == nil {
+			return nil, statusErr{code: http.StatusUnauthorized, msg: "cookie pool exhausted, all cookies dead"}
+		}
 
 		if cookieEntry != nil {
 			reporter.SetSourceSuffix(shortCookieHash(cookieEntry))
