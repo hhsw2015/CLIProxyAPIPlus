@@ -175,9 +175,16 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 		httpResp, errExec := httpClient.Do(httpReq)
 		if errExec != nil {
 			helps.RecordAPIResponseError(ctx, e.cfg, errExec)
-			if pool != nil && cookieEntry != nil && ctx.Err() == nil {
-				log.Warnf("openai compat executor: request error: %v, retrying with next cookie", errExec)
-				continue
+			if pool != nil && cookieEntry != nil {
+				if ctx.Err() != nil {
+					// Context canceled (client timeout). Mark cookie dead briefly
+					// so the next request picks a different cookie from the pool.
+					pool.MarkDead(cookieEntry.ID(), 3*time.Minute)
+					log.Warnf("openai compat executor: context canceled, marking cookie dead for 3m")
+				} else {
+					log.Warnf("openai compat executor: request error: %v, retrying with next cookie", errExec)
+					continue
+				}
 			}
 			return resp, errExec
 		}
@@ -342,9 +349,14 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		httpResp, errExec := httpClient.Do(httpReq)
 		if errExec != nil {
 			helps.RecordAPIResponseError(ctx, e.cfg, errExec)
-			if pool != nil && cookieEntry != nil && ctx.Err() == nil {
-				log.Warnf("openai compat executor (stream): request error: %v, retrying with next cookie", errExec)
-				continue
+			if pool != nil && cookieEntry != nil {
+				if ctx.Err() != nil {
+					pool.MarkDead(cookieEntry.ID(), 3*time.Minute)
+					log.Warnf("openai compat executor (stream): context canceled, marking cookie dead for 3m")
+				} else {
+					log.Warnf("openai compat executor (stream): request error: %v, retrying with next cookie", errExec)
+					continue
+				}
 			}
 			return nil, errExec
 		}
