@@ -154,19 +154,20 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 		util.ApplyCustomHeadersFromAttrs(httpReq, attrs)
 		cookieEntry := applyCookiePoolHeaders(httpReq, auth)
 
-		var authID, authLabel, authType, authValue string
-		if auth != nil {
-			authID = auth.ID
-			authLabel = auth.Label
-			authType, authValue = auth.AccountInfo()
-		}
-		// Append short cookie ID so the management panel shows which cookie was picked.
+		// Update usage reporter source with cookie ID for panel visibility.
 		if cookieEntry != nil {
 			cid := cookieEntry.ID()
 			if len(cid) > 8 {
 				cid = cid[:8]
 			}
-			authLabel = authLabel + "/" + cid
+			reporter.SetSourceSuffix(cid)
+		}
+
+		var authID, authLabel, authType, authValue string
+		if auth != nil {
+			authID = auth.ID
+			authLabel = auth.Label
+			authType, authValue = auth.AccountInfo()
 		}
 		helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
 			URL:       url,
@@ -336,18 +337,19 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		httpReq.Header.Set("Cache-Control", "no-cache")
 		cookieEntry := applyCookiePoolHeaders(httpReq, auth)
 
-		var authID, authLabel, authType, authValue string
-		if auth != nil {
-			authID = auth.ID
-			authLabel = auth.Label
-			authType, authValue = auth.AccountInfo()
-		}
 		if cookieEntry != nil {
 			cid := cookieEntry.ID()
 			if len(cid) > 8 {
 				cid = cid[:8]
 			}
-			authLabel = authLabel + "/" + cid
+			reporter.SetSourceSuffix(cid)
+		}
+
+		var authID, authLabel, authType, authValue string
+		if auth != nil {
+			authID = auth.ID
+			authLabel = auth.Label
+			authType, authValue = auth.AccountInfo()
 		}
 		helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
 			URL:       url,
