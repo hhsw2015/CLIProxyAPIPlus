@@ -789,7 +789,7 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 			for {
 				var chunk coreexecutor.StreamChunk
 				var ok bool
-				if ctx != nil && !sentPayload && heartbeatC != nil {
+				if ctx != nil && heartbeatC != nil {
 					select {
 					case <-ctx.Done():
 						return
