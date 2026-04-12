@@ -636,45 +636,28 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 		SourceFormat:    sdktranslator.FromString(handlerType),
 	}
 	opts.Metadata = reqMeta
-	streamResult, err := h.AuthManager.ExecuteStream(ctx, providers, req, opts)
-	if err != nil {
-		err = enrichAuthSelectionError(err, providers, normalizedModel)
-		errChan := make(chan *interfaces.ErrorMessage, 1)
-		status := http.StatusInternalServerError
-		if se, ok := err.(interface{ StatusCode() int }); ok && se != nil {
-			if code := se.StatusCode(); code > 0 {
-				status = code
-			}
-		}
-		var addon http.Header
-		if he, ok := err.(interface{ Headers() http.Header }); ok && he != nil {
-			if hdr := he.Headers(); hdr != nil {
-				addon = hdr.Clone()
-			}
-		}
-		errChan <- &interfaces.ErrorMessage{StatusCode: status, Error: err, Addon: addon}
-		close(errChan)
-		return nil, nil, errChan
-	}
 	passthroughHeadersEnabled := PassthroughHeadersEnabled(h.Cfg)
-	// Capture upstream headers from the initial connection synchronously before the goroutine starts.
-	// Keep a mutable map so bootstrap retries can replace it before first payload is sent.
+	// Initialize upstream headers as empty; populated once ExecuteStream returns.
 	var upstreamHeaders http.Header
 	if passthroughHeadersEnabled {
-		upstreamHeaders = cloneHeader(FilterUpstreamHeaders(streamResult.Headers))
-		if upstreamHeaders == nil {
-			upstreamHeaders = make(http.Header)
-		}
+		upstreamHeaders = make(http.Header)
 	}
-	chunks := streamResult.Chunks
 	dataChan := make(chan []byte)
 	errChan := make(chan *interfaces.ErrorMessage, 1)
+
+	// Result type for the async ExecuteStream call.
+	type execResult struct {
+		stream *coreexecutor.StreamResult
+		err    error
+	}
+
 	go func() {
 		defer close(dataChan)
 		defer close(errChan)
 		sentPayload := false
 		bootstrapRetries := 0
 		maxBootstrapRetries := StreamingBootstrapRetries(h.Cfg)
+		bootstrapKeepAlive := StreamingKeepAliveInterval(h.Cfg)
 
 		sendErr := func(msg *interfaces.ErrorMessage) bool {
 			if ctx == nil {
@@ -716,7 +699,84 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 			}
 		}
 
-		bootstrapKeepAlive := StreamingKeepAliveInterval(h.Cfg)
+		// --- Phase 1: Run ExecuteStream asynchronously, send heartbeats while waiting ---
+		execCh := make(chan execResult, 1)
+		go func() {
+			sr, serr := h.AuthManager.ExecuteStream(ctx, providers, req, opts)
+			execCh <- execResult{stream: sr, err: serr}
+		}()
+
+		var streamResult *coreexecutor.StreamResult
+		if ctx != nil && bootstrapKeepAlive > 0 {
+			ticker := time.NewTicker(bootstrapKeepAlive)
+			defer ticker.Stop()
+		waitLoop:
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case res := <-execCh:
+					if res.err != nil {
+						res.err = enrichAuthSelectionError(res.err, providers, normalizedModel)
+						status := http.StatusInternalServerError
+						if se, ok := res.err.(interface{ StatusCode() int }); ok && se != nil {
+							if code := se.StatusCode(); code > 0 {
+								status = code
+							}
+						}
+						var addon http.Header
+						if he, ok := res.err.(interface{ Headers() http.Header }); ok && he != nil {
+							if hdr := he.Headers(); hdr != nil {
+								addon = hdr.Clone()
+							}
+						}
+						_ = sendErr(&interfaces.ErrorMessage{StatusCode: status, Error: res.err, Addon: addon})
+						return
+					}
+					streamResult = res.stream
+					break waitLoop
+				case <-ticker.C:
+					sendData([]byte(": keep-alive\n\n"))
+				}
+			}
+			ticker.Stop()
+		} else {
+			// No heartbeat (disabled or no context): block until ExecuteStream returns.
+			var res execResult
+			if ctx != nil {
+				select {
+				case <-ctx.Done():
+					return
+				case res = <-execCh:
+				}
+			} else {
+				res = <-execCh
+			}
+			if res.err != nil {
+				res.err = enrichAuthSelectionError(res.err, providers, normalizedModel)
+				status := http.StatusInternalServerError
+				if se, ok := res.err.(interface{ StatusCode() int }); ok && se != nil {
+					if code := se.StatusCode(); code > 0 {
+						status = code
+					}
+				}
+				var addon http.Header
+				if he, ok := res.err.(interface{ Headers() http.Header }); ok && he != nil {
+					if hdr := he.Headers(); hdr != nil {
+						addon = hdr.Clone()
+					}
+				}
+				_ = sendErr(&interfaces.ErrorMessage{StatusCode: status, Error: res.err, Addon: addon})
+				return
+			}
+			streamResult = res.stream
+		}
+
+		// --- Phase 2: ExecuteStream succeeded; populate upstream headers and process chunks ---
+		if passthroughHeadersEnabled {
+			replaceHeader(upstreamHeaders, FilterUpstreamHeaders(streamResult.Headers))
+		}
+		chunks := streamResult.Chunks
 
 	outer:
 		for {
