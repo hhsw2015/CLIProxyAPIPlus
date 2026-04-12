@@ -706,10 +706,17 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 			execCh <- execResult{stream: sr, err: serr}
 		}()
 
-		var streamResult *coreexecutor.StreamResult
-		if ctx != nil && bootstrapKeepAlive > 0 {
+		// Shared ticker for heartbeats across Phase 1 (waiting for ExecuteStream) and
+		// Phase 2 (waiting for first chunk). Nil when heartbeats are disabled.
+		var heartbeatC <-chan time.Time
+		if bootstrapKeepAlive > 0 {
 			ticker := time.NewTicker(bootstrapKeepAlive)
 			defer ticker.Stop()
+			heartbeatC = ticker.C
+		}
+
+		var streamResult *coreexecutor.StreamResult
+		if ctx != nil && heartbeatC != nil {
 		waitLoop:
 			for {
 				select {
@@ -735,11 +742,10 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 					}
 					streamResult = res.stream
 					break waitLoop
-				case <-ticker.C:
+				case <-heartbeatC:
 					sendData([]byte(": keep-alive\n\n"))
 				}
 			}
-			ticker.Stop()
 		} else {
 			// No heartbeat (disabled or no context): block until ExecuteStream returns.
 			var res execResult
@@ -783,12 +789,12 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 			for {
 				var chunk coreexecutor.StreamChunk
 				var ok bool
-				if ctx != nil && !sentPayload && bootstrapKeepAlive > 0 {
+				if ctx != nil && !sentPayload && heartbeatC != nil {
 					select {
 					case <-ctx.Done():
 						return
 					case chunk, ok = <-chunks:
-					case <-time.After(bootstrapKeepAlive):
+					case <-heartbeatC:
 						sendData([]byte(": keep-alive\n\n"))
 						continue
 					}
