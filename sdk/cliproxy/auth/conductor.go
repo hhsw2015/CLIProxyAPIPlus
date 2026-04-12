@@ -753,20 +753,6 @@ func readStreamBootstrap(ctx context.Context, ch <-chan cliproxyexecutor.StreamC
 	}
 }
 
-// ttfbContext returns a sub-context with a TTFB timeout derived from config.
-// If TTFBTimeoutSeconds is configured and > 0, that value is used.
-// If it is 0 (unconfigured), a safe default of 50 seconds is applied.
-// The caller must call the returned cancel function to release resources.
-func (m *Manager) ttfbContext(parent context.Context) (context.Context, context.CancelFunc) {
-	const defaultTTFBTimeout = 55 * time.Second
-
-	ttfb := defaultTTFBTimeout
-	cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
-	if cfg != nil && cfg.Streaming.TTFBTimeoutSeconds > 0 {
-		ttfb = time.Duration(cfg.Streaming.TTFBTimeoutSeconds) * time.Second
-	}
-	return context.WithTimeout(parent, ttfb)
-}
 
 func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, resultModel string, headers http.Header, buffered []cliproxyexecutor.StreamChunk, remaining <-chan cliproxyexecutor.StreamChunk) *cliproxyexecutor.StreamResult {
 	out := make(chan cliproxyexecutor.StreamChunk)
@@ -849,50 +835,11 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			continue
 		}
 
-		// Pre-emptive TTFB timeout: give up waiting for the first byte before the
-		// client's own timeout fires, so the outer loop can pivot to the next credential.
-		ttfbCtx, ttfbCancel := m.ttfbContext(ctx)
-		buffered, closed, bootstrapErr := readStreamBootstrap(ttfbCtx, streamResult.Chunks)
-		ttfbCancel()
+		buffered, closed, bootstrapErr := readStreamBootstrap(ctx, streamResult.Chunks)
 		if bootstrapErr != nil {
 			if errCtx := ctx.Err(); errCtx != nil {
-				// Record the failure so affinity tracking can switch regions.
-				result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false,
-					Error: &Error{Message: errCtx.Error(), HTTPStatus: 504}}
-				m.MarkResult(ctx, result)
 				discardStreamChunks(streamResult.Chunks)
 				return nil, errCtx
-			}
-			// The parent context is still alive but our TTFB sub-context expired.
-			if errors.Is(bootstrapErr, context.DeadlineExceeded) {
-				ttfbErr := &Error{
-					Code:      "ttfb_timeout",
-					Message:   "TTFB timeout: upstream did not produce first byte in time",
-					Retryable: true,
-				}
-				rerr := &Error{Message: bootstrapErr.Error()}
-				if se, ok := errors.AsType[cliproxyexecutor.StatusError](bootstrapErr); ok && se != nil {
-					rerr.HTTPStatus = se.StatusCode()
-				}
-				result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: rerr}
-				result.RetryAfter = retryAfterFromError(bootstrapErr)
-				m.MarkResult(ctx, result)
-				discardStreamChunks(streamResult.Chunks)
-				// Graceful pinning release: give the pinned account one retry chance
-				// (transient slowness), then release pinning on the second consecutive
-				// TTFB timeout so the scheduler can pick a healthy account.
-				const ttfbCountKey = "__ttfb_timeout_count"
-				ttfbCount := 0
-				if v, ok := opts.Metadata[ttfbCountKey].(int); ok {
-					ttfbCount = v
-				}
-				ttfbCount++
-				opts.Metadata[ttfbCountKey] = ttfbCount
-				if ttfbCount > 1 {
-					delete(opts.Metadata, cliproxyexecutor.PinnedAuthMetadataKey)
-				}
-				lastErr = ttfbErr
-				continue
 			}
 			if isRequestInvalidError(bootstrapErr) {
 				rerr := &Error{Message: bootstrapErr.Error()}
