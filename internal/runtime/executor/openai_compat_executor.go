@@ -720,6 +720,11 @@ func stripReasoningContent(payload []byte) []byte {
 		if budget > 0 {
 			payload, _ = sjson.SetBytes(payload, "thinking.type", "enabled")
 			payload, _ = sjson.SetBytes(payload, "thinking.budget_tokens", budget)
+			// Ensure max_tokens > budget_tokens (Anthropic/Bedrock API constraint).
+			maxTokens := gjson.GetBytes(payload, "max_tokens").Int()
+			if maxTokens <= int64(budget) {
+				payload, _ = sjson.SetBytes(payload, "max_tokens", budget+1)
+			}
 		}
 	}
 	// Strip other non-standard fields that backends reject.
