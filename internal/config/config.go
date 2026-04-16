@@ -253,6 +253,12 @@ type RoutingConfig struct {
 	// Strategy selects the credential selection strategy.
 	// Supported values: "round-robin" (default), "fill-first".
 	Strategy string `yaml:"strategy,omitempty" json:"strategy,omitempty"`
+
+	// LatencyAware enables latency-weighted credential selection within the same
+	// priority and region. When enabled, credentials with lower response times
+	// receive proportionally more traffic via inverse-latency weighting.
+	// Only affects direct accounts (not cookie pools). Default: false.
+	LatencyAware bool `yaml:"latency-aware,omitempty" json:"latency-aware,omitempty"`
 }
 
 // RefusalShieldConfig configures automatic refusal detection and transparent retry.

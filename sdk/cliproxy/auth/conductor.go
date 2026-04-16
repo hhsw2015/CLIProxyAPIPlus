@@ -98,6 +98,8 @@ type Result struct {
 	RetryAfter *time.Duration
 	// Error describes the failure when Success is false.
 	Error *Error
+	// Latency is the observed request duration for latency-aware scheduling.
+	Latency time.Duration
 }
 
 // Selector chooses an auth candidate for execution.
@@ -325,6 +327,13 @@ func (m *Manager) SetSelector(selector Selector) {
 	if m.scheduler != nil {
 		m.scheduler.setSelector(selector)
 		m.syncScheduler()
+	}
+}
+
+// SetLatencyAware enables or disables latency-weighted credential selection.
+func (m *Manager) SetLatencyAware(enabled bool) {
+	if m != nil && m.scheduler != nil {
+		m.scheduler.SetLatencyAware(enabled)
 	}
 }
 
@@ -757,6 +766,7 @@ func readStreamBootstrap(ctx context.Context, ch <-chan cliproxyexecutor.StreamC
 func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, resultModel string, headers http.Header, buffered []cliproxyexecutor.StreamChunk, remaining <-chan cliproxyexecutor.StreamChunk) *cliproxyexecutor.StreamResult {
 	out := make(chan cliproxyexecutor.StreamChunk)
 	go func() {
+		streamStart := time.Now()
 		defer close(out)
 		var failed bool
 		forward := true
@@ -767,7 +777,7 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, re
 				if se, ok := errors.AsType[cliproxyexecutor.StatusError](chunk.Err); ok && se != nil {
 					rerr.HTTPStatus = se.StatusCode()
 				}
-				m.MarkResult(ctx, Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: rerr})
+				m.MarkResult(ctx, Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: rerr, Latency: time.Since(streamStart)})
 			}
 			if !forward {
 				return false
@@ -797,7 +807,7 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, re
 			}
 		}
 		if !failed {
-			m.MarkResult(ctx, Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: true})
+			m.MarkResult(ctx, Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: true, Latency: time.Since(streamStart)})
 		}
 	}()
 	return &cliproxyexecutor.StreamResult{Headers: headers, Chunks: out}
@@ -1296,8 +1306,10 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			resultModel := m.stateModelForExecution(auth, routeModel, upstreamModel, pooled)
 			execReq := req
 			execReq.Model = upstreamModel
+			execStart := time.Now()
 			resp, errExec := executor.Execute(execCtx, auth, execReq, opts)
-			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: errExec == nil}
+			execLatency := time.Since(execStart)
+			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: errExec == nil, Latency: execLatency}
 			if errExec != nil {
 				if errCtx := execCtx.Err(); errCtx != nil {
 					// Record the failure so affinity tracking can switch regions.
@@ -2149,6 +2161,10 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	// Notify scheduler of affinity group success/failure for region switching.
 	if m.scheduler != nil && result.Model != "" {
 		m.scheduler.RecordAffinityResult(result.AuthID, result.Model, result.Success)
+	}
+	// Record latency for latency-aware scheduling.
+	if m.scheduler != nil && result.Latency > 0 {
+		m.scheduler.recordLatency(result.AuthID, result.Latency)
 	}
 }
 

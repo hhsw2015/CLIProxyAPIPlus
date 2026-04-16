@@ -2,6 +2,8 @@ package auth
 
 import (
 	"context"
+	"math"
+	"math/rand"
 	"sort"
 	"strings"
 	"sync"
@@ -34,6 +36,7 @@ const (
 type authScheduler struct {
 	mu                 sync.Mutex
 	strategy           schedulerStrategy
+	latencyAware       bool // from config: routing.latency-aware
 	providers          map[string]*providerScheduler
 	authProviders      map[string]string
 	mixedCursors       map[string]int
@@ -57,6 +60,12 @@ type scheduledAuthMeta struct {
 	virtualParent     string
 	websocketEnabled  bool
 	supportedModelSet map[string]struct{}
+	isCookiePool      bool // precomputed: auth has cookie_pool_name attribute
+
+	// Latency tracking (EMA) for latency-aware scheduling.
+	latencyEMA     float64   // exponential moving average of response time in seconds
+	latencySamples int       // number of latency samples recorded
+	lastSampleAt   time.Time // when the last sample was recorded
 }
 
 // modelScheduler tracks ready and blocked auths for one provider/model combination.
@@ -189,6 +198,16 @@ func selectorStrategy(selector Selector) schedulerStrategy {
 	}
 }
 
+// SetLatencyAware enables or disables latency-weighted selection.
+func (s *authScheduler) SetLatencyAware(enabled bool) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.latencyAware = enabled
+	s.mu.Unlock()
+}
+
 // setSelector updates the active built-in strategy and resets mixed-provider cursors.
 func (s *authScheduler) setSelector(selector Selector) {
 	if s == nil {
@@ -274,7 +293,7 @@ func (s *authScheduler) pickSingle(ctx context.Context, provider, model string, 
 		}
 		return true
 	}
-	if picked := shard.pickReadyLocked(preferWebsocket, s.strategy, predicate); picked != nil {
+	if picked := shard.pickReadyLocked(preferWebsocket, s.strategy, predicate, s.latencyAware); picked != nil {
 		return picked, nil
 	}
 	return nil, shard.unavailableErrorLocked(provider, model, predicate)
@@ -327,7 +346,7 @@ func (s *authScheduler) pickMixed(ctx context.Context, providers []string, model
 			_, ok := tried[pinnedAuthID]
 			return !ok
 		}
-		if picked := shard.pickReadyLocked(false, s.strategy, predicate); picked != nil {
+		if picked := shard.pickReadyLocked(false, s.strategy, predicate, s.latencyAware); picked != nil {
 			return picked, providerKey, nil
 		}
 		return nil, "", shard.unavailableErrorLocked("mixed", model, predicate)
@@ -393,7 +412,7 @@ func (s *authScheduler) pickMixed(ctx context.Context, providers []string, model
 			if shard == nil {
 				continue
 			}
-			picked := shard.pickReadyAtPriorityLocked(false, bestPriority, effectiveStrategy, effectivePredicate)
+			picked := shard.pickReadyAtPriorityLocked(false, bestPriority, effectiveStrategy, effectivePredicate, s.latencyAware)
 			if picked != nil {
 				if g := picked.AffinityGroup(); g != picked.ID {
 					if s.affinityPreference == nil {
@@ -413,7 +432,7 @@ func (s *authScheduler) pickMixed(ctx context.Context, providers []string, model
 				if shard == nil {
 					continue
 				}
-				picked := shard.pickReadyAtPriorityLocked(false, bestPriority, s.strategy, predicate)
+				picked := shard.pickReadyAtPriorityLocked(false, bestPriority, s.strategy, predicate, s.latencyAware)
 				if picked != nil {
 					if g := picked.AffinityGroup(); g != picked.ID {
 						if s.affinityPreference == nil {
@@ -474,7 +493,7 @@ func (s *authScheduler) pickMixed(ctx context.Context, providers []string, model
 		if shard == nil {
 			continue
 		}
-		picked := shard.pickReadyAtPriorityLocked(false, bestPriority, schedulerStrategyRoundRobin, predicate)
+		picked := shard.pickReadyAtPriorityLocked(false, bestPriority, schedulerStrategyRoundRobin, predicate, s.latencyAware)
 		if picked == nil {
 			continue
 		}
@@ -538,6 +557,28 @@ func (s *authScheduler) findAuthLocked(authID string) *scheduledAuthMeta {
 		return nil
 	}
 	return ps.auths[authID]
+}
+
+// recordLatency updates the latency EMA for an auth. Called from conductor.MarkResult.
+func (s *authScheduler) recordLatency(authID string, latency time.Duration) {
+	if latency <= 0 {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	meta := s.findAuthLocked(authID)
+	if meta == nil || meta.isCookiePool {
+		return
+	}
+	sample := latency.Seconds()
+	const alpha = 0.3
+	if meta.latencySamples == 0 {
+		meta.latencyEMA = sample
+	} else {
+		meta.latencyEMA = alpha*sample + (1-alpha)*meta.latencyEMA
+	}
+	meta.latencySamples++
+	meta.lastSampleAt = time.Now()
 }
 
 // mixedUnavailableErrorLocked synthesizes the mixed-provider cooldown or unavailable error.
@@ -675,6 +716,10 @@ func buildScheduledAuthMeta(auth *Auth) *scheduledAuthMeta {
 	if auth.Attributes != nil {
 		virtualParent = strings.TrimSpace(auth.Attributes["gemini_virtual_parent"])
 	}
+	isCookiePool := false
+	if auth.Attributes != nil && strings.TrimSpace(auth.Attributes["cookie_pool_name"]) != "" {
+		isCookiePool = true
+	}
 	return &scheduledAuthMeta{
 		auth:              auth,
 		providerKey:       providerKey,
@@ -682,6 +727,7 @@ func buildScheduledAuthMeta(auth *Auth) *scheduledAuthMeta {
 		virtualParent:     virtualParent,
 		websocketEnabled:  authWebsocketsEnabled(auth),
 		supportedModelSet: supportedModelSetForAuth(auth.ID),
+		isCookiePool:      isCookiePool,
 	}
 }
 
@@ -875,7 +921,7 @@ func (m *modelScheduler) promoteExpiredLocked(now time.Time) {
 }
 
 // pickReadyLocked selects the next ready auth from the highest available priority bucket.
-func (m *modelScheduler) pickReadyLocked(preferWebsocket bool, strategy schedulerStrategy, predicate func(*scheduledAuth) bool) *Auth {
+func (m *modelScheduler) pickReadyLocked(preferWebsocket bool, strategy schedulerStrategy, predicate func(*scheduledAuth) bool, latencyAware bool) *Auth {
 	if m == nil {
 		return nil
 	}
@@ -884,7 +930,7 @@ func (m *modelScheduler) pickReadyLocked(preferWebsocket bool, strategy schedule
 	if !okPriority {
 		return nil
 	}
-	return m.pickReadyAtPriorityLocked(preferWebsocket, priorityReady, strategy, predicate)
+	return m.pickReadyAtPriorityLocked(preferWebsocket, priorityReady, strategy, predicate, latencyAware)
 }
 
 // highestReadyPriorityLocked returns the highest priority bucket that still has a matching ready auth.
@@ -920,7 +966,9 @@ func (m *modelScheduler) highestReadyPriorityLocked(preferWebsocket bool, predic
 
 // pickReadyAtPriorityLocked selects the next ready auth from a specific priority bucket.
 // The caller must ensure expired entries are already promoted when needed.
-func (m *modelScheduler) pickReadyAtPriorityLocked(preferWebsocket bool, priority int, strategy schedulerStrategy, predicate func(*scheduledAuth) bool) *Auth {
+// When latencyAware is true, uses inverse-latency weighted selection instead of round-robin
+// for non-cookie-pool auths with sufficient latency samples.
+func (m *modelScheduler) pickReadyAtPriorityLocked(preferWebsocket bool, priority int, strategy schedulerStrategy, predicate func(*scheduledAuth) bool, latencyAware bool) *Auth {
 	if m == nil {
 		return nil
 	}
@@ -936,12 +984,115 @@ func (m *modelScheduler) pickReadyAtPriorityLocked(preferWebsocket bool, priorit
 	if strategy == schedulerStrategyFillFirst {
 		picked = view.pickFirst(predicate)
 	} else {
-		picked = view.pickRoundRobin(predicate)
+		// Try latency-aware weighted selection first (only when enabled, multiple candidates).
+		if latencyAware && len(view.flat) > 1 {
+			picked = view.pickLatencyWeighted(predicate)
+		}
+		if picked == nil {
+			picked = view.pickRoundRobin(predicate)
+		}
 	}
 	if picked == nil || picked.auth == nil {
 		return nil
 	}
 	return picked.auth
+}
+
+// pickLatencyWeighted selects an auth using inverse-latency weighting.
+// Faster auths get proportionally more traffic. Each auth has a minimum 5% probability
+// to prevent starvation and allow recovery detection.
+// Returns nil if insufficient latency data (falls through to round-robin).
+func (v *readyView) pickLatencyWeighted(predicate func(*scheduledAuth) bool) *scheduledAuth {
+	const minSamples = 3
+	const minProb = 0.05
+	const decayInterval = 5 * time.Minute
+	const decayFactor = 0.5
+
+	// Collect eligible candidates with latency data.
+	type candidate struct {
+		entry  *scheduledAuth
+		ema    float64
+		weight float64
+	}
+	var candidates []candidate
+	now := time.Now()
+	for _, entry := range v.flat {
+		if entry == nil || entry.meta == nil {
+			continue
+		}
+		if predicate != nil && !predicate(entry) {
+			continue
+		}
+		if entry.meta.isCookiePool {
+			continue // cookie pool has its own scheduling
+		}
+		if entry.meta.latencySamples < minSamples {
+			return nil // not enough data, fall through to round-robin
+		}
+		ema := entry.meta.latencyEMA
+		// Decay EMA toward neutral if auth hasn't been used recently.
+		if !entry.meta.lastSampleAt.IsZero() && now.Sub(entry.meta.lastSampleAt) > decayInterval {
+			intervals := float64(now.Sub(entry.meta.lastSampleAt)) / float64(decayInterval)
+			decay := math.Pow(decayFactor, intervals)
+			// Decay toward 10s (neutral baseline).
+			ema = 10.0 + (ema-10.0)*decay
+		}
+		if ema < 0.1 {
+			ema = 0.1
+		}
+		candidates = append(candidates, candidate{entry: entry, ema: ema, weight: 1.0 / ema})
+	}
+	if len(candidates) < 2 {
+		return nil // single candidate or none, fall through
+	}
+
+	// Normalize weights and apply minimum floor.
+	totalWeight := 0.0
+	for _, c := range candidates {
+		totalWeight += c.weight
+	}
+	if totalWeight <= 0 {
+		return nil
+	}
+	// Apply floor: each candidate gets at least minProb.
+	probs := make([]float64, len(candidates))
+	remainingProb := 1.0
+	floored := 0
+	for i, c := range candidates {
+		p := c.weight / totalWeight
+		if p < minProb {
+			probs[i] = minProb
+			remainingProb -= minProb
+			floored++
+		}
+	}
+	// Distribute remaining probability to non-floored candidates proportionally.
+	if floored < len(candidates) {
+		nonFlooredWeight := 0.0
+		for i, c := range candidates {
+			if probs[i] == 0 { // not floored
+				nonFlooredWeight += c.weight
+			}
+		}
+		if nonFlooredWeight > 0 {
+			for i, c := range candidates {
+				if probs[i] == 0 {
+					probs[i] = remainingProb * (c.weight / nonFlooredWeight)
+				}
+			}
+		}
+	}
+
+	// Weighted random selection.
+	r := rand.Float64()
+	cumulative := 0.0
+	for i, p := range probs {
+		cumulative += p
+		if r < cumulative {
+			return candidates[i].entry
+		}
+	}
+	return candidates[len(candidates)-1].entry
 }
 
 // bestAffinityGroup returns the AffinityGroup to use for region-aware scheduling.

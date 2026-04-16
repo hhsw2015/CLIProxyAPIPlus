@@ -2787,6 +2787,11 @@ func (s *Service) Run(ctx context.Context) error {
 			s.coreManager.SetSelector(selector)
 		}
 
+		// Propagate latency-aware scheduling config.
+		if s.coreManager != nil {
+			s.coreManager.SetLatencyAware(newCfg.Routing.LatencyAware)
+		}
+
 		s.applyRetryConfig(newCfg)
 		s.applyPprofConfig(newCfg)
 		if s.server != nil {
