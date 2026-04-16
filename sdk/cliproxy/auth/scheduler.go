@@ -760,6 +760,12 @@ func (p *providerScheduler) upsertAuthLocked(meta *scheduledAuthMeta, now time.T
 	if p == nil || meta == nil || meta.auth == nil {
 		return
 	}
+	// Carry forward latency EMA data from the previous meta (survives scheduler rebuilds).
+	if prev, exists := p.auths[meta.auth.ID]; exists && prev != nil && prev.latencySamples > 0 {
+		meta.latencyEMA = prev.latencyEMA
+		meta.latencySamples = prev.latencySamples
+		meta.lastSampleAt = prev.lastSampleAt
+	}
 	p.auths[meta.auth.ID] = meta
 	for modelKey, shard := range p.modelShards {
 		if shard == nil {
@@ -1004,7 +1010,6 @@ func (m *modelScheduler) pickReadyAtPriorityLocked(preferWebsocket bool, priorit
 // Returns nil if insufficient latency data (falls through to round-robin).
 func (v *readyView) pickLatencyWeighted(predicate func(*scheduledAuth) bool) *scheduledAuth {
 	const minSamples = 3
-	const minProb = 0.05
 	const decayInterval = 5 * time.Minute
 	const decayFactor = 0.5
 
@@ -1053,6 +1058,11 @@ func (v *readyView) pickLatencyWeighted(predicate func(*scheduledAuth) bool) *sc
 	}
 	if totalWeight <= 0 {
 		return nil
+	}
+	// Dynamic floor: 5% or 1/N (whichever is smaller), ensures total floors < 100%.
+	minProb := 0.05
+	if n := len(candidates); n > 10 {
+		minProb = 1.0 / float64(n*2)
 	}
 	// Apply floor: each candidate gets at least minProb.
 	probs := make([]float64, len(candidates))
