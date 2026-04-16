@@ -1,0 +1,750 @@
+{
+  "communities": {
+    "0": [
+      "affinity_blacklist",
+      "affinity_group",
+      "affinity_preference",
+      "api_key_model_alias",
+      "apply_api_key_model_alias",
+      "auth_error",
+      "auth_manager",
+      "auth_scheduler",
+      "auth_status",
+      "auth_store",
+      "auth_struct",
+      "auto_refresh",
+      "best_affinity_group_fn",
+      "claude_key_config",
+      "claude_model_config",
+      "codex_key_config",
+      "codex_model_config",
+      "custom_headers",
+      "error_classification",
+      "gemini_key_config",
+      "gemini_model_config",
+      "hook_interface",
+      "internal_config",
+      "lookup_api_key_upstream_model",
+      "manager_register",
+      "manager_set_config",
+      "mark_result",
+      "model_state",
+      "oauth_model_alias",
+      "persist_policy",
+      "provider_executor",
+      "quota_state",
+      "record_affinity_result",
+      "refusal_shield",
+      "refusal_shield_ai_verify",
+      "refusal_shield_conductor_hook",
+      "refusal_shield_detector",
+      "refusal_shield_error",
+      "refusal_shield_rewriter",
+      "result_struct",
+      "round_tripper_provider",
+      "ttfb_timeout"
+    ],
+    "1": [
+      "ApplyAuthExcludedModelsMeta",
+      "AuthSynthesizer",
+      "BuildAuthChangeDetails",
+      "BuildConfigChangeDetails",
+      "ComputeClaudeModelsHash",
+      "ComputeCodexModelsHash",
+      "ComputeExcludedModelsHash",
+      "ComputeGeminiModelsHash",
+      "ComputeOpenAICompatModelsHash",
+      "ComputeVertexCompatModelsHash",
+      "ConfigSynthesizer",
+      "DiffOAuthExcludedModelChanges",
+      "DiffOAuthModelAliasChanges",
+      "DiffOpenAICompatibility",
+      "StableIDGenerator",
+      "SummarizeAmpModelMappings",
+      "SummarizeClaudeModels",
+      "SummarizeCodexModels",
+      "SummarizeExcludedModels",
+      "SummarizeGeminiModels",
+      "SummarizeOAuthModelAlias",
+      "SummarizeVertexModels",
+      "SynthesisContext",
+      "addConfigHeadersToAttrs",
+      "config_Config",
+      "cookiepool_Register",
+      "coreauth_Auth",
+      "hashJoined",
+      "kiroauth_NewKiroAuth",
+      "normalizeModelPairs",
+      "synthesizeClaudeKeys",
+      "synthesizeCodexKeys",
+      "synthesizeGeminiKeys",
+      "synthesizeKiroKeys",
+      "synthesizeOpenAICompat",
+      "synthesizeVertexCompat"
+    ],
+    "2": [
+      "apply_cookie_pool_headers",
+      "claude_executor",
+      "claude_executor_bedrock",
+      "claude_signing",
+      "codex_auth_pkg",
+      "codex_auto_executor",
+      "codex_executor",
+      "codex_websockets_executor",
+      "codex_ws_session_store",
+      "cookiepool_pkg",
+      "detect_sse_rate_limit",
+      "gemini_cli_executor",
+      "geminicli_pkg",
+      "gitlab_auth_pkg",
+      "gitlab_executor",
+      "helps_pkg",
+      "iflow_auth_pkg",
+      "iflow_executor",
+      "is_bedrock_auth",
+      "is_claude_model",
+      "is_daily_limit_error",
+      "is_embedded_error_response",
+      "is_proxied_backend",
+      "kiro_claude_pkg",
+      "openai_compat_executor",
+      "openai_compat_websearch",
+      "prepare_bedrock_body",
+      "proxy_aware_http_client",
+      "resolve_bedrock_model_id",
+      "sdk_translator",
+      "strip_reasoning_content",
+      "thinking_pkg",
+      "usage_reporter"
+    ],
+    "3": [
+      "amp_default_model_mapper",
+      "amp_ensure_signature",
+      "amp_fallback_handler",
+      "amp_gemini_bridge",
+      "amp_management_routes",
+      "amp_mapped_secret_source",
+      "amp_model_mapper_interface",
+      "amp_module",
+      "amp_multi_source_secret",
+      "amp_proxy",
+      "amp_response_rewriter",
+      "amp_route_type",
+      "amp_routes",
+      "amp_sanitize_request",
+      "amp_secret_source",
+      "claude_code_handler",
+      "config_amp_code",
+      "config_amp_model_mapping",
+      "config_amp_upstream_keys",
+      "gemini_handler",
+      "handlers_base",
+      "logging_skip_gin",
+      "misc_scrub_headers",
+      "modules_context",
+      "openai_handler",
+      "openai_responses_handler",
+      "register_module",
+      "route_module_v1",
+      "route_module_v2",
+      "thinking_parse_suffix",
+      "util_get_provider"
+    ],
+    "4": [
+      "auth_files_DeleteAuthFile",
+      "auth_files_ListAuthFiles",
+      "auth_files_PatchAuthFileFields",
+      "auth_files_PatchAuthFileStatus",
+      "auth_files_UploadAuthFile",
+      "auth_index_GetAuthByIndex",
+      "config_basic_GetConfig",
+      "config_basic_PutConfigYAML",
+      "config_basic_settings",
+      "config_lists_AmpCode",
+      "config_lists_configListHandlers",
+      "dep_config_Config",
+      "dep_coreauth_Auth",
+      "dep_coreauth_Manager",
+      "dep_coreauth_Store",
+      "dep_usage_RequestStatistics",
+      "dep_vertex",
+      "handler_Handler",
+      "handler_NewHandler",
+      "handler_persist",
+      "media_proxy_mediaProxyHandler",
+      "media_proxy_resolveMediaProvider",
+      "media_proxy_setupMediaRoutes",
+      "quota_handlers",
+      "usage_ExportUsageStatistics",
+      "usage_GetUsageStatistics",
+      "usage_ImportUsageStatistics",
+      "vertex_import_ImportVertexCredential"
+    ],
+    "5": [
+      "best_affinity_group",
+      "canonical_model_key_fn",
+      "child_bucket",
+      "cooldown_queue",
+      "downstream_websocket",
+      "executor_options",
+      "fill_first_selector",
+      "is_auth_blocked_for_model",
+      "model_cooldown_error",
+      "model_scheduler",
+      "new_model_cooldown_error",
+      "pick_mixed",
+      "pick_single",
+      "pinned_auth_id_from_metadata",
+      "provider_scheduler",
+      "ready_bucket",
+      "ready_view",
+      "rebuild_indexes",
+      "round_robin_selector",
+      "scheduled_auth",
+      "scheduled_auth_meta",
+      "scheduled_state",
+      "scheduler_strategy",
+      "selector_interface",
+      "virtual_parent_grouping"
+    ],
+    "6": [
+      "config",
+      "config_claude_key",
+      "config_cloak",
+      "config_codex_key",
+      "config_gemini_key",
+      "config_kiro_key",
+      "config_oauth_model_alias",
+      "config_openai_compat",
+      "config_payload",
+      "config_pool_manager",
+      "config_refusal_shield",
+      "config_routing",
+      "config_sdk",
+      "config_streaming",
+      "config_vertex_compat",
+      "cookiepool_entry",
+      "cookiepool_manager",
+      "cookiepool_pool",
+      "github_copilot_aliases",
+      "github_copilot_dynamic_aliases",
+      "load_config",
+      "oauth_alias_defaults",
+      "openai_compat_alias",
+      "save_config"
+    ],
+    "7": [
+      "gitlab_duo_model_discovery",
+      "gitlab_duo_oauth",
+      "gitlab_duo_provider",
+      "sdk_access_authenticate",
+      "sdk_access_config_api_key",
+      "sdk_access_manager",
+      "sdk_advanced_model_registry",
+      "sdk_advanced_provider_executor",
+      "sdk_advanced_translator_registry",
+      "sdk_usage_builder",
+      "sdk_usage_cliproxy",
+      "sdk_usage_core_auth_manager",
+      "sdk_watcher_auth_update",
+      "sdk_watcher_coalescing",
+      "server_amp_module",
+      "server_auth_middleware",
+      "server_kiro_oauth",
+      "server_management_routes",
+      "server_oauth_callbacks",
+      "server_setup_routes",
+      "server_struct",
+      "server_unified_models",
+      "server_update_clients"
+    ],
+    "8": [
+      "const::glEndpoint",
+      "executor::AIStudioExecutor",
+      "executor::AntigravityExecutor",
+      "executor::ClaudeExecutor",
+      "executor::CodeBuddyExecutor",
+      "executor::CursorExecutor",
+      "executor::GeminiExecutor",
+      "executor::GeminiVertexExecutor",
+      "executor::GitHubCopilotExecutor",
+      "executor::KiloExecutor",
+      "executor::KimiExecutor",
+      "executor::KiroExecutor",
+      "executor::QwenExecutor",
+      "executor::compat_helpers",
+      "func::applyGeminiHeaders",
+      "func::ensureColonSpacedJSON",
+      "func::fixGeminiImageAspectRatio",
+      "func::metaStringValue",
+      "iface::ProviderExecutor",
+      "pkg::helps",
+      "pkg::sdktranslator",
+      "pkg::thinking"
+    ],
+    "9": [
+      "gemini_vertex_oauth",
+      "server_setup_task_routes",
+      "sora_map_status",
+      "task_doubao_adaptor",
+      "task_gemini_adaptor",
+      "task_gptproxy_adaptor",
+      "task_hailuo_adaptor",
+      "task_handler_dedicated_poll",
+      "task_handler_detect_platform",
+      "task_handler_polling",
+      "task_handler_registry",
+      "task_handler_submit",
+      "task_kling_adaptor",
+      "task_sora_adaptor",
+      "task_store_global",
+      "task_types_adaptor",
+      "task_types_openai_video_response",
+      "task_types_task"
+    ],
+    "10": [
+      "cache_helpers",
+      "claude_device_profile",
+      "cliproxy_auth",
+      "cloak_obfuscate",
+      "cloak_utils",
+      "config_pkg",
+      "logging_helpers",
+      "logging_pkg",
+      "payload_helpers",
+      "proxy_helpers",
+      "proxyutil_pkg",
+      "session_id_cache",
+      "usage_helpers",
+      "usage_record",
+      "user_id_cache",
+      "util_pkg",
+      "utls_client"
+    ],
+    "11": [
+      "api_tools_APICall",
+      "api_tools_GetCopilotQuota",
+      "api_tools_apiCallTransport",
+      "api_tools_enrichCopilotTokenResponse",
+      "api_tools_refreshAntigravityOAuth",
+      "api_tools_refreshGeminiOAuth",
+      "api_tools_resolveTokenForAuth",
+      "auth_files_RequestGeminiCLIToken",
+      "dep_geminicli",
+      "dep_proxyutil"
+    ],
+    "12": [
+      "thinking_provider_antigravity",
+      "thinking_provider_claude",
+      "thinking_provider_codex",
+      "thinking_provider_gemini",
+      "thinking_provider_geminicli",
+      "thinking_provider_iflow",
+      "thinking_provider_kimi",
+      "thinking_provider_openai",
+      "thinking_providers"
+    ],
+    "13": [
+      "auth_files_RequestAnthropicToken",
+      "auth_files_RequestCodexToken",
+      "oauth_callback_PostOAuthCallback",
+      "oauth_sessions_NormalizeOAuthProvider",
+      "oauth_sessions_ValidateOAuthState",
+      "oauth_sessions_WriteOAuthCallbackFile",
+      "oauth_sessions_oauthSessionStore"
+    ],
+    "14": [
+      "iface_TaskAdaptor",
+      "task_fal_falAdaptor",
+      "task_fal_soraAdaptor",
+      "task_suno_Task",
+      "task_suno_TaskInfo",
+      "task_suno_sunoAdaptor",
+      "task_vidu_viduAdaptor"
+    ],
+    "15": [
+      "auth_priority_fn",
+      "auth_websockets_enabled_fn",
+      "build_scheduled_auth_meta",
+      "global_registry",
+      "supported_model_set_for_auth"
+    ],
+    "16": [
+      "skywork_fallback",
+      "skywork_global_cooldown",
+      "skywork_model_table",
+      "skywork_throttle"
+    ],
+    "17": [
+      "logging_request_logger",
+      "middleware_request_info",
+      "middleware_request_logging",
+      "middleware_response_writer"
+    ],
+    "18": [
+      "region_affinity_bedrock_cache",
+      "region_affinity_fill_first",
+      "region_affinity_scheduling"
+    ],
+    "19": [
+      "shared_credential_struct",
+      "virtual_credential_struct"
+    ],
+    "20": [
+      "media_proxy_gptProxyPassthrough",
+      "media_proxy_setupGptProxyRoutes"
+    ],
+    "21": [
+      "dep_buildinfo",
+      "handler_Middleware"
+    ],
+    "22": [
+      "dep_logging",
+      "logs_GetLogs"
+    ],
+    "23": [
+      "dep_registry",
+      "model_definitions_GetStaticModelDefinitions"
+    ],
+    "24": [
+      "status_err"
+    ],
+    "25": [
+      "sign_anthropic_messages"
+    ],
+    "26": [
+      "claude_builtin_tools"
+    ],
+    "27": [
+      "geminicli_state"
+    ],
+    "28": [
+      "helps_package"
+    ],
+    "29": [
+      "codex_cache_struct"
+    ],
+    "30": [
+      "usage_reporter_struct"
+    ],
+    "31": [
+      "sensitive_word_matcher"
+    ],
+    "32": [
+      "claude_device_profile_struct"
+    ],
+    "33": [
+      "media_proxy_Server"
+    ],
+    "34": [
+      "media_proxy_mediaEndpoint"
+    ],
+    "35": [
+      "media_proxy_mediaProviderConfig"
+    ],
+    "36": [
+      "config_lists_GetAPIKeys"
+    ],
+    "37": [
+      "config_lists_GetGeminiKeys"
+    ],
+    "38": [
+      "config_lists_GetClaudeKeys"
+    ],
+    "39": [
+      "config_lists_GetOpenAICompat"
+    ],
+    "40": [
+      "config_lists_GetVertexCompatKeys"
+    ],
+    "41": [
+      "config_lists_GetCodexKeys"
+    ],
+    "42": [
+      "config_lists_OAuthExcludedModels"
+    ],
+    "43": [
+      "config_lists_OAuthModelAlias"
+    ],
+    "44": [
+      "logs_DeleteLogs"
+    ],
+    "45": [
+      "logs_GetRequestErrorLogs"
+    ],
+    "46": [
+      "logs_GetRequestLogByID"
+    ],
+    "47": [
+      "config_basic_GetLatestVersion"
+    ],
+    "48": [
+      "auth_files_RequestGitLabToken"
+    ],
+    "49": [
+      "auth_files_RequestAntigravityToken"
+    ],
+    "50": [
+      "auth_files_RequestQwenToken"
+    ],
+    "51": [
+      "auth_files_RequestKimiToken"
+    ],
+    "52": [
+      "auth_files_RequestIFlowToken"
+    ],
+    "53": [
+      "auth_files_RequestGitHubToken"
+    ],
+    "54": [
+      "auth_files_RequestKiroToken"
+    ],
+    "55": [
+      "auth_files_RequestKiloToken"
+    ],
+    "56": [
+      "auth_files_RequestCursorToken"
+    ],
+    "57": [
+      "task_types_task_info"
+    ],
+    "58": [
+      "type::statusErr"
+    ],
+    "59": [
+      "ExcludedModelsSummary"
+    ],
+    "60": [
+      "GeminiModelsSummary"
+    ],
+    "61": [
+      "ClaudeModelsSummary"
+    ],
+    "62": [
+      "CodexModelsSummary"
+    ],
+    "63": [
+      "VertexModelsSummary"
+    ],
+    "64": [
+      "OAuthModelAliasSummary"
+    ],
+    "65": [
+      "AmpModelMappingsSummary"
+    ]
+  },
+  "cohesion": {
+    "0": 0.07,
+    "1": 0.1,
+    "2": 0.11,
+    "3": 0.09,
+    "4": 0.08,
+    "5": 0.1,
+    "6": 0.09,
+    "7": 0.09,
+    "8": 0.26,
+    "9": 0.21,
+    "10": 0.15,
+    "11": 0.27,
+    "12": 0.22,
+    "13": 0.38,
+    "14": 0.43,
+    "15": 0.4,
+    "16": 0.67,
+    "17": 0.83,
+    "18": 0.67,
+    "19": 1.0,
+    "20": 1.0,
+    "21": 1.0,
+    "22": 1.0,
+    "23": 1.0,
+    "24": 1.0,
+    "25": 1.0,
+    "26": 1.0,
+    "27": 1.0,
+    "28": 1.0,
+    "29": 1.0,
+    "30": 1.0,
+    "31": 1.0,
+    "32": 1.0,
+    "33": 1.0,
+    "34": 1.0,
+    "35": 1.0,
+    "36": 1.0,
+    "37": 1.0,
+    "38": 1.0,
+    "39": 1.0,
+    "40": 1.0,
+    "41": 1.0,
+    "42": 1.0,
+    "43": 1.0,
+    "44": 1.0,
+    "45": 1.0,
+    "46": 1.0,
+    "47": 1.0,
+    "48": 1.0,
+    "49": 1.0,
+    "50": 1.0,
+    "51": 1.0,
+    "52": 1.0,
+    "53": 1.0,
+    "54": 1.0,
+    "55": 1.0,
+    "56": 1.0,
+    "57": 1.0,
+    "58": 1.0,
+    "59": 1.0,
+    "60": 1.0,
+    "61": 1.0,
+    "62": 1.0,
+    "63": 1.0,
+    "64": 1.0,
+    "65": 1.0
+  },
+  "gods": [
+    {
+      "id": "config",
+      "label": "Config",
+      "edges": 20
+    },
+    {
+      "id": "auth_manager",
+      "label": "Manager (auth orchestrator)",
+      "edges": 19
+    },
+    {
+      "id": "openai_compat_executor",
+      "label": "OpenAICompatExecutor",
+      "edges": 17
+    },
+    {
+      "id": "amp_module",
+      "label": "AmpModule",
+      "edges": 12
+    },
+    {
+      "id": "auth_struct",
+      "label": "Auth (credential record)",
+      "edges": 10
+    },
+    {
+      "id": "codex_executor",
+      "label": "CodexExecutor",
+      "edges": 10
+    },
+    {
+      "id": "BuildConfigChangeDetails",
+      "label": "BuildConfigChangeDetails",
+      "edges": 10
+    },
+    {
+      "id": "model_scheduler",
+      "label": "modelScheduler (per-model ready/blocked)",
+      "edges": 9
+    },
+    {
+      "id": "task_sora_adaptor",
+      "label": "soraAdaptor",
+      "edges": 9
+    },
+    {
+      "id": "normalizeModelPairs",
+      "label": "normalizeModelPairs",
+      "edges": 9
+    }
+  ],
+  "surprises": [
+    {
+      "source": "RefusalShield (model refusal detection)",
+      "target": "Refusal Rewriter (3-path fallback)",
+      "source_files": [
+        "/tmp/cpa-graphify/sdk/cliproxy/auth/refusal_shield.go",
+        "docs/refusal-shield.md"
+      ],
+      "confidence": "EXTRACTED",
+      "relation": "references",
+      "why": "crosses file types (code \u2194 doc); connects across different repos/directories; peripheral node `Refusal Rewriter (3-path fallback)` unexpectedly reaches hub `RefusalShield (model refusal detection)`"
+    },
+    {
+      "source": "RefusalShield (model refusal detection)",
+      "target": "AI-Assisted Verification",
+      "source_files": [
+        "/tmp/cpa-graphify/sdk/cliproxy/auth/refusal_shield.go",
+        "docs/refusal-shield.md"
+      ],
+      "confidence": "EXTRACTED",
+      "relation": "references",
+      "why": "crosses file types (code \u2194 doc); connects across different repos/directories; peripheral node `AI-Assisted Verification` unexpectedly reaches hub `RefusalShield (model refusal detection)`"
+    },
+    {
+      "source": "unifiedModelsHandler (User-Agent routing)",
+      "target": "Model Registry",
+      "source_files": [
+        "internal/api/server.go",
+        "docs/sdk-advanced.md"
+      ],
+      "confidence": "INFERRED",
+      "relation": "conceptually_related_to",
+      "why": "inferred connection - not explicitly stated in source; crosses file types (doc \u2194 code); connects across different repos/directories"
+    },
+    {
+      "source": "AmpModule",
+      "target": "SDK Access Manager",
+      "source_files": [
+        "/tmp/cpa-graphify/internal/api/modules/amp/amp.go",
+        "docs/sdk-access.md"
+      ],
+      "confidence": "EXTRACTED",
+      "relation": "references",
+      "why": "crosses file types (doc \u2194 code); connects across different repos/directories; bridges separate communities"
+    },
+    {
+      "source": "Watcher Auth Update Queue",
+      "target": "Server.UpdateClients (hot-reload)",
+      "source_files": [
+        "docs/sdk-watcher.md",
+        "internal/api/server.go"
+      ],
+      "confidence": "INFERRED",
+      "relation": "conceptually_related_to",
+      "why": "inferred connection - not explicitly stated in source; crosses file types (doc \u2194 code); connects across different repos/directories"
+    }
+  ],
+  "questions": [
+    {
+      "type": "bridge_node",
+      "question": "Why does `AmpModule` connect `Community 3` to `Community 6`, `Community 7`?",
+      "why": "High betweenness centrality (0.037) - this node is a cross-community bridge."
+    },
+    {
+      "type": "bridge_node",
+      "question": "Why does `SDK Access Manager` connect `Community 7` to `Community 3`?",
+      "why": "High betweenness centrality (0.032) - this node is a cross-community bridge."
+    },
+    {
+      "type": "verify_inferred",
+      "question": "Are the 3 inferred relationships involving `OpenAICompatExecutor` (e.g. with `IFlowExecutor` and `CodexExecutor`) actually correct?",
+      "why": "`OpenAICompatExecutor` has 3 INFERRED edges - model-reasoned connections that need verification."
+    },
+    {
+      "type": "isolated_nodes",
+      "question": "What connects `Store (persistence interface)`, `Status (lifecycle enum)`, `skyworkThrottle (request rate limiter)` to the rest of the system?",
+      "why": "156 weakly-connected nodes found - possible documentation gaps or missing edges."
+    },
+    {
+      "type": "low_cohesion",
+      "question": "Should `Community 0` be split into smaller, more focused modules?",
+      "why": "Cohesion score 0.07 - nodes in this community are weakly interconnected."
+    },
+    {
+      "type": "low_cohesion",
+      "question": "Should `Community 1` be split into smaller, more focused modules?",
+      "why": "Cohesion score 0.1 - nodes in this community are weakly interconnected."
+    },
+    {
+      "type": "low_cohesion",
+      "question": "Should `Community 2` be split into smaller, more focused modules?",
+      "why": "Cohesion score 0.11 - nodes in this community are weakly interconnected."
+    }
+  ]
+}
