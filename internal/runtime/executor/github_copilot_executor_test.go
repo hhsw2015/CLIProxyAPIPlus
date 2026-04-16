@@ -2,11 +2,19 @@ package executor
 
 import (
 	"bytes"
+	"context"
+	"io"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
+	copilotauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/copilot"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
 	"github.com/tidwall/gjson"
 )
@@ -400,5 +408,505 @@ func TestDetectVisionContent_NoMessages(t *testing.T) {
 	body := []byte(`{"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]}]}`)
 	if detectVisionContent(body) {
 		t.Fatal("expected no vision content when messages field is absent")
+	}
+}
+
+
+// --- Tests for applyGitHubCopilotResponsesDefaults ---
+
+func TestApplyGitHubCopilotResponsesDefaults_SetsAllDefaults(t *testing.T) {
+	t.Parallel()
+	body := []byte(`{"input":"hello","reasoning":{"effort":"medium"}}`)
+	got := applyGitHubCopilotResponsesDefaults(body)
+
+	if gjson.GetBytes(got, "store").Bool() != false {
+		t.Fatalf("store = %v, want false", gjson.GetBytes(got, "store").Raw)
+	}
+	inc := gjson.GetBytes(got, "include")
+	if !inc.IsArray() || inc.Array()[0].String() != "reasoning.encrypted_content" {
+		t.Fatalf("include = %s, want [\"reasoning.encrypted_content\"]", inc.Raw)
+	}
+	if gjson.GetBytes(got, "reasoning.summary").String() != "auto" {
+		t.Fatalf("reasoning.summary = %q, want auto", gjson.GetBytes(got, "reasoning.summary").String())
+	}
+}
+
+func TestApplyGitHubCopilotResponsesDefaults_DoesNotOverrideExisting(t *testing.T) {
+	t.Parallel()
+	body := []byte(`{"input":"hello","store":true,"include":["other"],"reasoning":{"effort":"high","summary":"concise"}}`)
+	got := applyGitHubCopilotResponsesDefaults(body)
+
+	if gjson.GetBytes(got, "store").Bool() != true {
+		t.Fatalf("store should not be overridden, got %s", gjson.GetBytes(got, "store").Raw)
+	}
+	if gjson.GetBytes(got, "include").Array()[0].String() != "other" {
+		t.Fatalf("include should not be overridden, got %s", gjson.GetBytes(got, "include").Raw)
+	}
+	if gjson.GetBytes(got, "reasoning.summary").String() != "concise" {
+		t.Fatalf("reasoning.summary should not be overridden, got %q", gjson.GetBytes(got, "reasoning.summary").String())
+	}
+}
+
+func TestApplyGitHubCopilotResponsesDefaults_NoReasoningEffort(t *testing.T) {
+	t.Parallel()
+	body := []byte(`{"input":"hello"}`)
+	got := applyGitHubCopilotResponsesDefaults(body)
+
+	if gjson.GetBytes(got, "store").Bool() != false {
+		t.Fatalf("store = %v, want false", gjson.GetBytes(got, "store").Raw)
+	}
+	// reasoning.summary should NOT be set when reasoning.effort is absent
+	if gjson.GetBytes(got, "reasoning.summary").Exists() {
+		t.Fatalf("reasoning.summary should not be set when reasoning.effort is absent, got %q", gjson.GetBytes(got, "reasoning.summary").String())
+	}
+}
+
+// --- Tests for normalizeGitHubCopilotReasoningField ---
+
+func TestNormalizeReasoningField_NonStreaming(t *testing.T) {
+	t.Parallel()
+	data := []byte(`{"choices":[{"message":{"content":"hello","reasoning_text":"I think..."}}]}`)
+	got := normalizeGitHubCopilotReasoningField(data)
+	rc := gjson.GetBytes(got, "choices.0.message.reasoning_content").String()
+	if rc != "I think..." {
+		t.Fatalf("reasoning_content = %q, want %q", rc, "I think...")
+	}
+}
+
+func TestNormalizeReasoningField_Streaming(t *testing.T) {
+	t.Parallel()
+	data := []byte(`{"choices":[{"delta":{"reasoning_text":"thinking delta"}}]}`)
+	got := normalizeGitHubCopilotReasoningField(data)
+	rc := gjson.GetBytes(got, "choices.0.delta.reasoning_content").String()
+	if rc != "thinking delta" {
+		t.Fatalf("reasoning_content = %q, want %q", rc, "thinking delta")
+	}
+}
+
+func TestNormalizeReasoningField_PreservesExistingReasoningContent(t *testing.T) {
+	t.Parallel()
+	data := []byte(`{"choices":[{"message":{"reasoning_text":"old","reasoning_content":"existing"}}]}`)
+	got := normalizeGitHubCopilotReasoningField(data)
+	rc := gjson.GetBytes(got, "choices.0.message.reasoning_content").String()
+	if rc != "existing" {
+		t.Fatalf("reasoning_content = %q, want %q (should not overwrite)", rc, "existing")
+	}
+}
+
+func TestNormalizeReasoningField_MultiChoice(t *testing.T) {
+	t.Parallel()
+	data := []byte(`{"choices":[{"message":{"reasoning_text":"thought-0"}},{"message":{"reasoning_text":"thought-1"}}]}`)
+	got := normalizeGitHubCopilotReasoningField(data)
+	rc0 := gjson.GetBytes(got, "choices.0.message.reasoning_content").String()
+	rc1 := gjson.GetBytes(got, "choices.1.message.reasoning_content").String()
+	if rc0 != "thought-0" {
+		t.Fatalf("choices[0].reasoning_content = %q, want %q", rc0, "thought-0")
+	}
+	if rc1 != "thought-1" {
+		t.Fatalf("choices[1].reasoning_content = %q, want %q", rc1, "thought-1")
+	}
+}
+
+func TestNormalizeReasoningField_NoChoices(t *testing.T) {
+	t.Parallel()
+	data := []byte(`{"id":"chatcmpl-123"}`)
+	got := normalizeGitHubCopilotReasoningField(data)
+	if string(got) != string(data) {
+		t.Fatalf("expected no change, got %s", string(got))
+	}
+}
+
+func TestApplyHeaders_OpenAIIntentValue(t *testing.T) {
+	t.Parallel()
+	e := &GitHubCopilotExecutor{}
+	req, _ := http.NewRequest(http.MethodPost, "https://example.com", nil)
+	e.applyHeaders(req, "token", nil)
+	if got := req.Header.Get("Openai-Intent"); got != "conversation-edits" {
+		t.Fatalf("Openai-Intent = %q, want conversation-edits", got)
+	}
+}
+
+// --- Tests for CountTokens (local tiktoken estimation) ---
+
+func TestCountTokens_ReturnsPositiveCount(t *testing.T) {
+	t.Parallel()
+	e := &GitHubCopilotExecutor{}
+	body := []byte(`{"model":"gpt-4o","messages":[{"role":"user","content":"Hello, world!"}]}`)
+	resp, err := e.CountTokens(context.Background(), nil, cliproxyexecutor.Request{
+		Model:   "gpt-4o",
+		Payload: body,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai"),
+	})
+	if err != nil {
+		t.Fatalf("CountTokens() error: %v", err)
+	}
+	if len(resp.Payload) == 0 {
+		t.Fatal("CountTokens() returned empty payload")
+	}
+	// The response should contain a positive token count.
+	tokens := gjson.GetBytes(resp.Payload, "usage.prompt_tokens").Int()
+	if tokens <= 0 {
+		t.Fatalf("expected positive token count, got %d", tokens)
+	}
+}
+
+func TestCountTokens_ClaudeSourceFormatTranslates(t *testing.T) {
+	t.Parallel()
+	e := &GitHubCopilotExecutor{}
+	body := []byte(`{"model":"claude-sonnet-4","messages":[{"role":"user","content":"Tell me a joke"}],"max_tokens":1024}`)
+	resp, err := e.CountTokens(context.Background(), nil, cliproxyexecutor.Request{
+		Model:   "claude-sonnet-4",
+		Payload: body,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("claude"),
+	})
+	if err != nil {
+		t.Fatalf("CountTokens() error: %v", err)
+	}
+	// Claude source format → should get input_tokens in response
+	inputTokens := gjson.GetBytes(resp.Payload, "input_tokens").Int()
+	if inputTokens <= 0 {
+		// Fallback: check usage.prompt_tokens (depends on translator registration)
+		promptTokens := gjson.GetBytes(resp.Payload, "usage.prompt_tokens").Int()
+		if promptTokens <= 0 {
+			t.Fatalf("expected positive token count, got payload: %s", resp.Payload)
+		}
+	}
+}
+
+func TestGitHubCopilotExecute_ClaudeModelUsesNativeGateway(t *testing.T) {
+	t.Parallel()
+
+	var gotPath string
+	var gotQuery string
+	var gotAuth string
+	var gotAPIVersion string
+	var gotEditorVersion string
+	var gotIntent string
+	var gotInitiator string
+	var gotBody []byte
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotQuery = r.URL.RawQuery
+		gotAuth = r.Header.Get("Authorization")
+		gotAPIVersion = r.Header.Get("X-Github-Api-Version")
+		gotEditorVersion = r.Header.Get("Editor-Version")
+		gotIntent = r.Header.Get("Openai-Intent")
+		gotInitiator = r.Header.Get("X-Initiator")
+		gotBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"msg_1","type":"message","model":"claude-sonnet-4.6","role":"assistant","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":1,"output_tokens":1}}`))
+	}))
+	defer server.Close()
+
+	e := NewGitHubCopilotExecutor(&config.Config{})
+	e.cache["gh-access-token"] = &cachedAPIToken{
+		token:       "copilot-api-token",
+		apiEndpoint: server.URL,
+		expiresAt:   time.Now().Add(time.Hour),
+	}
+	auth := &cliproxyauth.Auth{Metadata: map[string]any{"access_token": "gh-access-token"}}
+	payload := []byte(`{"model":"claude-sonnet-4.6","max_tokens":256,"messages":[{"role":"user","content":"hello"}]}`)
+
+	resp, err := e.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "claude-sonnet-4.6",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat:    sdktranslator.FromString("claude"),
+		OriginalRequest: payload,
+	})
+	if err != nil {
+		t.Fatalf("Execute() error: %v", err)
+	}
+
+	if gotPath != "/v1/messages" {
+		t.Fatalf("path = %q, want %q", gotPath, "/v1/messages")
+	}
+	if gotQuery != "beta=true" {
+		t.Fatalf("query = %q, want %q", gotQuery, "beta=true")
+	}
+	if gotAuth != "Bearer copilot-api-token" {
+		t.Fatalf("Authorization = %q, want %q", gotAuth, "Bearer copilot-api-token")
+	}
+	if gotAPIVersion != copilotGitHubAPIVer {
+		t.Fatalf("X-Github-Api-Version = %q, want %q", gotAPIVersion, copilotGitHubAPIVer)
+	}
+	if gotEditorVersion != copilotEditorVersion {
+		t.Fatalf("Editor-Version = %q, want %q", gotEditorVersion, copilotEditorVersion)
+	}
+	if gotIntent != copilotOpenAIIntent {
+		t.Fatalf("Openai-Intent = %q, want %q", gotIntent, copilotOpenAIIntent)
+	}
+	if gotInitiator != "user" {
+		t.Fatalf("X-Initiator = %q, want %q", gotInitiator, "user")
+	}
+	if gjson.GetBytes(gotBody, "model").String() != "claude-sonnet-4.6" {
+		t.Fatalf("upstream model = %q, want %q", gjson.GetBytes(gotBody, "model").String(), "claude-sonnet-4.6")
+	}
+	if gjson.GetBytes(resp.Payload, "content.0.text").String() != "ok" {
+		t.Fatalf("response text = %q, want %q", gjson.GetBytes(resp.Payload, "content.0.text").String(), "ok")
+	}
+}
+
+func TestGitHubCopilotExecuteStream_ClaudeModelUsesNativeGateway(t *testing.T) {
+	t.Parallel()
+
+	var gotPath string
+	var gotInitiator string
+	var gotAPIVersion string
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotInitiator = r.Header.Get("X-Initiator")
+		gotAPIVersion = r.Header.Get("X-Github-Api-Version")
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-sonnet-4.6\",\"content\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}}\n\n"))
+		_, _ = w.Write([]byte("event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n"))
+		_, _ = w.Write([]byte("event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"ok\"}}\n\n"))
+		_, _ = w.Write([]byte("event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n"))
+		_, _ = w.Write([]byte("event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":1}}\n\n"))
+		_, _ = w.Write([]byte("event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"))
+	}))
+	defer server.Close()
+
+	e := NewGitHubCopilotExecutor(&config.Config{})
+	e.cache["gh-access-token"] = &cachedAPIToken{
+		token:       "copilot-api-token",
+		apiEndpoint: server.URL,
+		expiresAt:   time.Now().Add(time.Hour),
+	}
+	auth := &cliproxyauth.Auth{Metadata: map[string]any{"access_token": "gh-access-token"}}
+	payload := []byte(`{"model":"claude-sonnet-4.6","stream":true,"max_tokens":256,"messages":[{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"Read","input":{"path":"notes.txt"}}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"file contents"}]}]}`)
+
+	result, err := e.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "claude-sonnet-4.6",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat:    sdktranslator.FromString("claude"),
+		OriginalRequest: payload,
+	})
+	if err != nil {
+		t.Fatalf("ExecuteStream() error: %v", err)
+	}
+
+	var joined strings.Builder
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("stream chunk error: %v", chunk.Err)
+		}
+		joined.Write(chunk.Payload)
+	}
+
+	if gotPath != "/v1/messages" {
+		t.Fatalf("path = %q, want %q", gotPath, "/v1/messages")
+	}
+	if gotInitiator != "agent" {
+		t.Fatalf("X-Initiator = %q, want %q", gotInitiator, "agent")
+	}
+	if gotAPIVersion != copilotGitHubAPIVer {
+		t.Fatalf("X-Github-Api-Version = %q, want %q", gotAPIVersion, copilotGitHubAPIVer)
+	}
+	if !strings.Contains(joined.String(), "message_start") || !strings.Contains(joined.String(), "text_delta") {
+		t.Fatalf("stream = %q, want Claude SSE payload", joined.String())
+	}
+}
+
+func TestCountTokens_EmptyPayload(t *testing.T) {
+	t.Parallel()
+	e := &GitHubCopilotExecutor{}
+	resp, err := e.CountTokens(context.Background(), nil, cliproxyexecutor.Request{
+		Model:   "gpt-4o",
+		Payload: []byte(`{"model":"gpt-4o","messages":[]}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai"),
+	})
+	if err != nil {
+		t.Fatalf("CountTokens() error: %v", err)
+	}
+	tokens := gjson.GetBytes(resp.Payload, "usage.prompt_tokens").Int()
+	// Empty messages should return 0 tokens.
+	if tokens != 0 {
+		t.Fatalf("expected 0 tokens for empty messages, got %d", tokens)
+	}
+}
+
+func TestStripUnsupportedBetas_RemovesContext1M(t *testing.T) {
+	t.Parallel()
+
+	body := []byte(`{"model":"claude-opus-4.6","betas":["interleaved-thinking-2025-05-14","context-1m-2025-08-07","claude-code-20250219"],"messages":[]}`)
+	result := stripUnsupportedBetas(body)
+
+	betas := gjson.GetBytes(result, "betas")
+	if !betas.Exists() {
+		t.Fatal("betas field should still exist after stripping")
+	}
+	for _, item := range betas.Array() {
+		if item.String() == "context-1m-2025-08-07" {
+			t.Fatal("context-1m-2025-08-07 should have been stripped")
+		}
+	}
+	// Other betas should be preserved
+	found := false
+	for _, item := range betas.Array() {
+		if item.String() == "interleaved-thinking-2025-05-14" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("other betas should be preserved")
+	}
+}
+
+func TestStripUnsupportedBetas_NoBetasField(t *testing.T) {
+	t.Parallel()
+
+	body := []byte(`{"model":"gpt-4o","messages":[]}`)
+	result := stripUnsupportedBetas(body)
+
+	// Should be unchanged
+	if string(result) != string(body) {
+		t.Fatalf("body should be unchanged when no betas field exists, got %s", string(result))
+	}
+}
+
+func TestStripUnsupportedBetas_MetadataBetas(t *testing.T) {
+	t.Parallel()
+
+	body := []byte(`{"model":"claude-opus-4.6","metadata":{"betas":["context-1m-2025-08-07","other-beta"]},"messages":[]}`)
+	result := stripUnsupportedBetas(body)
+
+	betas := gjson.GetBytes(result, "metadata.betas")
+	if !betas.Exists() {
+		t.Fatal("metadata.betas field should still exist after stripping")
+	}
+	for _, item := range betas.Array() {
+		if item.String() == "context-1m-2025-08-07" {
+			t.Fatal("context-1m-2025-08-07 should have been stripped from metadata.betas")
+		}
+	}
+	if betas.Array()[0].String() != "other-beta" {
+		t.Fatal("other betas in metadata.betas should be preserved")
+	}
+}
+
+func TestStripUnsupportedBetas_AllBetasStripped(t *testing.T) {
+	t.Parallel()
+
+	body := []byte(`{"model":"claude-opus-4.6","betas":["context-1m-2025-08-07"],"messages":[]}`)
+	result := stripUnsupportedBetas(body)
+
+	betas := gjson.GetBytes(result, "betas")
+	if betas.Exists() {
+		t.Fatal("betas field should be deleted when all betas are stripped")
+	}
+}
+
+func TestCopilotModelEntry_Limits(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name         string
+		capabilities map[string]any
+		wantNil      bool
+		wantPrompt   int
+		wantOutput   int
+		wantContext  int
+	}{
+		{
+			name:         "nil capabilities",
+			capabilities: nil,
+			wantNil:      true,
+		},
+		{
+			name:         "no limits key",
+			capabilities: map[string]any{"family": "claude-opus-4.6"},
+			wantNil:      true,
+		},
+		{
+			name:         "limits is not a map",
+			capabilities: map[string]any{"limits": "invalid"},
+			wantNil:      true,
+		},
+		{
+			name: "all zero values",
+			capabilities: map[string]any{
+				"limits": map[string]any{
+					"max_context_window_tokens": float64(0),
+					"max_prompt_tokens":         float64(0),
+					"max_output_tokens":         float64(0),
+				},
+			},
+			wantNil: true,
+		},
+		{
+			name: "individual account limits (128K prompt)",
+			capabilities: map[string]any{
+				"limits": map[string]any{
+					"max_context_window_tokens": float64(144000),
+					"max_prompt_tokens":         float64(128000),
+					"max_output_tokens":         float64(64000),
+				},
+			},
+			wantNil:     false,
+			wantPrompt:  128000,
+			wantOutput:  64000,
+			wantContext: 144000,
+		},
+		{
+			name: "business account limits (168K prompt)",
+			capabilities: map[string]any{
+				"limits": map[string]any{
+					"max_context_window_tokens": float64(200000),
+					"max_prompt_tokens":         float64(168000),
+					"max_output_tokens":         float64(32000),
+				},
+			},
+			wantNil:     false,
+			wantPrompt:  168000,
+			wantOutput:  32000,
+			wantContext: 200000,
+		},
+		{
+			name: "partial limits (only prompt)",
+			capabilities: map[string]any{
+				"limits": map[string]any{
+					"max_prompt_tokens": float64(128000),
+				},
+			},
+			wantNil:    false,
+			wantPrompt: 128000,
+			wantOutput: 0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			entry := copilotauth.CopilotModelEntry{
+				ID:           "claude-opus-4.6",
+				Capabilities: tt.capabilities,
+			}
+			limits := entry.Limits()
+			if tt.wantNil {
+				if limits != nil {
+					t.Fatalf("expected nil limits, got %+v", limits)
+				}
+				return
+			}
+			if limits == nil {
+				t.Fatal("expected non-nil limits, got nil")
+			}
+			if limits.MaxPromptTokens != tt.wantPrompt {
+				t.Errorf("MaxPromptTokens = %d, want %d", limits.MaxPromptTokens, tt.wantPrompt)
+			}
+			if limits.MaxOutputTokens != tt.wantOutput {
+				t.Errorf("MaxOutputTokens = %d, want %d", limits.MaxOutputTokens, tt.wantOutput)
+			}
+			if tt.wantContext > 0 && limits.MaxContextWindowTokens != tt.wantContext {
+				t.Errorf("MaxContextWindowTokens = %d, want %d", limits.MaxContextWindowTokens, tt.wantContext)
+			}
+		})
 	}
 }

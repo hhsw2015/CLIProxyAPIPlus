@@ -65,6 +65,76 @@ ech_workers:
       ip: "172.64.80.1"
       token: "7bd57098-82bd-4dfa-b32c-9943a52d354f"
       port: 30007
+    - name: ech-8
+      domain: "ech.alias7.workers.dev:443"
+      ip: "172.64.80.1"
+      token: "7bd57098-82bd-4dfa-b32c-9943a52d354f"
+      port: 30008
+    - name: ech-9
+      domain: "ech.alias8-9c7.workers.dev:443"
+      ip: "172.64.80.1"
+      token: "7bd57098-82bd-4dfa-b32c-9943a52d354f"
+      port: 30009
+    - name: ech-10
+      domain: "ech.alias9.workers.dev:443"
+      ip: "172.64.80.1"
+      token: "7bd57098-82bd-4dfa-b32c-9943a52d354f"
+      port: 30010
+    - name: ech-11
+      domain: "ech.alias10.workers.dev:443"
+      ip: "172.64.80.1"
+      token: "7bd57098-82bd-4dfa-b32c-9943a52d354f"
+      port: 30011
+    - name: ech-12
+      domain: "ech.alias11.workers.dev:443"
+      ip: "172.64.80.1"
+      token: "7bd57098-82bd-4dfa-b32c-9943a52d354f"
+      port: 30012
+    - name: ech-13
+      domain: "ech.alias12.workers.dev:443"
+      ip: "172.64.80.1"
+      token: "7bd57098-82bd-4dfa-b32c-9943a52d354f"
+      port: 30013
+    - name: ech-14
+      domain: "ech.alias13.workers.dev:443"
+      ip: "172.64.80.1"
+      token: "7bd57098-82bd-4dfa-b32c-9943a52d354f"
+      port: 30014
+    - name: ech-15
+      domain: "ech.alias14.workers.dev:443"
+      ip: "172.64.80.1"
+      token: "7bd57098-82bd-4dfa-b32c-9943a52d354f"
+      port: 30015
+    - name: ech-16
+      domain: "ech.alias15.workers.dev:443"
+      ip: "172.64.80.1"
+      token: "7bd57098-82bd-4dfa-b32c-9943a52d354f"
+      port: 30016
+    - name: ech-17
+      domain: "ech.alias16.workers.dev:443"
+      ip: "172.64.80.1"
+      token: "7bd57098-82bd-4dfa-b32c-9943a52d354f"
+      port: 30017
+    - name: ech-18
+      domain: "ech.alias17.workers.dev:443"
+      ip: "172.64.80.1"
+      token: "7bd57098-82bd-4dfa-b32c-9943a52d354f"
+      port: 30018
+    - name: ech-19
+      domain: "ech.alias18.workers.dev:443"
+      ip: "172.64.80.1"
+      token: "7bd57098-82bd-4dfa-b32c-9943a52d354f"
+      port: 30019
+    - name: ech-20
+      domain: "ech.alias19.workers.dev:443"
+      ip: "172.64.80.1"
+      token: "7bd57098-82bd-4dfa-b32c-9943a52d354f"
+      port: 30020
+    - name: ech-21
+      domain: "ech.alias20.workers.dev:443"
+      ip: "172.64.80.1"
+      token: "7bd57098-82bd-4dfa-b32c-9943a52d354f"
+      port: 30021
 
 # Management API
 api:

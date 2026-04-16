@@ -1,0 +1,4 @@
+/tmp/cpa-graphify/sdk/cliproxy/auth/api_key_model_alias_test.go
+/tmp/cpa-graphify/sdk/cliproxy/auth/persist_policy.go
+/tmp/cpa-graphify/sdk/cliproxy/auth/scheduler.go
+/tmp/cpa-graphify/sdk/cliproxy/auth/errors.go
