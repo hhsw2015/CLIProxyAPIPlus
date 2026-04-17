@@ -17,7 +17,6 @@ type staticModelsJSON struct {
 	CodexTeam   []*ModelInfo `json:"codex-team"`
 	CodexPlus   []*ModelInfo `json:"codex-plus"`
 	CodexPro    []*ModelInfo `json:"codex-pro"`
-	IFlow       []*ModelInfo `json:"iflow"`
 	Kimi        []*ModelInfo `json:"kimi"`
 	Antigravity []*ModelInfo `json:"antigravity"`
 }
@@ -75,11 +74,6 @@ func GetCodexPlusModels() []*ModelInfo {
 // GetCodexProModels returns model definitions for the Codex pro plan tier.
 func GetCodexProModels() []*ModelInfo {
 	return cloneModelInfos(getModels().CodexPro)
-}
-
-// GetIFlowModels returns the standard iFlow model definitions.
-func GetIFlowModels() []*ModelInfo {
-	return cloneModelInfos(getModels().IFlow)
 }
 
 // GetKimiModels returns the standard Kimi (Moonshot AI) model definitions.
@@ -290,7 +284,6 @@ func findModelByID(id string, sources ...[]*ModelInfo) *ModelInfo {
 //   - gemini-cli
 //   - aistudio
 //   - codex
-//   - iflow
 //   - kimi
 //   - kilo
 //   - github-copilot
@@ -311,8 +304,6 @@ func GetStaticModelDefinitionsByChannel(channel string) []*ModelInfo {
 		return GetAIStudioModels()
 	case "codex":
 		return GetCodexProModels()
-	case "iflow":
-		return GetIFlowModels()
 	case "kimi":
 		return GetKimiModels()
 	case "github-copilot":
@@ -361,7 +352,6 @@ func LookupStaticModelInfo(modelID string) *ModelInfo {
 		data.GeminiCLI,
 		data.AIStudio,
 		data.CodexPro,
-		data.IFlow,
 		data.Kimi,
 		data.Antigravity,
 		GetGitHubCopilotModels(),
