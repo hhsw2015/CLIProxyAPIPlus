@@ -100,18 +100,23 @@ func main() {
 		log.Printf("Warning: Some processes failed to start: %v", err)
 	}
 
-	// Wait for at least one healthy process
-	log.Println("Waiting for processes to become healthy...")
-	if err := p.WaitForHealthy(60 * time.Second); err != nil {
-		log.Printf("Warning: %v", err)
+	// Wait for at least one healthy WARP process (skip if pool_size=0, ECH-only mode)
+	if cfg.PoolSize > 0 {
+		log.Println("Waiting for processes to become healthy...")
+		if err := p.WaitForHealthy(60 * time.Second); err != nil {
+			log.Printf("Warning: %v", err)
+		}
+
+		// Start health checker (needed for IP detection)
+		checker.Start(ctx)
+
+		// Wait for initial health check
+		log.Println("Waiting for IP detection...")
+		time.Sleep(5 * time.Second)
+	} else {
+		log.Println("ECH-only mode (pool_size=0), skipping WARP health check")
+		checker.Start(ctx)
 	}
-
-	// Start health checker (needed for IP detection)
-	checker.Start(ctx)
-
-	// Wait for initial health check
-	log.Println("Waiting for IP detection...")
-	time.Sleep(5 * time.Second)
 
 	// Start auto rotation (if enabled, disabled by default for stable pool)
 	if cfg.Rotation.Enabled {
