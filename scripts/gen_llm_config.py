@@ -89,6 +89,18 @@ OPENROUTER_MODELS = [
     'qwen3-coder-480b-a35b-instruct',
 ]
 
+# TaijiAI (XP provider) - Claude via Anthropic Messages API, Gemini via OpenAI compat
+TAIJIAI_CLAUDE_MODELS = [
+    ('claude-opus-4-7', 'claude-opus-4.7'),
+    ('claude-opus-4-6', 'claude-opus-4.6'),
+    ('claude-sonnet-4-6', 'claude-sonnet-4.6'),
+]
+TAIJIAI_GEMINI_MODELS = [
+    'gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-2.5-flash-lite',
+    'gemini-2.5-flash-image', 'gemini-3-pro-preview', 'gemini-3-flash-preview',
+    'gemini-3.1-pro-preview',
+]
+
 
 # --- YAML Helpers ---
 
@@ -123,6 +135,7 @@ def generate_bedrock_entries(claude_data):
     with that AK, causing most models to be invisible to the scheduler.
     """
     groups = {}
+    all_bedrock_models = set()
 
     for section in BEDROCK_SECTIONS:
         if section not in claude_data:
@@ -141,6 +154,7 @@ def generate_bedrock_entries(claude_data):
                 arn = ep.get('ModelId', '').strip()
                 if not ak or not arn:
                     continue
+                all_bedrock_models.add(model_name)
                 arn_region = extract_arn_region(arn)
                 if arn_region and arn_region != region:
                     print(f"  WARN: ARN/region mismatch {model_name}: ep={region} ARN={arn_region}", file=sys.stderr)
@@ -148,9 +162,14 @@ def generate_bedrock_entries(claude_data):
                 key = (ak, region)
                 if key not in groups:
                     groups[key] = {'sk': sk, 'region': region, 'models': {}}
-                # Deduplicate model name per (AK, region) - keep first ARN
                 if model_name not in groups[key]['models']:
                     groups[key]['models'][model_name] = arn
+
+    normalized_bedrock = {m.replace('.', '-') for m in all_bedrock_models} | all_bedrock_models
+    taijiai_only = []
+    for n, a in TAIJIAI_CLAUDE_MODELS:
+        if n not in normalized_bedrock and a not in all_bedrock_models:
+            taijiai_only.extend([n, a])
 
     lines = ['claude-api-key:']
     count = 0
@@ -162,6 +181,10 @@ def generate_bedrock_entries(claude_data):
         lines.append(f'    aws-secret-access-key: {yq(info["sk"])}')
         lines.append(f'    aws-region: {info["region"]}')
         lines.append(f'    priority: 10')
+        if taijiai_only:
+            lines.append(f'    excluded-models:')
+            for em in taijiai_only:
+                lines.append(f'      - {em}')
         lines.append(f'    models:')
         for mname in sorted(info['models']):
             lines.append(f'      - name: {mname}')
@@ -642,6 +665,51 @@ def generate_singularity_entries():
     ]
 
 
+# --- TaijiAI (XP provider) ---
+
+def generate_taijiai_entries(config_us_data):
+    """config_us_k8s.json XP section -> TaijiAI claude-api-key + openai-compatibility entries.
+
+    Claude models use claude-api-key type with base-url + anthropic-version header.
+    Gemini models use openai-compatibility type.
+    """
+    xp = config_us_data.get('XP', {})
+    claude_key = xp.get('ClaudeKey', '')
+    gemini_key = xp.get('GeminiKey', '')
+    bedrock_yaml = ''
+    oa_entries = []
+
+    if claude_key:
+        ml_lines = []
+        for name, alias in TAIJIAI_CLAUDE_MODELS:
+            ml_lines.append(f'      - name: {name}\n        alias: {alias}')
+            ml_lines.append(f'      - name: {name}')
+        ml = '\n'.join(ml_lines)
+        bedrock_yaml = (
+            f'  - api-key: {claude_key}\n'
+            f'    base-url: https://api.taijiaicloud.com\n'
+            f'    priority: 9\n'
+            f'    headers:\n'
+            f'      anthropic-version: "2023-06-01"\n'
+            f'    models:\n{ml}'
+        )
+
+    if gemini_key:
+        ml = '\n'.join(f'      - name: {m}' for m in TAIJIAI_GEMINI_MODELS)
+        oa_entries.append(
+            f'  - name: taijiai-gemini\n'
+            f'    priority: 9\n'
+            f'    base-url: https://api.taijiaicloud.com/v1\n'
+            f'    api-key-entries:\n'
+            f'      - api-key: {gemini_key}\n'
+            f'    models:\n'
+            f'{ml}'
+        )
+
+    n = (1 if claude_key else 0) + (1 if gemini_key else 0)
+    return bedrock_yaml, oa_entries, n
+
+
 # --- Base Config ---
 
 def base_config(port):
@@ -680,6 +748,7 @@ quota-exceeded:
   switch-preview-model: true
 routing:
   strategy: fill-first
+  latency-aware: true
 pool-manager:
   size: 0
   active-idle-scan-interval-seconds: 1800
@@ -753,6 +822,12 @@ def main():
     all_keys_file = Path(ALL_API_KEYS_FILE)
     config_us_file = Path(CONFIG_US_FILE)
 
+    if not azure_file.exists():
+        cn_dir = Path(NACOS_BASE_DIR).parent / 'cn-nacos' / keys_dir.name
+        azure_fallback = cn_dir / 'keys-azure.json'
+        if azure_fallback.exists():
+            azure_file = azure_fallback
+            print(f"Azure keys fallback: {azure_fallback}")
     for f in [claude_file, azure_file]:
         if not f.exists():
             print(f"ERROR: {f} not found", file=sys.stderr); sys.exit(1)
@@ -788,6 +863,7 @@ def main():
     # Generate all sections
     bedrock_yaml, bedrock_count = generate_bedrock_entries(claude_data)
     gemini_yaml, gemini_count = generate_gemini_keys(config_us_data)
+    taijiai_claude_yaml, taijiai_oa_entries, taijiai_count = generate_taijiai_entries(config_us_data)
     azure_entries = generate_azure_entries(azure_data)
     groq_entries = generate_groq_entries(all_keys)
     deepseek_entries = generate_deepseek_entries(all_keys)
@@ -801,9 +877,11 @@ def main():
     # === cpa-new-config.yaml (port 8318: full) ===
     all_oa = (azure_entries + deepseek_entries + groq_entries + openrouter_entries
               + direct_entries + media_direct_entries + media_entries
-              + cookie_entries + singularity_entries)
+              + taijiai_oa_entries + cookie_entries + singularity_entries)
     new_config = base_config(8318)
     new_config += '\n\n' + bedrock_yaml
+    if taijiai_claude_yaml:
+        new_config += '\n' + taijiai_claude_yaml
     if gemini_yaml:
         new_config += '\n\n' + gemini_yaml
     new_config += '\n\nopenai-compatibility:\n'
@@ -815,6 +893,7 @@ def main():
 
     print(f"Generated: {new_path}")
     print(f"  Bedrock: {bedrock_count} entries (P10)")
+    print(f"  TaijiAI: {taijiai_count} entries (P9)")
     print(f"  Gemini API keys: {gemini_count}")
     print(f"  Azure: {len(azure_entries)} entries (P10/P8)")
     print(f"  Deepseek: {len(deepseek_entries)} entries (P10)")
