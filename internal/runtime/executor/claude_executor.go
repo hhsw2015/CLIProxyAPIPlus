@@ -994,7 +994,11 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 			baseBetas += ",context-1m-2025-08-07"
 		}
 	}
-	r.Header.Set("Anthropic-Beta", baseBetas)
+	// Only set Anthropic-Beta for direct Anthropic API. Third-party proxies
+	// (e.g. TaijiAI) may forward this header to Bedrock which rejects it.
+	if isAnthropicBase {
+		r.Header.Set("Anthropic-Beta", baseBetas)
+	}
 
 	misc.EnsureHeader(r.Header, ginHeaders, "Anthropic-Version", "2023-06-01")
 	// Only set browser access header for API key mode; real Claude Code CLI does not send it.

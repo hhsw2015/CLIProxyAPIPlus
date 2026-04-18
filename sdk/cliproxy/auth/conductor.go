@@ -598,7 +598,47 @@ func (m *Manager) filterExecutionModels(auth *Auth, routeModel string, candidate
 func (m *Manager) preparedExecutionModels(auth *Auth, routeModel string) ([]string, bool) {
 	candidates := m.executionModelCandidates(auth, routeModel)
 	pooled := len(candidates) > 1
-	return m.filterExecutionModels(auth, routeModel, candidates, pooled), pooled
+	filtered := m.filterExecutionModels(auth, routeModel, candidates, pooled)
+	// Apply config-level excluded-models so the legacy pick path doesn't send
+	// requests to providers that explicitly exclude the requested model.
+	filtered = m.filterExcludedModels(auth, filtered)
+	return filtered, pooled
+}
+
+// filterExcludedModels removes models that appear in the auth's config-level excluded-models list.
+func (m *Manager) filterExcludedModels(auth *Auth, models []string) []string {
+	if len(models) == 0 || auth == nil {
+		return models
+	}
+	cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
+	if cfg == nil {
+		return models
+	}
+	var excluded []string
+	switch strings.ToLower(strings.TrimSpace(auth.Provider)) {
+	case "claude":
+		if entry := resolveClaudeAPIKeyConfig(cfg, auth); entry != nil {
+			excluded = entry.ExcludedModels
+		}
+	case "gemini":
+		if entry := resolveGeminiAPIKeyConfig(cfg, auth); entry != nil {
+			excluded = entry.ExcludedModels
+		}
+	}
+	if len(excluded) == 0 {
+		return models
+	}
+	excludeSet := make(map[string]struct{}, len(excluded))
+	for _, e := range excluded {
+		excludeSet[strings.ToLower(strings.TrimSpace(e))] = struct{}{}
+	}
+	out := make([]string, 0, len(models))
+	for _, mdl := range models {
+		if _, skip := excludeSet[strings.ToLower(strings.TrimSpace(mdl))]; !skip {
+			out = append(out, mdl)
+		}
+	}
+	return out
 }
 
 func (m *Manager) prepareExecutionModels(auth *Auth, routeModel string) []string {
