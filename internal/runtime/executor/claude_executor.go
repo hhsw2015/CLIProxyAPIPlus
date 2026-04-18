@@ -167,6 +167,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	if err != nil {
 		return resp, err
 	}
+	body = normalizeThinkingForAdaptiveModels(body, baseModel)
 
 	// Apply cloaking (system prompt injection, fake user ID, sensitive word obfuscation)
 	// based on client type and configuration.
@@ -356,6 +357,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	if err != nil {
 		return nil, err
 	}
+	body = normalizeThinkingForAdaptiveModels(body, baseModel)
 
 	// Apply cloaking (system prompt injection, fake user ID, sensitive word obfuscation)
 	// based on client type and configuration.
@@ -768,6 +770,48 @@ func disableThinkingIfToolChoiceForced(body []byte) []byte {
 }
 
 // normalizeClaudeTemperatureForThinking keeps Anthropic message requests valid when
+// normalizeThinkingForAdaptiveModels converts thinking.type="enabled"+budget_tokens
+// to thinking.type="adaptive"+output_config.effort for models that only support
+// adaptive thinking (e.g. Opus 4.7). Matches GPT Proxy's normalizeThinkingConfig.
+func normalizeThinkingForAdaptiveModels(body []byte, model string) []byte {
+	lower := strings.ToLower(model)
+	if !strings.Contains(lower, "opus-4-7") && !strings.Contains(lower, "opus-4.7") {
+		return body
+	}
+	if gjson.GetBytes(body, "thinking.type").String() != "enabled" {
+		return body
+	}
+	// Prefer explicit effort if already set (e.g. from reasoning_effort conversion).
+	effort := gjson.GetBytes(body, "output_config.effort").String()
+	if effort == "" {
+		// Reverse-map budget_tokens to effort using CPA's levelToBudgetMap thresholds:
+		// max=128000, xhigh=32768, high=24576, medium=8192, low=1024
+		budget := gjson.GetBytes(body, "thinking.budget_tokens").Int()
+		switch {
+		case budget >= 128000:
+			effort = "max"
+		case budget >= 32768:
+			effort = "xhigh"
+		case budget >= 24576:
+			effort = "high"
+		case budget >= 8192:
+			effort = "medium"
+		case budget >= 1024:
+			effort = "low"
+		case budget > 0:
+			effort = "low"
+		default:
+			effort = "high"
+		}
+	}
+	body, _ = sjson.SetBytes(body, "thinking.type", "adaptive")
+	body, _ = sjson.DeleteBytes(body, "thinking.budget_tokens")
+	if !gjson.GetBytes(body, "output_config.effort").Exists() {
+		body, _ = sjson.SetBytes(body, "output_config.effort", effort)
+	}
+	return body
+}
+
 // thinking is enabled. Anthropic rejects temperatures other than 1 when
 // thinking.type is enabled/adaptive/auto.
 func normalizeClaudeTemperatureForThinking(body []byte) []byte {
