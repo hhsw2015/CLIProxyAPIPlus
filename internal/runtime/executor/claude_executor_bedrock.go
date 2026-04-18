@@ -111,6 +111,8 @@ func prepareBedrockBody(body []byte) []byte {
 	// Confirmed present in GPT Proxy's ModifyClaudeParams (IDA 0xd95ed4, 0xd95f14).
 	body, _ = sjson.DeleteBytes(body, "response_format")
 	body, _ = sjson.DeleteBytes(body, "parallel_tool_calls")
+	// betas is an Anthropic API concept; Bedrock rejects unknown beta flags.
+	body, _ = sjson.DeleteBytes(body, "betas")
 	if gjson.GetBytes(body, "anthropic_version").String() == "" {
 		body, _ = sjson.SetBytes(body, "anthropic_version", "bedrock-2023-05-31")
 	}
