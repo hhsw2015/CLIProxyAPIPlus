@@ -113,9 +113,11 @@ func prepareBedrockBody(body []byte) []byte {
 	body, _ = sjson.DeleteBytes(body, "parallel_tool_calls")
 	// betas is an Anthropic API concept; Bedrock rejects unknown beta flags.
 	body, _ = sjson.DeleteBytes(body, "betas")
-	if gjson.GetBytes(body, "anthropic_version").String() == "" {
-		body, _ = sjson.SetBytes(body, "anthropic_version", "bedrock-2023-05-31")
-	}
+	// Also strip anthropic_beta (alternative field name used by some clients).
+	body, _ = sjson.DeleteBytes(body, "anthropic_beta")
+	// Force Bedrock-specific anthropic_version. Client-supplied values may contain
+	// beta identifiers that the Bedrock model version doesn't support.
+	body, _ = sjson.SetBytes(body, "anthropic_version", "bedrock-2023-05-31")
 	return body
 }
 
