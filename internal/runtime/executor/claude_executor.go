@@ -8,6 +8,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -176,6 +177,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	body = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", body, originalTranslated, requestedModel)
 	body = ensureModelMaxTokens(body, baseModel)
+	body = injectOpenRouterProvider(body, auth, baseModel)
 
 	// Disable thinking if tool_choice forces tool use (Anthropic API constraint)
 	body = disableThinkingIfToolChoiceForced(body)
@@ -217,12 +219,39 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		bodyForUpstream = signAnthropicMessagesBody(bodyForUpstream)
 	}
 
-	url := fmt.Sprintf("%s/v1/messages?beta=true", baseURL)
+	var url string
+	vertexMode := isVertexClaudeAuth(auth)
+	if vertexMode {
+		project := pickVertexClaudeProject(auth, baseModel)
+		if project == "" {
+			return resp, fmt.Errorf("vertex-claude: no project id available for model %s", baseModel)
+		}
+		location := vertexClaudeLocation(auth)
+		// Non-streaming uses :rawPredict instead of :streamRawPredict.
+		url = strings.Replace(
+			buildVertexClaudeURL(location, project, baseModel),
+			":streamRawPredict", ":rawPredict", 1,
+		)
+		if url == "" {
+			return resp, fmt.Errorf("vertex-claude: failed to build URL (location=%s project=%s model=%s)", location, project, baseModel)
+		}
+		bodyForUpstream = prepareVertexClaudeBody(bodyForUpstream)
+	} else {
+		url = fmt.Sprintf("%s/v1/messages?beta=true", baseURL)
+	}
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(bodyForUpstream))
 	if err != nil {
 		return resp, err
 	}
-	applyClaudeHeaders(httpReq, auth, apiKey, false, extraBetas, e.cfg)
+	if vertexMode {
+		token, tokErr := vertexClaudeToken(ctx, e.cfg, auth)
+		if tokErr != nil {
+			return resp, tokErr
+		}
+		applyVertexClaudeHeaders(httpReq, token)
+	} else {
+		applyClaudeHeaders(httpReq, auth, apiKey, false, extraBetas, e.cfg)
+	}
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
 		authID = auth.ID
@@ -366,6 +395,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	body = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", body, originalTranslated, requestedModel)
 	body = ensureModelMaxTokens(body, baseModel)
+	body = injectOpenRouterProvider(body, auth, baseModel)
 
 	// Disable thinking if tool_choice forces tool use (Anthropic API constraint)
 	body = disableThinkingIfToolChoiceForced(body)
@@ -403,12 +433,35 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		bodyForUpstream = signAnthropicMessagesBody(bodyForUpstream)
 	}
 
-	url := fmt.Sprintf("%s/v1/messages?beta=true", baseURL)
+	var url string
+	vertexMode := isVertexClaudeAuth(auth)
+	if vertexMode {
+		project := pickVertexClaudeProject(auth, baseModel)
+		if project == "" {
+			return nil, fmt.Errorf("vertex-claude: no project id available for model %s", baseModel)
+		}
+		location := vertexClaudeLocation(auth)
+		url = buildVertexClaudeURL(location, project, baseModel)
+		if url == "" {
+			return nil, fmt.Errorf("vertex-claude: failed to build URL (location=%s project=%s model=%s)", location, project, baseModel)
+		}
+		bodyForUpstream = prepareVertexClaudeBody(bodyForUpstream)
+	} else {
+		url = fmt.Sprintf("%s/v1/messages?beta=true", baseURL)
+	}
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(bodyForUpstream))
 	if err != nil {
 		return nil, err
 	}
-	applyClaudeHeaders(httpReq, auth, apiKey, true, extraBetas, e.cfg)
+	if vertexMode {
+		token, tokErr := vertexClaudeToken(ctx, e.cfg, auth)
+		if tokErr != nil {
+			return nil, tokErr
+		}
+		applyVertexClaudeHeaders(httpReq, token)
+	} else {
+		applyClaudeHeaders(httpReq, auth, apiKey, true, extraBetas, e.cfg)
+	}
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
 		authID = auth.ID
@@ -481,11 +534,15 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		if from == to {
 			scanner := bufio.NewScanner(decodedBody)
 			scanner.Buffer(nil, 52_428_800) // 50MB
+			contentBlockEvents := 0
 			for scanner.Scan() {
 				line := scanner.Bytes()
 				helps.AppendAPIResponseChunk(ctx, e.cfg, line)
 				if detail, ok := helps.ParseClaudeStreamUsage(line); ok {
 					reporter.Publish(ctx, detail)
+				}
+				if bytes.Contains(line, []byte(`"type":"content_block_`)) {
+					contentBlockEvents++
 				}
 				if isClaudeOAuthToken(apiKey) && !auth.ToolPrefixDisabled() {
 					line = stripClaudeToolPrefixFromStreamLine(line, claudeToolPrefix)
@@ -507,6 +564,14 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 				helps.RecordAPIResponseError(ctx, e.cfg, errScan)
 				reporter.PublishFailure(ctx)
 				out <- cliproxyexecutor.StreamChunk{Err: errScan}
+				return
+			}
+			// Empty content stream guard: stream closed cleanly but produced zero
+			// content_block events. Signals soft upstream failure (matches gpt-proxy
+			// polo.ClaudeApi "no actual content received" behavior). Reported as
+			// retryable so conductor can fall back to another auth.
+			if checkEmptyStreamGuard(ctx, contentBlockEvents, reporter, out) {
+				return
 			}
 			reporter.EnsurePublished(ctx)
 			return
@@ -516,11 +581,15 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		scanner := bufio.NewScanner(decodedBody)
 		scanner.Buffer(nil, 52_428_800) // 50MB
 		var param any
+		contentBlockEvents := 0
 		for scanner.Scan() {
 			line := scanner.Bytes()
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
 			if detail, ok := helps.ParseClaudeStreamUsage(line); ok {
 				reporter.Publish(ctx, detail)
+			}
+			if bytes.Contains(line, []byte(`"type":"content_block_`)) {
+				contentBlockEvents++
 			}
 			if isClaudeOAuthToken(apiKey) && !auth.ToolPrefixDisabled() {
 				line = stripClaudeToolPrefixFromStreamLine(line, claudeToolPrefix)
@@ -550,6 +619,10 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			helps.RecordAPIResponseError(ctx, e.cfg, errScan)
 			reporter.PublishFailure(ctx)
 			out <- cliproxyexecutor.StreamChunk{Err: errScan}
+			return
+		}
+		if checkEmptyStreamGuard(ctx, contentBlockEvents, reporter, out) {
+			return
 		}
 		reporter.EnsurePublished(ctx)
 	}()
@@ -557,6 +630,11 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 }
 
 func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	// Vertex AI Anthropic endpoint does not expose /v1/messages/count_tokens.
+	// Return a not-implemented error so callers can fall back to heuristic counting.
+	if isVertexClaudeAuth(auth) {
+		return cliproxyexecutor.Response{}, statusErr{code: http.StatusNotImplemented, msg: "count_tokens not supported on Vertex AI Anthropic endpoint"}
+	}
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 
 	apiKey, baseURL := claudeCreds(auth)
@@ -750,9 +828,79 @@ func extractAndRemoveBetas(body []byte) ([]string, []byte) {
 	return betas, body
 }
 
+// injectOpenRouterProvider injects the body.provider field for OpenRouter requests
+// when the auth's openrouter_provider_routing attribute contains a matching model.
+// The config value is Nacos-style: map[model]map[string][]string where the inner
+// map has either {"order": [...]} or {"ignore": [...]}.
+//
+// Only applied when the request base-url contains "openrouter.ai" (to avoid
+// accidentally injecting a body field for unrelated providers that happen to share
+// the attribute map). The config value unconditionally overrides any existing
+// body.provider field (matches gpt-proxy mapassign semantics).
+func injectOpenRouterProvider(body []byte, auth *cliproxyauth.Auth, model string) []byte {
+	if auth == nil || auth.Attributes == nil {
+		return body
+	}
+	baseURL := strings.ToLower(strings.TrimSpace(auth.Attributes["base_url"]))
+	if !strings.Contains(baseURL, "openrouter.ai") {
+		return body
+	}
+	encoded := strings.TrimSpace(auth.Attributes["openrouter_provider_routing"])
+	if encoded == "" {
+		return body
+	}
+	var routing map[string]map[string][]string
+	if err := json.Unmarshal([]byte(encoded), &routing); err != nil {
+		log.WithError(err).Debug("openrouter: failed to decode provider routing config")
+		return body
+	}
+	if len(routing) == 0 {
+		return body
+	}
+	// Try the model as sent; also try case-insensitive matching since config
+	// keys may differ in case.
+	policy, ok := routing[model]
+	if !ok {
+		for k, v := range routing {
+			if strings.EqualFold(k, model) {
+				policy = v
+				ok = true
+				break
+			}
+		}
+	}
+	if !ok || len(policy) == 0 {
+		return body
+	}
+	// OpenRouter ONLY supports root-level "provider" field in OpenAI chat completions API.
+	// For Anthropic Messages API (/v1/messages), injecting "provider" causes 400.
+	// We skip injection if endpoint_path contains "/messages".
+	if strings.Contains(strings.ToLower(auth.Attributes["endpoint_path"]), "/messages") {
+		return body
+	}
+	newBody, err := sjson.SetBytes(body, "provider", policy)
+	if err != nil {
+		log.WithError(err).Debug("openrouter: failed to inject provider field")
+		return body
+	}
+	return newBody
+}
+
+// checkEmptyStreamGuard reports whether the stream closed cleanly but produced zero content events.
+// It publishes a failure to the reporter and sends a retryable 503 error to the output channel.
+func checkEmptyStreamGuard(ctx context.Context, events int, reporter *helps.UsageReporter, out chan<- cliproxyexecutor.StreamChunk) bool {
+	if events > 0 {
+		return false
+	}
+	reporter.PublishFailure(ctx)
+	out <- cliproxyexecutor.StreamChunk{Err: statusErr{
+		code: http.StatusServiceUnavailable,
+		msg:  "empty_content_stream: upstream closed with zero content events",
+	}}
+	return true
+}
+
 // disableThinkingIfToolChoiceForced checks if tool_choice forces tool use and disables thinking.
-// Anthropic API does not allow thinking when tool_choice is set to "any" or a specific tool.
-// See: https://docs.anthropic.com/en/docs/build-with-claude/extended-thinking#important-considerations
 func disableThinkingIfToolChoiceForced(body []byte) []byte {
 	toolChoiceType := gjson.GetBytes(body, "tool_choice.type").String()
 	// "auto" is allowed with thinking, but "any" or "tool" (specific tool) are not
@@ -974,11 +1122,38 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 
 	useAPIKey := auth != nil && auth.Attributes != nil && strings.TrimSpace(auth.Attributes["api_key"]) != ""
 	isAnthropicBase := r.URL != nil && strings.EqualFold(r.URL.Scheme, "https") && strings.EqualFold(r.URL.Host, "api.anthropic.com")
-	if isAnthropicBase && useAPIKey {
+	// Per-entry `auth-style` override supports variants found across Skywork providers:
+	//   x-api-key:         CCP, YesVG (also Anthropic direct by default)
+	//   bearer:            Xp/TaijiAI (also non-Anthropic by default)
+	//   authorization-raw: Polo (no Bearer scheme)
+	//   auto / "":         legacy — x-api-key for api.anthropic.com, Bearer otherwise
+	authStyle := ""
+	if auth != nil && auth.Attributes != nil {
+		authStyle = strings.ToLower(strings.TrimSpace(auth.Attributes["auth_style"]))
+	}
+	switch authStyle {
+	case "x-api-key":
 		r.Header.Del("Authorization")
-		r.Header.Set("x-api-key", apiKey)
-	} else {
-		r.Header.Set("Authorization", "Bearer "+apiKey)
+		if apiKey != "" {
+			r.Header.Set("x-api-key", apiKey)
+		}
+	case "bearer":
+		r.Header.Del("x-api-key")
+		if apiKey != "" {
+			r.Header.Set("Authorization", "Bearer "+apiKey)
+		}
+	case "authorization-raw":
+		r.Header.Del("x-api-key")
+		if apiKey != "" {
+			r.Header.Set("Authorization", apiKey)
+		}
+	default: // auto / "" — legacy behavior
+		if isAnthropicBase && useAPIKey {
+			r.Header.Del("Authorization")
+			r.Header.Set("x-api-key", apiKey)
+		} else {
+			r.Header.Set("Authorization", "Bearer "+apiKey)
+		}
 	}
 	r.Header.Set("Content-Type", "application/json")
 
@@ -1038,9 +1213,15 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 			baseBetas += ",context-1m-2025-08-07"
 		}
 	}
-	// Only set Anthropic-Beta for direct Anthropic API. Third-party proxies
-	// (e.g. TaijiAI) may forward this header to Bedrock which rejects it.
-	if isAnthropicBase {
+	// Anthropic-Beta header handling:
+	//   - strip_anthropic_beta=true (per-entry opt-in): explicitly delete the header.
+	//     Used by third-party proxies that forward to Bedrock (e.g. TaijiAI).
+	//   - otherwise: set the merged base betas. Anthropic direct and Anthropic-compatible
+	//     proxies (polo, openrouter /api/v1/messages, etc.) all accept these betas.
+	stripBeta := auth != nil && auth.Attributes != nil && auth.Attributes["strip_anthropic_beta"] == "true"
+	if stripBeta {
+		r.Header.Del("Anthropic-Beta")
+	} else {
 		r.Header.Set("Anthropic-Beta", baseBetas)
 	}
 

@@ -1,6 +1,7 @@
 package synthesizer
 
 import (
+	"encoding/json"
 	"fmt"
 	"strconv"
 	"strings"
@@ -101,6 +102,9 @@ func (s *ConfigSynthesizer) synthesizeClaudeKeys(ctx *SynthesisContext) []*corea
 	out := make([]*coreauth.Auth, 0, len(cfg.ClaudeKey))
 	for i := range cfg.ClaudeKey {
 		ck := cfg.ClaudeKey[i]
+		if ck.Disabled {
+			continue
+		}
 		key := strings.TrimSpace(ck.APIKey)
 		ak := strings.TrimSpace(ck.AWSAccessKeyID)
 		if key == "" && ak == "" {
@@ -131,6 +135,41 @@ func (s *ConfigSynthesizer) synthesizeClaudeKeys(ctx *SynthesisContext) []*corea
 			attrs["models_hash"] = hash
 		}
 		addConfigHeadersToAttrs(ck.Headers, attrs)
+		if ck.StripAnthropicBeta {
+			attrs["strip_anthropic_beta"] = "true"
+		}
+		if len(ck.OpenRouterProviderRouting) > 0 {
+			if encoded, err := json.Marshal(ck.OpenRouterProviderRouting); err == nil {
+				attrs["openrouter_provider_routing"] = string(encoded)
+			}
+		}
+		if v := strings.TrimSpace(ck.GCPCredentialsFile); v != "" {
+			attrs["gcp_credentials_file"] = v
+		}
+		if v := strings.TrimSpace(ck.VertexLocation); v != "" {
+			attrs["vertex_location"] = v
+		}
+		if len(ck.ModelProjectPool) > 0 {
+			if encoded, err := json.Marshal(ck.ModelProjectPool); err == nil {
+				attrs["model_project_pool"] = string(encoded)
+			}
+		}
+		if len(ck.ErrorPassList) > 0 {
+			if encoded, err := json.Marshal(ck.ErrorPassList); err == nil {
+				attrs["error_pass_list"] = string(encoded)
+			}
+		}
+		if v := strings.TrimSpace(ck.AuthStyle); v != "" {
+			attrs["auth_style"] = strings.ToLower(v)
+		}
+		if len(ck.NonRetryableSubstrings) > 0 {
+			if encoded, err := json.Marshal(ck.NonRetryableSubstrings); err == nil {
+				attrs["non_retryable_substrings"] = string(encoded)
+			}
+		}
+		if ck.BackupDurationMS > 0 {
+			attrs["backup_duration_ms"] = strconv.Itoa(ck.BackupDurationMS)
+		}
 		if ak != "" {
 			attrs["aws_access_key_id"] = ak
 			attrs["aws_secret_access_key"] = strings.TrimSpace(ck.AWSSecretAccessKey)
@@ -233,6 +272,9 @@ func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) []*cor
 	out := make([]*coreauth.Auth, 0)
 	for i := range cfg.OpenAICompatibility {
 		compat := &cfg.OpenAICompatibility[i]
+		if compat.Disabled {
+			continue
+		}
 		prefix := strings.TrimSpace(compat.Prefix)
 		providerName := strings.ToLower(strings.TrimSpace(compat.Name))
 		if providerName == "" {
@@ -264,6 +306,42 @@ func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) []*cor
 				attrs["models_hash"] = hash
 			}
 			addConfigHeadersToAttrs(compat.Headers, attrs)
+			if len(compat.OpenRouterProviderRouting) > 0 {
+				if encoded, err := json.Marshal(compat.OpenRouterProviderRouting); err == nil {
+					attrs["openrouter_provider_routing"] = string(encoded)
+				}
+			}
+			if v := strings.TrimSpace(compat.AuthStyle); v != "" {
+				attrs["auth_style"] = strings.ToLower(v)
+			}
+			if v := strings.TrimSpace(compat.EndpointPath); v != "" {
+				attrs["endpoint_path"] = v
+			}
+			if compat.ResponsesFormat {
+				attrs["responses_format"] = "true"
+			}
+			if v := strings.TrimSpace(compat.AnthropicVersion); v != "" {
+				attrs["anthropic_version"] = v
+			}
+			if compat.ForwardAnthropicBeta {
+				attrs["forward_anthropic_beta"] = "true"
+			}
+			if v := strings.TrimSpace(compat.UserAgent); v != "" {
+				attrs["user_agent_override"] = v
+			}
+			if len(compat.ErrorPassList) > 0 {
+				if encoded, err := json.Marshal(compat.ErrorPassList); err == nil {
+					attrs["error_pass_list"] = string(encoded)
+				}
+			}
+			if len(compat.NonRetryableSubstrings) > 0 {
+				if encoded, err := json.Marshal(compat.NonRetryableSubstrings); err == nil {
+					attrs["non_retryable_substrings"] = string(encoded)
+				}
+			}
+			if compat.BackupDurationMS > 0 {
+				attrs["backup_duration_ms"] = strconv.Itoa(compat.BackupDurationMS)
+			}
 			a := &coreauth.Auth{
 				ID:         id,
 				Provider:   providerName,

@@ -564,6 +564,65 @@ type ClaudeKey struct {
 	// Claude /v1/messages requests. It is disabled by default so upstream seed
 	// changes do not alter the proxy's legacy behavior.
 	ExperimentalCCHSigning bool `yaml:"experimental-cch-signing,omitempty" json:"experimental-cch-signing,omitempty"`
+
+	// StripAnthropicBeta removes the Anthropic-Beta header and any `betas` fields
+	// from outgoing request bodies. Useful for third-party proxies that forward
+	// to Bedrock (e.g. TaijiAI) which reject unknown beta flags.
+	StripAnthropicBeta bool `yaml:"strip-anthropic-beta,omitempty" json:"strip-anthropic-beta,omitempty"`
+
+	// OpenRouterProviderRouting configures OpenRouter's body.provider field per model.
+	// Each entry maps a model name to either {"order": [...]} or {"ignore": [...]}.
+	// Only applied when base-url contains "openrouter.ai".
+	OpenRouterProviderRouting map[string]map[string][]string `yaml:"openrouter-provider-routing,omitempty" json:"openrouter-provider-routing,omitempty"`
+
+	// GCPCredentialsFile is the path to a GCP Service Account JSON file used to
+	// obtain OAuth Bearer tokens for Vertex AI Claude requests. When set (together
+	// with ModelProjectPool), the executor uses Vertex AI Anthropic endpoint
+	// instead of the standard Anthropic Messages API.
+	GCPCredentialsFile string `yaml:"gcp-credentials-file,omitempty" json:"gcp-credentials-file,omitempty"`
+
+	// VertexLocation is the GCP region used in the Vertex URL template (default
+	// "us-east5"). Only used when GCPCredentialsFile is set.
+	VertexLocation string `yaml:"vertex-location,omitempty" json:"vertex-location,omitempty"`
+
+	// ModelProjectPool maps a model name to a list of GCP project IDs. At request
+	// time one project is picked at random (equal weight) from the list to build
+	// the Vertex URL. Only used when GCPCredentialsFile is set.
+	ModelProjectPool map[string][]string `yaml:"model-project-pool,omitempty" json:"model-project-pool,omitempty"`
+
+	// ErrorPassList is a list of substrings. If any matches the response body or
+	// error message, the conductor treats the failure as retryable and fails over
+	// to another auth (aligns with gpt-proxy's BackupList ErrorListPass behavior).
+	// Empty list disables this mechanism.
+	ErrorPassList []string `yaml:"error-pass-list,omitempty" json:"error-pass-list,omitempty"`
+
+	// AuthStyle overrides the default Authorization header selection for Claude
+	// API-key requests. Values:
+	//   "" or "auto" (default): api.anthropic.com -> x-api-key, others -> Authorization: Bearer
+	//   "x-api-key":          x-api-key: <key>
+	//   "bearer":             Authorization: Bearer <key>
+	//   "authorization-raw":  Authorization: <key>  (no scheme; used by Polo)
+	// Bedrock is detected separately via aws-access-key-id and ignores this field.
+	AuthStyle string `yaml:"auth-style,omitempty" json:"auth-style,omitempty"`
+
+	// NonRetryableSubstrings lists error message substrings that should NOT trigger
+	// failover (aligns with gpt-proxy SC-33's "non-retryable terminal" whitelist).
+	// When any pattern matches, the request fails fast without trying other auths.
+	// Common defaults: "StatusCode: 400", "ValidationException",
+	// "maximum context length", "maximum number of tokens".
+	NonRetryableSubstrings []string `yaml:"non-retryable-substrings,omitempty" json:"non-retryable-substrings,omitempty"`
+
+	// BackupDurationMS overrides the default cooldown (ms) applied to this auth after
+	// a transient failure. Aligns with gpt-proxy's per-BackupList Duration field
+	// (typical values: 38000 / 58000 ms). If 0 or unset, conductor uses its default
+	// cooldown strategy (10s for third-party proxies, 1min for others).
+	BackupDurationMS int `yaml:"backup-duration-ms,omitempty" json:"backup-duration-ms,omitempty"`
+
+	// Disabled temporarily suppresses this entry without deleting the yaml config.
+	// When true, the synthesizer skips creating auth records for this entry. Useful
+	// for staging operational fixes (e.g. Polo 欠费 / YesVG key reset) — the config
+	// stays intact and flipping `disabled: false` restores the entry on next reload.
+	Disabled bool `yaml:"disabled,omitempty" json:"disabled,omitempty"`
 }
 
 func (k ClaudeKey) GetAPIKey() string {
@@ -762,6 +821,54 @@ type OpenAICompatibility struct {
 
 	// ExcludedModels lists model names to exclude from this provider.
 	ExcludedModels []string `yaml:"excluded-models,omitempty" json:"excluded-models,omitempty"`
+
+	// OpenRouterProviderRouting configures OpenRouter's body.provider field per model.
+	// Each entry maps a model name to either {"order": [...]} or {"ignore": [...]}.
+	// Only applied when base-url contains "openrouter.ai".
+	OpenRouterProviderRouting map[string]map[string][]string `yaml:"openrouter-provider-routing,omitempty" json:"openrouter-provider-routing,omitempty"`
+
+	// AuthStyle selects the Authorization header format:
+	//   "bearer" (default): Authorization: Bearer <api-key>
+	//   "anthropic": x-api-key: <api-key>
+	// Used by Skywork's CCP gateway which authenticates in Anthropic style even
+	// though the endpoint uses OpenAI Responses API.
+	AuthStyle string `yaml:"auth-style,omitempty" json:"auth-style,omitempty"`
+
+	// EndpointPath overrides the default request path (default: /chat/completions
+	// for openai-compatibility, /responses for responses API). Example: /v1/responses.
+	EndpointPath string `yaml:"endpoint-path,omitempty" json:"endpoint-path,omitempty"`
+
+	// ResponsesFormat routes the request through the OpenAI Responses API translator
+	// (same as codex_executor). Enable for CCP / other Responses-API backends.
+	ResponsesFormat bool `yaml:"responses-format,omitempty" json:"responses-format,omitempty"`
+
+	// AnthropicVersion sets the anthropic-version header. Only applied when non-empty.
+	AnthropicVersion string `yaml:"anthropic-version,omitempty" json:"anthropic-version,omitempty"`
+
+	// ForwardAnthropicBeta forwards the client's anthropic-beta header value
+	// to the upstream. Empty client values are not sent.
+	ForwardAnthropicBeta bool `yaml:"forward-anthropic-beta,omitempty" json:"forward-anthropic-beta,omitempty"`
+
+	// UserAgent overrides the default User-Agent header. Used by CCP to match
+	// the hardcoded "claude-code/1.0" identifier.
+	UserAgent string `yaml:"user-agent,omitempty" json:"user-agent,omitempty"`
+
+	// ErrorPassList is a list of substrings. If any matches the response body or
+	// error message, the conductor treats the failure as retryable and fails over
+	// to another auth (aligns with gpt-proxy's BackupList ErrorListPass behavior).
+	// Empty list disables this mechanism (current CPA default).
+	ErrorPassList []string `yaml:"error-pass-list,omitempty" json:"error-pass-list,omitempty"`
+
+	// NonRetryableSubstrings lists error message substrings that should NOT trigger
+	// failover (aligns with gpt-proxy SC-33's "non-retryable terminal" whitelist).
+	NonRetryableSubstrings []string `yaml:"non-retryable-substrings,omitempty" json:"non-retryable-substrings,omitempty"`
+
+	// BackupDurationMS overrides the default cooldown (ms) applied to this auth.
+	BackupDurationMS int `yaml:"backup-duration-ms,omitempty" json:"backup-duration-ms,omitempty"`
+
+	// Disabled temporarily suppresses this provider without deleting the yaml config.
+	// When true, the synthesizer skips creating auth records for this entry.
+	Disabled bool `yaml:"disabled,omitempty" json:"disabled,omitempty"`
 }
 
 // OpenAICompatibilityAPIKey represents an API key configuration with optional proxy setting.
