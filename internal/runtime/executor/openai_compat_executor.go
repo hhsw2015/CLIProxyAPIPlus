@@ -11,6 +11,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/cookiepool"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor/helps"
@@ -90,6 +92,11 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("openai")
 	endpoint := "/chat/completions"
+	responsesFormat := isResponsesFormatAuth(auth)
+	if responsesFormat {
+		to = sdktranslator.FromString("openai-response")
+		endpoint = "/v1/responses"
+	}
 	if opts.Alt == "responses/compact" {
 		to = sdktranslator.FromString("openai-response")
 		endpoint = "/responses/compact"
@@ -109,11 +116,24 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 		}
 	}
 
-	translated, err = thinking.ApplyThinking(translated, req.Model, from.String(), to.String(), e.Identifier())
-	if err != nil {
-		return resp, err
+	// OpenRouter with Anthropic path (/v1/messages) should skip thinking translation
+	// to maintain native Anthropic format as in v1.
+	endpointPath := authAttrEndpointPath(auth)
+	if !strings.Contains(strings.ToLower(endpointPath), "/messages") {
+		translated, err = thinking.ApplyThinking(translated, req.Model, from.String(), to.String(), e.Identifier())
+		if err != nil {
+			return resp, err
+		}
+	}
+	translated = injectOpenRouterProvider(translated, auth, baseModel)
+	translated = normalizeMaxCompletionTokens(translated, baseModel)
+	if responsesFormat {
+		translated = applyPromptCacheKey(ctx, translated, from.String(), baseModel, auth)
 	}
 
+	if endpointPath != "" {
+		endpoint = endpointPath
+	}
 	url := strings.TrimSuffix(baseURL, "/") + endpoint
 	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
 
@@ -143,14 +163,11 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 			return resp, errReq
 		}
 		httpReq.Header.Set("Content-Type", "application/json")
-		if apiKey != "" {
-			httpReq.Header.Set("Authorization", "Bearer "+apiKey)
-		}
-		httpReq.Header.Set("User-Agent", "cli-proxy-openai-compat")
 		var attrs map[string]string
 		if auth != nil {
 			attrs = auth.Attributes
 		}
+		applyOpenAICompatAuthHeaders(httpReq, attrs, apiKey)
 		util.ApplyCustomHeadersFromAttrs(httpReq, attrs)
 		cookieEntry := applyCookiePoolHeaders(httpReq, auth)
 
@@ -280,6 +297,12 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("openai")
+	endpoint := "/chat/completions"
+	responsesFormat := isResponsesFormatAuth(auth)
+	if responsesFormat {
+		to = sdktranslator.FromString("openai-response")
+		endpoint = "/v1/responses"
+	}
 	originalPayloadSource := req.Payload
 	if len(opts.OriginalRequest) > 0 {
 		originalPayloadSource = opts.OriginalRequest
@@ -297,9 +320,20 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 
 	// Request usage data in the final streaming chunk so that token statistics
 	// are captured even when the upstream is an OpenAI-compatible provider.
-	translated, _ = sjson.SetBytes(translated, "stream_options.include_usage", true)
+	// Responses API doesn't support stream_options.
+	if !responsesFormat {
+		translated, _ = sjson.SetBytes(translated, "stream_options.include_usage", true)
+	}
+	translated = injectOpenRouterProvider(translated, auth, baseModel)
+	translated = normalizeMaxCompletionTokens(translated, baseModel)
+	if isResponsesFormatAuth(auth) {
+		translated = applyPromptCacheKey(ctx, translated, from.String(), baseModel, auth)
+	}
 
-	url := strings.TrimSuffix(baseURL, "/") + "/chat/completions"
+	if override := authAttrEndpointPath(auth); override != "" {
+		endpoint = override
+	}
+	url := strings.TrimSuffix(baseURL, "/") + endpoint
 	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
 
 	var pool *cookiepool.Pool
@@ -324,14 +358,11 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 			return nil, errReq
 		}
 		httpReq.Header.Set("Content-Type", "application/json")
-		if apiKey != "" {
-			httpReq.Header.Set("Authorization", "Bearer "+apiKey)
-		}
-		httpReq.Header.Set("User-Agent", "cli-proxy-openai-compat")
 		var attrs map[string]string
 		if auth != nil {
 			attrs = auth.Attributes
 		}
+		applyOpenAICompatAuthHeaders(httpReq, attrs, apiKey)
 		util.ApplyCustomHeadersFromAttrs(httpReq, attrs)
 		httpReq.Header.Set("Accept", "text/event-stream")
 		httpReq.Header.Set("Cache-Control", "no-cache")
@@ -447,6 +478,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 			scanner := bufio.NewScanner(httpResp.Body)
 			scanner.Buffer(nil, 52_428_800) // 50MB
 			var param any
+			deltaEvents := 0
 			for scanner.Scan() {
 				line := scanner.Bytes()
 				helps.AppendAPIResponseChunk(ctx, e.cfg, line)
@@ -473,6 +505,13 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 					continue
 				}
 
+				// Count content-bearing delta events (text or reasoning_content) so we
+				// can detect "empty stream" soft failures. Matches gpt-proxy
+				// polo.ClaudeApi "no actual content received, marking as error for fallback".
+				if bytes.Contains(line, []byte(`"content":`)) || bytes.Contains(line, []byte(`"reasoning_content":`)) || bytes.Contains(line, []byte(`"content_block_`)) {
+					deltaEvents++
+				}
+
 				// OpenAI-compatible streams are SSE: lines typically prefixed with "data: ".
 				// Pass through translator; it yields one or more chunks for the target schema.
 				chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, translated, bytes.Clone(line), &param)
@@ -490,14 +529,21 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 					pool.ClearPreferred()
 				}
 				out <- cliproxyexecutor.StreamChunk{Err: errScan}
-			} else {
-				// In case the upstream closes the stream without a terminal [DONE] marker.
-				// Feed a synthetic done marker through the translator so pending
-				// response.completed events are still emitted exactly once.
-				chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, translated, []byte("data: [DONE]"), &param)
-				for i := range chunks {
-					out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}
-				}
+				return
+			}
+			// Empty content stream guard: stream EOF'd cleanly but no content-bearing
+			// deltas were observed. Treat as retryable soft failure so conductor can
+			// fall back. Don't MarkDead the cookie (user may have asked for zero-token
+			// completion); the conductor backoff is sufficient.
+			if checkEmptyStreamGuard(ctx, deltaEvents, reporter, out) {
+				return
+			}
+			// In case the upstream closes the stream without a terminal [DONE] marker.
+			// Feed a synthetic done marker through the translator so pending
+			// response.completed events are still emitted exactly once.
+			chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, translated, []byte("data: [DONE]"), &param)
+			for i := range chunks {
+				out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}
 			}
 			// Ensure we record the request if no usage chunk was ever seen
 			reporter.EnsurePublished(ctx)
@@ -668,6 +714,121 @@ func isEmbeddedErrorResponse(body []byte) bool {
 	return false
 }
 
+// applyPromptCacheKey injects prompt_cache_key into the request body to leverage
+// upstream 24h prompt cache (CCP / other Responses-API providers). Mirrors
+// codex_executor.cacheHelper semantics but scoped to the openai-compat path.
+//
+//   - If the client already sent prompt_cache_key: passthrough
+//   - If from claude and payload has metadata.user_id: derive key `<model>-<user_id>`, cache 1h
+//   - If api_key is present on auth: derive stable UUID from api_key (session-stable)
+//   - Otherwise leave empty (no cache_key)
+func applyPromptCacheKey(ctx context.Context, body []byte, from, model string, auth *cliproxyauth.Auth) []byte {
+	// Client-supplied key always wins (passthrough).
+	if existing := gjson.GetBytes(body, "prompt_cache_key"); existing.Exists() {
+		return body
+	}
+	var cacheID string
+	switch from {
+	case "claude":
+		if userID := gjson.GetBytes(body, "metadata.user_id"); userID.Exists() && userID.String() != "" {
+			key := fmt.Sprintf("%s-%s", model, userID.String())
+			if cached, ok := helps.GetCodexCache(key); ok {
+				cacheID = cached.ID
+			} else {
+				cacheID = uuid.New().String()
+				helps.SetCodexCache(key, helps.CodexCache{
+					ID:     cacheID,
+					Expire: time.Now().Add(1 * time.Hour),
+				})
+			}
+		}
+	}
+	// Fallback: derive stable key from auth api_key so same credential reuses cache.
+	if cacheID == "" && auth != nil && auth.Attributes != nil {
+		if apiKey := strings.TrimSpace(auth.Attributes["api_key"]); apiKey != "" {
+			cacheID = uuid.NewSHA1(uuid.NameSpaceOID, []byte("cli-proxy-api:openai-compat:prompt-cache:"+apiKey)).String()
+		}
+	}
+	if cacheID == "" {
+		return body
+	}
+	result, err := sjson.SetBytes(body, "prompt_cache_key", cacheID)
+	if err != nil {
+		return body
+	}
+	return result
+}
+
+// isResponsesFormatAuth reports whether the auth entry uses OpenAI Responses API
+// translator (instead of Chat Completions). Used for CCP GPT codex.
+func isResponsesFormatAuth(auth *cliproxyauth.Auth) bool {
+	if auth == nil || auth.Attributes == nil {
+		return false
+	}
+	return auth.Attributes["responses_format"] == "true"
+}
+
+// authAttrEndpointPath returns the per-entry endpoint path override (e.g. /v1/responses).
+func authAttrEndpointPath(auth *cliproxyauth.Auth) string {
+	if auth == nil || auth.Attributes == nil {
+		return ""
+	}
+	return strings.TrimSpace(auth.Attributes["endpoint_path"])
+}
+
+// applyOpenAICompatAuthHeaders sets auth + identity headers on the outgoing request.
+// Supports:
+//   - auth_style=anthropic (CCP): sets x-api-key + anthropic-version + (optional) anthropic-beta
+//   - auth_style=bearer or unset (default): sets Authorization: Bearer <key>
+//   - user_agent_override: replaces the default User-Agent
+//   - forward_anthropic_beta: forwards inbound anthropic-beta header value
+
+func applyOpenAICompatAuthHeaders(req *http.Request, attrs map[string]string, apiKey string) {
+	style := ""
+	if attrs != nil {
+		style = strings.ToLower(strings.TrimSpace(attrs["auth_style"]))
+	}
+	switch style {
+	case "anthropic", "x-api-key":
+		// "anthropic" and "x-api-key" are aliases for CCP-style auth.
+		if apiKey != "" {
+			req.Header.Set("x-api-key", apiKey)
+		}
+		if v := strings.TrimSpace(attrs["anthropic_version"]); v != "" {
+			req.Header.Set("anthropic-version", v)
+		}
+		if attrs["forward_anthropic_beta"] == "true" {
+			if ginCtx, ok := req.Context().Value("gin").(*gin.Context); ok && ginCtx != nil && ginCtx.Request != nil {
+				if beta := strings.TrimSpace(ginCtx.Request.Header.Get("Anthropic-Beta")); beta != "" {
+					req.Header.Set("anthropic-beta", beta)
+				}
+			}
+		}
+	case "azure-api-key":
+		// Azure OpenAI uses `api-key` header (not x-api-key, not Bearer).
+		if apiKey != "" {
+			req.Header.Set("api-key", apiKey)
+		}
+	case "authorization-raw":
+		// Raw Authorization header without Bearer prefix (Polo 独特 format).
+		if apiKey != "" {
+			req.Header.Set("Authorization", apiKey)
+		}
+	default:
+		// "bearer" / "auto" / empty — standard OpenAI style.
+		if apiKey != "" {
+			req.Header.Set("Authorization", "Bearer "+apiKey)
+		}
+	}
+	userAgent := "cli-proxy-openai-compat"
+	if attrs != nil {
+		if v := strings.TrimSpace(attrs["user_agent_override"]); v != "" {
+			userAgent = v
+		}
+	}
+	req.Header.Set("User-Agent", userAgent)
+}
+
 func isProxiedBackend(auth *cliproxyauth.Auth) bool {
 	if auth == nil || auth.Attributes == nil {
 		return false
@@ -679,6 +840,52 @@ func isProxiedBackend(auth *cliproxyauth.Auth) bool {
 func isClaudeModel(model string) bool {
 	lower := strings.ToLower(model)
 	return strings.Contains(lower, "claude")
+}
+
+// normalizeMaxCompletionTokens rewrites max_tokens → max_completion_tokens for
+// OpenAI reasoning models (gpt-5*, o1-pro, o3, o3-pro, o4-mini, etc). These models
+// reject max_tokens and require the newer field name. Non-reasoning models
+// (gpt-4o, gpt-4.1) continue to use max_tokens unchanged.
+func normalizeMaxCompletionTokens(body []byte, model string) []byte {
+	lower := strings.ToLower(strings.TrimSpace(model))
+	if lower == "" {
+		return body
+	}
+	needsRewrite := false
+	switch {
+	case strings.HasPrefix(lower, "gpt-5"):
+		needsRewrite = true
+	case strings.HasPrefix(lower, "o1-pro"), lower == "o1":
+		needsRewrite = true
+	case strings.HasPrefix(lower, "o3"):
+		needsRewrite = true
+	case strings.HasPrefix(lower, "o4"):
+		needsRewrite = true
+	}
+	if !needsRewrite {
+		return body
+	}
+	// If max_completion_tokens already set, just drop max_tokens without overwriting.
+	if gjson.GetBytes(body, "max_completion_tokens").Exists() {
+		newBody, err := sjson.DeleteBytes(body, "max_tokens")
+		if err != nil {
+			return body
+		}
+		return newBody
+	}
+	maxTok := gjson.GetBytes(body, "max_tokens")
+	if !maxTok.Exists() {
+		return body
+	}
+	newBody, err := sjson.SetBytes(body, "max_completion_tokens", maxTok.Int())
+	if err != nil {
+		return body
+	}
+	newBody, err = sjson.DeleteBytes(newBody, "max_tokens")
+	if err != nil {
+		return newBody
+	}
+	return newBody
 }
 
 // stripReasoningContent removes the reasoning_content field from all messages

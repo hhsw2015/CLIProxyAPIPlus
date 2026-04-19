@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"mime"
+	"mime/multipart"
 	"net/http"
 	"strings"
 	"time"
@@ -25,6 +27,7 @@ type mediaEndpoint struct {
 
 var (
 	mediaImageGen   = mediaEndpoint{pathSuffix: "images/generations", contentType: "application/json"}
+	mediaImageEdit  = mediaEndpoint{pathSuffix: "images/edits", contentType: "", isMultipart: true}
 	mediaAudioTTS   = mediaEndpoint{pathSuffix: "audio/speech", contentType: "application/json"}
 	mediaAudioSTT   = mediaEndpoint{pathSuffix: "audio/transcriptions", contentType: "", isMultipart: true}
 	mediaAudioTrans = mediaEndpoint{pathSuffix: "audio/translations", contentType: "", isMultipart: true}
@@ -40,6 +43,7 @@ type mediaProviderConfig struct {
 // setupMediaRoutes registers media API proxy routes on the given router group.
 func (s *Server) setupMediaRoutes(v1 *gin.RouterGroup) {
 	v1.POST("/images/generations", s.mediaProxyHandler(mediaImageGen))
+	v1.POST("/images/edits", s.mediaProxyHandler(mediaImageEdit))
 	v1.POST("/audio/speech", s.mediaProxyHandler(mediaAudioTTS))
 	v1.POST("/audio/transcriptions", s.mediaProxyHandler(mediaAudioSTT))
 	v1.POST("/audio/translations", s.mediaProxyHandler(mediaAudioTrans))
@@ -271,14 +275,28 @@ func (s *Server) gptProxyPassthrough() gin.HandlerFunc {
 	}
 }
 
-// extractModelFromMultipart attempts to extract the "model" field from a multipart body.
+// extractModelFromMultipart extracts the "model" form field from a multipart body.
 func extractModelFromMultipart(body []byte, contentType string) string {
-	// Simple heuristic: look for model= in the multipart body.
-	idx := bytes.Index(body, []byte("model"))
-	if idx < 0 {
+	_, params, err := mime.ParseMediaType(contentType)
+	if err != nil {
 		return ""
 	}
-	// This is a rough extraction; for production, use mime/multipart parser.
-	// For now, return empty and rely on fallback.
-	return ""
+	boundary := params["boundary"]
+	if boundary == "" {
+		return ""
+	}
+	reader := multipart.NewReader(bytes.NewReader(body), boundary)
+	for {
+		part, err := reader.NextPart()
+		if err != nil {
+			return ""
+		}
+		if part.FormName() == "model" {
+			val, err := io.ReadAll(io.LimitReader(part, 256))
+			if err != nil {
+				return ""
+			}
+			return strings.TrimSpace(string(val))
+		}
+	}
 }

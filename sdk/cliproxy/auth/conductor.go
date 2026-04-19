@@ -2550,6 +2550,30 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 		}
 	}
 	statusCode := statusCodeFromResult(resultErr)
+	// Non-retryable terminal (SC-33): user-error patterns (e.g. 400 / ValidationException
+	// / oversized context) should fail fast without long cooldown — the user needs to
+	// fix the request, not wait for the auth to recover. Applied before ErrorPassList
+	// so that matched terminals override retryability.
+	if resultErr != nil && matchNonRetryableSubstrings(auth, resultErr.Message) {
+		auth.Unavailable = false
+		auth.NextRetryAfter = time.Time{}
+		if auth.StatusMessage == "" {
+			auth.StatusMessage = "non-retryable client error"
+		}
+		return
+	}
+	// ErrorListPass (SC-02): if the response body or error message contains any
+	// of the auth's error_pass_list substrings, treat as transient upstream error
+	// and route through the 503 branch so the conductor fails over to another auth.
+	// This aligns with gpt-proxy's BackupList behavior.
+	if statusCode != 401 && statusCode != 402 && statusCode != 403 && statusCode != 404 {
+		if resultErr != nil && matchErrorPassList(auth, resultErr.Message) {
+			statusCode = http.StatusServiceUnavailable
+		}
+	}
+	// Per-entry backup-duration-ms overrides the default transient cooldown.
+	// Value is applied inside the 408/500/502/503/504 branch below.
+	backupOverride := authBackupDuration(auth)
 	switch statusCode {
 	case 401:
 		auth.StatusMessage = "unauthorized"
@@ -2594,6 +2618,11 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 		auth.StatusMessage = "transient upstream error"
 		if disableCooling {
 			auth.NextRetryAfter = time.Time{}
+		} else if backupOverride > 0 {
+			// Per-entry override takes priority over heuristic cooldown.
+			auth.NextRetryAfter = now.Add(backupOverride)
+		} else if isThirdPartyProxyAuth(auth) {
+			auth.NextRetryAfter = now.Add(10 * time.Second)
 		} else if isTemporaryTransportFailure(statusCodeFromResult(resultErr), strings.ToLower(strings.TrimSpace(failedAuthArchiveText(resultErr)))) {
 			auth.NextRetryAfter = now.Add(3 * time.Minute)
 		} else {
@@ -3657,6 +3686,111 @@ func isDailyUsageLimitError(message string) bool {
 	// Both "daily" AND "limit" must appear to avoid false positives
 	// on messages that merely contain the word "daily".
 	return strings.Contains(lower, "daily") && (strings.Contains(lower, "limit") || strings.Contains(lower, "usage"))
+}
+
+func isThirdPartyProxyAuth(auth *Auth) bool {
+	if auth == nil || auth.Attributes == nil {
+		return false
+	}
+	baseURL := strings.TrimSpace(auth.Attributes["base_url"])
+	if baseURL == "" {
+		return false
+	}
+	lower := strings.ToLower(baseURL)
+	if strings.Contains(lower, "api.anthropic.com") {
+		return false
+	}
+	if strings.Contains(lower, "openai.com") {
+		return false
+	}
+	return true
+}
+
+// matchNonRetryableSubstrings reports whether the given error text contains any
+// of the auth's non_retryable_substrings.
+func matchNonRetryableSubstrings(auth *Auth, message string) bool {
+	if auth == nil || auth.Attributes == nil || message == "" {
+		return false
+	}
+	encoded := strings.TrimSpace(auth.Attributes["non_retryable_substrings"])
+	if encoded == "" {
+		return false
+	}
+	// Note: We avoid json.Unmarshal on every error by caching in Metadata.
+	// Attributes are immutable; Metadata is runtime-mutable.
+	var patterns []string
+	if auth.Metadata != nil {
+		if val, ok := auth.Metadata["_cached_non_retryable"].([]string); ok {
+			patterns = val
+		}
+	}
+	if patterns == nil {
+		if err := json.Unmarshal([]byte(encoded), &patterns); err == nil {
+			if auth.Metadata == nil {
+				auth.Metadata = make(map[string]any)
+			}
+			auth.Metadata["_cached_non_retryable"] = patterns
+		}
+	}
+	for _, p := range patterns {
+		p = strings.TrimSpace(p)
+		if p != "" && strings.Contains(message, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// authBackupDuration returns the per-entry cooldown override (as time.Duration)
+// parsed from auth attr "backup_duration_ms". Returns 0 if not set, letting
+// conductor use its default cooldown.
+func authBackupDuration(auth *Auth) time.Duration {
+	if auth == nil || auth.Attributes == nil {
+		return 0
+	}
+	v := strings.TrimSpace(auth.Attributes["backup_duration_ms"])
+	if v == "" {
+		return 0
+	}
+	ms, err := strconv.Atoi(v)
+	if err != nil || ms <= 0 {
+		return 0
+	}
+	return time.Duration(ms) * time.Millisecond
+}
+
+// matchErrorPassList reports whether the given error text contains any of the
+// auth's error_pass_list substrings.
+func matchErrorPassList(auth *Auth, message string) bool {
+	if auth == nil || auth.Attributes == nil || message == "" {
+		return false
+	}
+	encoded := strings.TrimSpace(auth.Attributes["error_pass_list"])
+	if encoded == "" {
+		return false
+	}
+	// Note: We avoid json.Unmarshal on every error by caching in Metadata.
+	var patterns []string
+	if auth.Metadata != nil {
+		if val, ok := auth.Metadata["_cached_error_pass"].([]string); ok {
+			patterns = val
+		}
+	}
+	if patterns == nil {
+		if err := json.Unmarshal([]byte(encoded), &patterns); err == nil {
+			if auth.Metadata == nil {
+				auth.Metadata = make(map[string]any)
+			}
+			auth.Metadata["_cached_error_pass"] = patterns
+		}
+	}
+	for _, p := range patterns {
+		p = strings.TrimSpace(p)
+		if p != "" && strings.Contains(message, p) {
+			return true
+		}
+	}
+	return false
 }
 
 func isTemporaryTransportFailure(status int, message string) bool {
