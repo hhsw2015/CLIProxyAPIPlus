@@ -33,6 +33,8 @@ func init() {
 	registerTaskAdaptor(&hailuoAdaptor{})
 	registerTaskAdaptor(&viduAdaptor{})
 	registerTaskAdaptor(&falAdaptor{})
+	registerTaskAdaptor(&whisperBatchAdaptor{})
+	registerTaskAdaptor(&taijiaSoraAdaptor{})
 }
 
 // setupTaskRoutes registers async task API routes.

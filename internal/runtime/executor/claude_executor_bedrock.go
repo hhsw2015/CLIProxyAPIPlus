@@ -124,6 +124,9 @@ func prepareBedrockBody(body []byte) []byte {
 // executeBedrock handles non-streaming Bedrock requests.
 func (e *ClaudeExecutor) executeBedrock(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
+	if isNovaModel(baseModel) {
+		return e.executeBedrockNova(ctx, auth, req.Payload, baseModel)
+	}
 
 	reporter := newUsageReporter(ctx, e.Identifier(), baseModel, auth)
 	defer reporter.trackFailure(ctx, &err)
@@ -172,6 +175,13 @@ func (e *ClaudeExecutor) executeBedrock(ctx context.Context, auth *cliproxyauth.
 // AWS EventStream events to SSE format on the StreamChunk channel.
 func (e *ClaudeExecutor) executeStreamBedrock(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (_ *cliproxyexecutor.StreamResult, err error) {
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
+	if isNovaModel(baseModel) {
+		ch, err := e.executeBedrockNovaStream(ctx, auth, req.Payload, baseModel)
+		if err != nil {
+			return nil, err
+		}
+		return &cliproxyexecutor.StreamResult{Chunks: ch}, nil
+	}
 
 	reporter := newUsageReporter(ctx, e.Identifier(), baseModel, auth)
 	defer reporter.trackFailure(ctx, &err)
