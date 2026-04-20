@@ -95,9 +95,7 @@ func (h *GeminiCLIAPIHandler) CLIHandler(c *gin.Context) {
 			})
 			return
 		}
-		for key, value := range c.Request.Header {
-			req.Header[key] = value
-		}
+		req.Header = handlers.FilterUpstreamHeaders(c.Request.Header)
 
 		httpClient := util.SetProxy(h.Cfg, &http.Client{})
 

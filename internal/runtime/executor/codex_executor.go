@@ -368,6 +368,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	body, _ = sjson.DeleteBytes(body, "safety_identifier")
 	body, _ = sjson.DeleteBytes(body, "stream_options")
 	body, _ = sjson.SetBytes(body, "model", baseModel)
+	body, _ = sjson.SetBytes(body, "stream", true)
 	body = normalizeCodexInstructions(body)
 
 	url := strings.TrimSuffix(baseURL, "/") + "/responses"
