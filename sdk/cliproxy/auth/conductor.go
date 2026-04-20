@@ -894,10 +894,10 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			}
 			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: rerr, Latency: execLatency}
 			result.RetryAfter = retryAfterFromError(errStream)
-			m.MarkResult(ctx, result)
 			if isRequestInvalidError(errStream) {
 				return nil, errStream
 			}
+			m.MarkResult(ctx, result)
 			lastErr = errStream
 			continue
 		}
@@ -1387,10 +1387,10 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 				if ra := retryAfterFromError(errExec); ra != nil {
 					result.RetryAfter = ra
 				}
-				m.MarkResult(execCtx, result)
 				if isRequestInvalidError(errExec) {
 					return cliproxyexecutor.Response{}, errExec
 				}
+				m.MarkResult(execCtx, result)
 				authErr = errExec
 				continue
 			}
@@ -1467,10 +1467,10 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 				if ra := retryAfterFromError(errExec); ra != nil {
 					result.RetryAfter = ra
 				}
-				m.MarkResult(execCtx, result)
 				if isRequestInvalidError(errExec) {
 					return cliproxyexecutor.Response{}, errExec
 				}
+				m.MarkResult(execCtx, result)
 				authErr = errExec
 				continue
 			}

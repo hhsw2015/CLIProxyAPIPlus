@@ -386,6 +386,8 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	body = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", body, body, requestedModel)
+	body, _ = sjson.SetBytes(body, "stream", true)
+	body = normalizeCodexInstructions(body)
 
 	httpURL := strings.TrimSuffix(baseURL, "/") + "/responses"
 	wsURL, err := buildCodexResponsesWebsocketURL(httpURL)
