@@ -105,7 +105,7 @@ class NacosData:
     def _load_dir(self, base, date_str):
         d = base / date_str
         data = {}
-        files = ['keys-claude.json', 'keys-azure.json', 'keys-other.json', 'config_us_k8s.json', 'full-config.json']
+        files = ['keys-claude.json', 'keys-azure.json', 'keys-other.json', 'config_us_k8s.json', 'full-config.json', 'router.json']
         for f in files:
             p = d / f
             if p.exists():
@@ -136,6 +136,31 @@ class NacosData:
                     break
             if found: return curr
         return default
+
+# --- Router Model Extraction ---
+
+def extract_models_by_router(nd, router_name):
+    """Extract all model names routed to a specific router from router.json ModelRouter."""
+    router_data = nd.get('router.json', 'ModelRouter', {})
+    models = []
+    for model, routes in router_data.items():
+        if isinstance(routes, list):
+            for r in routes:
+                if isinstance(r, dict) and r.get('Router') == router_name:
+                    models.append(model)
+                    break
+    return sorted(set(models))
+
+
+def extract_claude_native_models(nd):
+    """Extract models from ClaudeNativeRouter."""
+    return sorted(nd.get('router.json', 'ClaudeNativeRouter', {}).keys())
+
+
+def extract_response_models(nd):
+    """Extract models from ResponseRouter."""
+    return sorted(nd.get('router.json', 'ResponseRouter', {}).keys())
+
 
 # --- Generators ---
 
@@ -443,17 +468,15 @@ def generate_pools():
 
 
 def generate_gemini_keys(nd):
-    """Priority 10. config_us_k8s.Google.Keys -> gemini-api-key."""
+    """Priority 10. config_us_k8s.Google.Keys -> gemini-api-key.
+    Model list dynamically extracted from router.json (Router=google, Gemini only)."""
     keys = nd.get('config_us_k8s.json', 'Google.Keys', []) or []
     if not keys: return []
-    models = [
-        'gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-2.5-flash-lite',
-        'gemini-2.5-flash-image', 'gemini-2.5-flash-image-preview',
-        'gemini-3-pro-preview', 'gemini-3-flash-preview', 'gemini-3-pro-image-preview',
-        'gemini-3.1-pro-preview', 'gemini-3.1-flash-image-preview',
-        'gemini-3.1-flash-lite-preview', 'gemini-3.1-flash-preview',
-    ]
-    # Entry inner keys at col 2 (gets +2 indent later = col 4 under gemini-api-key:)
+    # Get all Gemini models routed through Google
+    google_models = extract_models_by_router(nd, 'google')
+    models = [m for m in google_models if m.startswith('gemini-')]
+    if not models:
+        models = ['gemini-2.5-pro', 'gemini-2.5-flash']
     mlines = '\n'.join(f"    - name: {m}" for m in models)
     out = []
     for k in keys:
@@ -499,10 +522,19 @@ def generate_openrouter(nd):
         ('anthropic/claude-sonnet-4.6', None),
         ('anthropic/claude-haiku-4.5', None),
     ]
+    # Dynamically extract all OpenRouter-routed models from router.json,
+    # then filter out Claude/Gemini (handled by dedicated entries above)
+    all_router_models = extract_models_by_router(nd, 'router')
     or_other_models = [
-        'openai/gpt-5.4-pro', 'openai/gpt-5.4', 'openai/gpt-5-pro',
-        'openai/o3-pro', 'google/gemini-2.5-pro', 'deepseek/deepseek-v3.2',
+        m for m in all_router_models
+        if not m.startswith('claude') and not m.startswith('gemini-')
     ]
+    # Also add static OpenAI models not in router.json (direct OR access)
+    or_static_extras = ['openai/gpt-5.4-pro', 'openai/gpt-5.4', 'openai/gpt-5-pro',
+                        'openai/o3-pro', 'deepseek/deepseek-v3.2']
+    for m in or_static_extras:
+        if m not in or_other_models:
+            or_other_models.append(m)
 
     if nkeys:
         # Claude models -> claude-api-key type (V1 mode: native Anthropic forwarding)
@@ -672,17 +704,20 @@ def generate_maas_tier(nd):
             f"  models:\n    - name: grok-4"
         )
 
-    # Aliyun (disabled by default)
+    # Aliyun DashScope (models from router.json Router=aliyun)
     aly = cu.get('Aliyun', {})
     if aly.get('Key'):
+        aliyun_models = extract_models_by_router(nd, 'aliyun')
+        if not aliyun_models:
+            aliyun_models = ['qwen-max', 'qwen3-coder', 'kimi-k2.5']
+        ml = '\n'.join(f"    - name: {m}" for m in aliyun_models)
         entries.append(
             f"- name: dashscope-aliyun\n"
             f"  priority: 6\n"
             f"  base-url: https://dashscope.aliyuncs.com/compatible-mode/v1\n"
             f"  backup-duration-ms: 28000\n"
-            f"  disabled: true\n"
             f"  api-key-entries:\n    - api-key: {yq(aly['Key'])}\n"
-            f"  models:\n    - name: qwen-max\n    - name: qwen3-coder\n    - name: kimi-k2.5"
+            f"  models:\n{ml}"
         )
 
     # ApiCoco MaaS (ChatKey)
@@ -751,17 +786,22 @@ def generate_legacy(nd):
 
 
 def generate_shubiaobiao(nd):
-    """Priority 3. Shubiaobiao (chat + responses)."""
+    """Priority 3. Shubiaobiao (chat + responses).
+    Models from router.json Router=shubiaobiao + hardcoded chat models."""
     entries = []
     sb = nd.us.get('config_us_k8s.json', {}).get('Shubiaobiao', {})
     if sb.get('Key') and sb.get('Api'):
+        # Dynamic models from router + fixed chat models
+        sb_models = extract_models_by_router(nd, 'shubiaobiao')
+        chat_models = list(set(['gpt-4o', 'claude-sonnet-4.6'] + sb_models))
+        ml = '\n'.join(f"    - name: {m}" for m in sorted(chat_models))
         entries.append(
             f"- name: shubiaobiao-chat\n"
             f"  priority: 3\n"
             f"  base-url: {sb['Api'].rsplit('/chat/completions',1)[0]}\n"
             f"  backup-duration-ms: 38000\n"
             f"  api-key-entries:\n    - api-key: {yq(sb['Key'])}\n"
-            f"  models:\n    - name: gpt-4o\n    - name: claude-sonnet-4.6"
+            f"  models:\n{ml}"
         )
     if sb.get('Key') and sb.get('ApiResponse'):
         entries.append(
