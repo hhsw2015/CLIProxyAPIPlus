@@ -838,6 +838,10 @@ func normalizeCodexInstructions(body []byte) []byte {
 	return body
 }
 
+func shouldAttachCodexSessionID(userAgent string) bool {
+	return strings.Contains(strings.TrimSpace(userAgent), "Mac OS")
+}
+
 func isCodexModelCapacityError(errorBody []byte) bool {
 	if len(errorBody) == 0 {
 		return false

@@ -113,6 +113,7 @@ type RequestDetail struct {
 	Timestamp  time.Time  `json:"timestamp"`
 	LatencyMs  int64      `json:"latency_ms"`
 	Source     string     `json:"source"`
+	ClientIP   string     `json:"client_ip,omitempty"`
 	AuthIndex  string     `json:"auth_index"`
 	Provider   string     `json:"provider,omitempty"`
 	Tokens     TokenStats `json:"tokens"`
