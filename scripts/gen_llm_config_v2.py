@@ -241,11 +241,14 @@ def generate_vertex_claude(nd):
 
     for mname, projects in conf.items():
         if not isinstance(projects, list): continue
-        pool = {p['ProjectId']: p.get('Limit', 2500000) for p in projects if 'ProjectId' in p}
-        if not pool: continue
+        project_ids = [p['ProjectId'] for p in projects if 'ProjectId' in p]
+        if not project_ids: continue
 
         lower = mname.lower()
         is_gemini = 'gemini' in lower
+
+        pool_lines = f"  model-project-pool:\n    {mname}:\n"
+        pool_lines += '\n'.join(f"      - {pid}" for pid in project_ids)
 
         if is_gemini:
             lines = [
@@ -253,7 +256,7 @@ def generate_vertex_claude(nd):
                 f"  priority: 10",
                 f"  auth-style: auto",
                 f"  vertex-location: us-east5",
-                f"  model-project-pool: {json.dumps(pool)}",
+                pool_lines,
                 f"  models:",
                 f"    - name: {mname}",
             ]
@@ -264,7 +267,7 @@ def generate_vertex_claude(nd):
                 f"  base-url: vertex://us-east5",
                 f"  priority: 10",
                 f"  vertex-location: us-east5",
-                f"  model-project-pool: {json.dumps(pool)}",
+                pool_lines,
                 f"  models:",
                 f"    - name: {mname}",
             ]
@@ -491,14 +494,16 @@ def generate_vertex_xmind(nd):
     entries = []
     for mname, projects in conf.items():
         if not isinstance(projects, list): continue
-        pool = {p['ProjectId']: p.get('Limit', 2500000) for p in projects if 'ProjectId' in p}
-        if not pool: continue
+        project_ids = [p['ProjectId'] for p in projects if 'ProjectId' in p]
+        if not project_ids: continue
+        pool_lines = f"  model-project-pool:\n    {mname}:\n"
+        pool_lines += '\n'.join(f"      - {pid}" for pid in project_ids)
         entries.append(
             f"- name: vertex-xmind-{mname.replace('.','-').replace('/','-')}\n"
             f"  priority: 10\n"
             f"  auth-style: auto\n"
             f"  vertex-location: us-east5\n"
-            f"  model-project-pool: {json.dumps(pool)}\n"
+            f"{pool_lines}\n"
             f"  models:\n    - name: {mname}"
         )
     return entries
