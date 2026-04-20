@@ -14,6 +14,9 @@ config.yaml
 # Generated content
 bin/*
 logs/*
+scripts/gen_llm_config*.py
+scripts/generated*/
+scripts/extract_*.py
 conv/*
 temp/*
 refs/*
