@@ -1,7 +1,9 @@
 package handlers
 
 import (
+	"net/http"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -117,32 +119,21 @@ func TestGetRequestDetails_PreservesSuffix(t *testing.T) {
 	}
 }
 
-func TestGetRequestDetails_DoesNotTreatActiveProviderAsModelSupport(t *testing.T) {
+func TestGetRequestDetails_ImageModelReturns503(t *testing.T) {
 	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, coreauth.NewManager(nil, nil, nil))
-	auth := &coreauth.Auth{
-		ID:       "test-request-details-codex-restricted",
-		Provider: "codex",
-	}
-	if _, err := handler.AuthManager.Register(nil, auth); err != nil {
-		t.Fatalf("register auth: %v", err)
-	}
 
-	modelRegistry := registry.GetGlobalRegistry()
-	modelRegistry.RegisterClient(auth.ID, "codex", []*registry.ModelInfo{
-		{ID: "gpt-5.2"},
-	})
-	t.Cleanup(func() {
-		modelRegistry.UnregisterClient(auth.ID)
-	})
-
-	providers, model, errMsg := handler.getRequestDetails("gpt-5.4")
+	_, _, errMsg := handler.getRequestDetails("gpt-image-2")
 	if errMsg == nil {
-		t.Fatalf("getRequestDetails() error = nil, want unknown provider")
+		t.Fatalf("expected error for gpt-image-2, got nil")
 	}
-	if providers != nil {
-		t.Fatalf("getRequestDetails() providers = %v, want nil", providers)
+	if errMsg.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("unexpected status code: got %d want %d", errMsg.StatusCode, http.StatusServiceUnavailable)
 	}
-	if model != "" {
-		t.Fatalf("getRequestDetails() model = %q, want empty", model)
+	if errMsg.Error == nil {
+		t.Fatalf("expected error message, got nil")
+	}
+	msg := errMsg.Error.Error()
+	if !strings.Contains(msg, "/v1/images/generations") || !strings.Contains(msg, "/v1/images/edits") {
+		t.Fatalf("unexpected error message: %q", msg)
 	}
 }
