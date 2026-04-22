@@ -381,6 +381,15 @@ func (s *Server) setupRoutes() {
 	// gpt-proxy transparent passthrough (Veo, Imagen, etc. via chisel tunnel)
 	s.setupGptProxyRoutes(s.engine)
 
+	// Codex CLI direct route aliases (chatgpt_base_url compatible)
+	codexDirect := s.engine.Group("/backend-api/codex")
+	codexDirect.Use(AuthMiddleware(s.accessManager))
+	{
+		codexDirect.GET("/responses", openaiResponsesHandlers.ResponsesWebsocket)
+		codexDirect.POST("/responses", openaiResponsesHandlers.Responses)
+		codexDirect.POST("/responses/compact", openaiResponsesHandlers.Compact)
+	}
+
 	// Gemini compatible API routes
 	v1beta := s.engine.Group("/v1beta")
 	v1beta.Use(AuthMiddleware(s.accessManager))
