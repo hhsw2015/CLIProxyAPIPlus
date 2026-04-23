@@ -41,9 +41,9 @@ type mediaProviderConfig struct {
 }
 
 // setupMediaRoutes registers media API proxy routes on the given router group.
+// Note: /images/generations and /images/edits are registered by the upstream
+// OpenAI images handler in server.go (openaiHandlers.ImagesGenerations/Edits).
 func (s *Server) setupMediaRoutes(v1 *gin.RouterGroup) {
-	v1.POST("/images/generations", s.mediaProxyHandler(mediaImageGen))
-	v1.POST("/images/edits", s.mediaProxyHandler(mediaImageEdit))
 	v1.POST("/audio/speech", s.mediaProxyHandler(mediaAudioTTS))
 	v1.POST("/audio/transcriptions", s.mediaProxyHandler(mediaAudioSTT))
 	v1.POST("/audio/translations", s.mediaProxyHandler(mediaAudioTrans))
