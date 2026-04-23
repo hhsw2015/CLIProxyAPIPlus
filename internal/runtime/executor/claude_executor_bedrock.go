@@ -145,6 +145,7 @@ func (e *ClaudeExecutor) executeBedrock(ctx context.Context, auth *cliproxyauth.
 	}
 	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayloadSource, false)
 	body = applyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", body, originalTranslated, requestedModel)
+	body = normalizeThinkingForAdaptiveModels(body, baseModel)
 	body = prepareBedrockBody(body)
 
 	ak, sk, region := bedrockCreds(auth)
@@ -200,6 +201,7 @@ func (e *ClaudeExecutor) executeStreamBedrock(ctx context.Context, auth *cliprox
 	}
 	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayloadSource, true)
 	body = applyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", body, originalTranslated, requestedModel)
+	body = normalizeThinkingForAdaptiveModels(body, baseModel)
 	body = prepareBedrockBody(body)
 
 	ak, sk, region := bedrockCreds(auth)
