@@ -3,6 +3,7 @@ cli-proxy-api
 /cliproxy
 CLIProxyAPI
 cpa-new-server
+cpa-new-server-*
 /server
 *.exe
 
@@ -16,7 +17,22 @@ bin/*
 logs/*
 scripts/gen_llm_config*.py
 scripts/generated*/
+scripts/generated_v2/
 scripts/extract_*.py
+scripts/__pycache__/
+
+# API keys and credentials - NEVER commit
+keys-*.json
+**/keys-*.json
+ALL_API_KEYS.json
+**/ALL_API_KEYS.json
+config_us_k8s*.json
+config_bj_k8s*.json
+*-config.yaml
+*-config-*.yaml
+cpa-new-config*.yaml
+pool-*.json
+**/pool-*.json
 conv/*
 temp/*
 refs/*
