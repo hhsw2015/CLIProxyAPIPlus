@@ -278,6 +278,11 @@ func executionSessionIDFromContext(ctx context.Context) string {
 	}
 }
 
+// ExecutionSessionIDFromContext returns the execution session ID from context (exported).
+func ExecutionSessionIDFromContext(ctx context.Context) string {
+	return executionSessionIDFromContext(ctx)
+}
+
 // BaseAPIHandler contains the handlers for API endpoints.
 // It holds a pool of clients to interact with the backend service and manages
 // load balancing, client selection, and configuration.

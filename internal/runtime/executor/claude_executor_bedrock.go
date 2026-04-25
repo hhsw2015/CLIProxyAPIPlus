@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/credentials"
@@ -18,6 +19,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
+	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
 	log "github.com/sirupsen/logrus"
 )
@@ -121,6 +123,95 @@ func prepareBedrockBody(body []byte) []byte {
 	return body
 }
 
+// bedrockThinkingStripCache tracks sessions that have encountered invalid
+// thinking signatures. Once a session hits this error, all subsequent Bedrock
+// requests for that session strip thinking blocks proactively.
+var bedrockThinkingStripCache sync.Map // session-id -> struct{}
+
+func bedrockSessionID(ctx context.Context) string {
+	return handlers.ExecutionSessionIDFromContext(ctx)
+}
+
+func shouldStripThinkingForSession(ctx context.Context) bool {
+	sid := bedrockSessionID(ctx)
+	if sid == "" {
+		return false
+	}
+	_, found := bedrockThinkingStripCache.Load(sid)
+	return found
+}
+
+func markSessionNeedsThinkingStrip(ctx context.Context) {
+	sid := bedrockSessionID(ctx)
+	if sid != "" {
+		bedrockThinkingStripCache.Store(sid, struct{}{})
+	}
+}
+
+// isInvalidThinkingSignatureError returns true if the Bedrock error indicates
+// an invalid signature in a thinking block (cross-provider conversation history).
+func isInvalidThinkingSignatureError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "Invalid") && strings.Contains(msg, "signature") && strings.Contains(msg, "thinking")
+}
+
+// stripThinkingBlocksFromHistory removes thinking-type content blocks from
+// assistant messages in the conversation history. The last assistant message
+// is preserved as-is since it may be a prefill or the current turn.
+func stripThinkingBlocksFromHistory(body []byte) []byte {
+	messages := gjson.GetBytes(body, "messages")
+	if !messages.IsArray() {
+		return body
+	}
+	arr := messages.Array()
+	if len(arr) == 0 {
+		return body
+	}
+	changed := false
+	for i, msg := range arr {
+		if msg.Get("role").String() != "assistant" {
+			continue
+		}
+		content := msg.Get("content")
+		if !content.IsArray() {
+			continue
+		}
+		blocks := content.Array()
+		var kept []gjson.Result
+		for _, block := range blocks {
+			bt := block.Get("type").String()
+			if bt == "thinking" || bt == "redacted_thinking" {
+				changed = true
+				continue
+			}
+			kept = append(kept, block)
+		}
+		if len(kept) == len(blocks) {
+			continue
+		}
+		if len(kept) == 0 {
+			kept = append(kept, gjson.Parse(`{"type":"text","text":""}`))
+		}
+		raw := []byte("[")
+		for j, k := range kept {
+			if j > 0 {
+				raw = append(raw, ',')
+			}
+			raw = append(raw, []byte(k.Raw)...)
+		}
+		raw = append(raw, ']')
+		path := fmt.Sprintf("messages.%d.content", i)
+		body, _ = sjson.SetRawBytes(body, path, raw)
+	}
+	if !changed {
+		return body
+	}
+	return body
+}
+
 // executeBedrock handles non-streaming Bedrock requests.
 func (e *ClaudeExecutor) executeBedrock(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
@@ -147,6 +238,9 @@ func (e *ClaudeExecutor) executeBedrock(ctx context.Context, auth *cliproxyauth.
 	body = applyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", body, originalTranslated, requestedModel)
 	body = normalizeThinkingForAdaptiveModels(body, baseModel)
 	body = prepareBedrockBody(body)
+	if shouldStripThinkingForSession(ctx) {
+		body = stripThinkingBlocksFromHistory(body)
+	}
 
 	ak, sk, region := bedrockCreds(auth)
 	client := e.getBedrockClient(ak, sk, region)
@@ -158,6 +252,16 @@ func (e *ClaudeExecutor) executeBedrock(ctx context.Context, auth *cliproxyauth.
 		Accept:      aws.String("application/json"),
 		Body:        body,
 	})
+	if err != nil && isInvalidThinkingSignatureError(err) {
+		markSessionNeedsThinkingStrip(ctx)
+		body = stripThinkingBlocksFromHistory(body)
+		output, err = client.InvokeModel(ctx, &bedrockruntime.InvokeModelInput{
+			ModelId:     aws.String(modelID),
+			ContentType: aws.String("application/json"),
+			Accept:      aws.String("application/json"),
+			Body:        body,
+		})
+	}
 	if err != nil {
 		log.Errorf("bedrock InvokeModel error for model %s (modelID=%s, region=%s): %v", baseModel, modelID, region, err)
 		return resp, statusErr{code: http.StatusBadGateway, msg: fmt.Sprintf("bedrock invoke error: %v", err)}
@@ -203,6 +307,9 @@ func (e *ClaudeExecutor) executeStreamBedrock(ctx context.Context, auth *cliprox
 	body = applyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", body, originalTranslated, requestedModel)
 	body = normalizeThinkingForAdaptiveModels(body, baseModel)
 	body = prepareBedrockBody(body)
+	if shouldStripThinkingForSession(ctx) {
+		body = stripThinkingBlocksFromHistory(body)
+	}
 
 	ak, sk, region := bedrockCreds(auth)
 	client := e.getBedrockClient(ak, sk, region)
@@ -213,6 +320,15 @@ func (e *ClaudeExecutor) executeStreamBedrock(ctx context.Context, auth *cliprox
 		ContentType: aws.String("application/json"),
 		Body:        body,
 	})
+	if err != nil && isInvalidThinkingSignatureError(err) {
+		markSessionNeedsThinkingStrip(ctx)
+		body = stripThinkingBlocksFromHistory(body)
+		output, err = client.InvokeModelWithResponseStream(ctx, &bedrockruntime.InvokeModelWithResponseStreamInput{
+			ModelId:     aws.String(modelID),
+			ContentType: aws.String("application/json"),
+			Body:        body,
+		})
+	}
 	if err != nil {
 		log.Errorf("bedrock InvokeModelWithResponseStream error for model %s (modelID=%s, region=%s): %v", baseModel, modelID, region, err)
 		return nil, statusErr{code: http.StatusBadGateway, msg: fmt.Sprintf("bedrock stream error: %v", err)}
