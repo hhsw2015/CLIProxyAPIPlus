@@ -18,6 +18,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/api"
 	kiroauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/kiro"
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/redisqueue"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor"
 	internalusage "github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
