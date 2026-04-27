@@ -732,6 +732,10 @@ func (s *Server) registerManagementRoutes() {
 			mgmt.GET("/github-auth-url", s.mgmt.RequestGitHubToken)
 			mgmt.POST("/oauth-callback", s.mgmt.PostOAuthCallback)
 			mgmt.GET("/get-auth-status", s.mgmt.GetAuthStatus)
+
+			mgmt.GET("/integrations", s.mgmt.GetIntegrations)
+			mgmt.POST("/integrations/:product/apply", s.mgmt.ApplyIntegration)
+			mgmt.POST("/integrations/:product/rollback", s.mgmt.RollbackIntegration)
 		}
 	}
 
