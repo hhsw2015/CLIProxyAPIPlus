@@ -15,6 +15,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/buildinfo"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/integration"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v6/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
@@ -49,6 +50,7 @@ type Handler struct {
 	logDir              string
 	postAuthHook        coreauth.PostAuthHook
 	poolStatsProvider   func() any
+	integrationMgr      *integration.Manager
 }
 
 // NewHandler creates a new management handler instance.
@@ -66,6 +68,10 @@ func NewHandler(cfg *config.Config, configFilePath string, manager *coreauth.Man
 		allowRemoteOverride: envSecret != "",
 		envSecret:           envSecret,
 	}
+	h.integrationMgr = integration.NewManager(
+		filepath.Join(filepath.Dir(configFilePath), "integrations"),
+		cfg.Host, cfg.Port,
+	)
 	h.startAttemptCleanup()
 	return h
 }
