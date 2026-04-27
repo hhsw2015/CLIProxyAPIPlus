@@ -43,7 +43,7 @@ func (m Manager) continueStatus() (Status, error) {
 		baseURL, _ := model["apiBase"].(string)
 		provider, _ := model["provider"].(string)
 		apiKey, _ := model["apiKey"].(string)
-		if provider == "openai" && baseURL == m.advertisedBaseURL() && apiKey == "cpa" {
+		if provider == "openai" && baseURL == m.advertisedBaseURL() && (apiKey == "cpa" || apiKey == m.apiKey) {
 			status.State = StateConfigured
 		}
 	}
@@ -68,7 +68,7 @@ func (m Manager) previewContinue() (Preview, error) {
 		return Preview{}, fmt.Errorf("read Continue config for preview: %w", err)
 	}
 
-	upsertContinueCPAModel(doc, m.advertisedBaseURL())
+	upsertContinueCPAModel(doc, m.advertisedBaseURL(), m.effectiveAPIKey("cpa"))
 
 	plannedBytes, err := marshalYAMLMap(doc)
 	if err != nil {
@@ -116,7 +116,7 @@ func (m Manager) applyContinue() (Result, error) {
 	}, nil
 }
 
-func upsertContinueCPAModel(doc map[string]any, baseURL string) {
+func upsertContinueCPAModel(doc map[string]any, baseURL string, apiKey string) {
 	if _, ok := doc["name"]; !ok {
 		doc["name"] = "CPA"
 	}
@@ -136,7 +136,7 @@ func upsertContinueCPAModel(doc map[string]any, baseURL string) {
 		"provider": "openai",
 		"model":    primaryModel,
 		"apiBase":  baseURL,
-		"apiKey":   "cpa",
+		"apiKey":   apiKey,
 		"roles":    roles,
 	}
 

@@ -68,9 +68,13 @@ func NewHandler(cfg *config.Config, configFilePath string, manager *coreauth.Man
 		allowRemoteOverride: envSecret != "",
 		envSecret:           envSecret,
 	}
+	var firstAPIKey string
+	if len(cfg.APIKeys) > 0 {
+		firstAPIKey = cfg.APIKeys[0]
+	}
 	h.integrationMgr = integration.NewManager(
 		filepath.Join(filepath.Dir(configFilePath), "integrations"),
-		cfg.Host, cfg.Port,
+		cfg.Host, cfg.Port, firstAPIKey,
 	)
 	h.startAttemptCleanup()
 	return h

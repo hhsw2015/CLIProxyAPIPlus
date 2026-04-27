@@ -85,6 +85,9 @@ func (m Manager) previewClaude() (Preview, error) {
 		env = map[string]any{}
 	}
 	env["ANTHROPIC_BASE_URL"] = m.advertisedBaseURL()
+	if m.apiKey != "" {
+		env["ANTHROPIC_AUTH_TOKEN"] = m.apiKey
+	}
 	body["env"] = env
 
 	plannedBytes, err := marshalJSONMap(body)
