@@ -17,10 +17,11 @@ type Manager struct {
 	homeDir   string
 	host      string
 	port      int
+	apiKey    string
 }
 
-func NewManager(configDir, host string, port int) *Manager {
-	return &Manager{configDir: configDir, host: host, port: port}
+func NewManager(configDir, host string, port int, apiKey string) *Manager {
+	return &Manager{configDir: configDir, host: host, port: port, apiKey: apiKey}
 }
 
 func (m Manager) advertisedBaseURL() string {
@@ -35,6 +36,13 @@ func (m Manager) advertisedBaseURL() string {
 		}
 	}
 	return fmt.Sprintf("http://%s:%d", host, m.port)
+}
+
+func (m Manager) effectiveAPIKey(fallback string) string {
+	if m.apiKey != "" {
+		return m.apiKey
+	}
+	return fallback
 }
 
 func (m Manager) backupProductRoot(product ProductID) string {

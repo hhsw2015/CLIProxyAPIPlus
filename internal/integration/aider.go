@@ -67,9 +67,7 @@ func (m Manager) previewAider() (Preview, error) {
 
 	doc["openai-api-base"] = m.advertisedBaseURL()
 	doc["model"] = inferAiderModel(doc)
-	if key, _ := doc["openai-api-key"].(string); strings.TrimSpace(key) == "" {
-		doc["openai-api-key"] = "cpa"
-	}
+	doc["openai-api-key"] = m.effectiveAPIKey("cpa")
 
 	plannedBytes, err := marshalYAMLMap(doc)
 	if err != nil {

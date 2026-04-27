@@ -106,7 +106,7 @@ func (m Manager) previewOpenCode() (Preview, error) {
 		options = map[string]any{}
 	}
 	options["baseURL"] = m.advertisedOpenCodeBaseURL()
-	options["apiKey"] = openCodeProviderAPIKey
+	options["apiKey"] = m.effectiveAPIKey(openCodeProviderAPIKey)
 	cpaProvider["options"] = options
 
 	models, _ := cpaProvider["models"].(map[string]any)
