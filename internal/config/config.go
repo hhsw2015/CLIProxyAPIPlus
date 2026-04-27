@@ -869,10 +869,6 @@ type OpenAICompatibility struct {
 
 	// BackupDurationMS overrides the default cooldown (ms) applied to this auth.
 	BackupDurationMS int `yaml:"backup-duration-ms,omitempty" json:"backup-duration-ms,omitempty"`
-
-	// Disabled temporarily suppresses this provider without deleting the yaml config.
-	// When true, the synthesizer skips creating auth records for this entry.
-	Disabled bool `yaml:"disabled,omitempty" json:"disabled,omitempty"`
 }
 
 // OpenAICompatibilityAPIKey represents an API key configuration with optional proxy setting.

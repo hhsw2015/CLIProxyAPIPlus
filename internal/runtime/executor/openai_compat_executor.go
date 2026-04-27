@@ -152,6 +152,15 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 		translated = stripReasoningContent(translated)
 	}
 
+	// Azure gpt-5.5 chat/completions rejects reasoning_effort when tools are present.
+	// Strip reasoning_effort only in that combination; the model still uses built-in
+	// reasoning at default level.
+	if !responsesFormat && isGPT55Model(baseModel) &&
+		gjson.GetBytes(translated, "tools").Exists() &&
+		gjson.GetBytes(translated, "reasoning_effort").Exists() {
+		translated, _ = sjson.DeleteBytes(translated, "reasoning_effort")
+	}
+
 	for {
 		if ctx.Err() != nil {
 			err = ctx.Err()
@@ -345,6 +354,16 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 
 	if isProxiedBackend(auth) && isClaudeModel(baseModel) {
 		translated = stripReasoningContent(translated)
+	}
+
+	// Azure gpt-5.5 chat/completions rejects reasoning_effort when tools are present.
+	if !responsesFormat && isGPT55Model(baseModel) && gjson.GetBytes(translated, "tools").Exists() {
+		if gjson.GetBytes(translated, "reasoning_effort").Exists() {
+			translated, _ = sjson.DeleteBytes(translated, "reasoning_effort")
+		}
+		if gjson.GetBytes(translated, "reasoning.effort").Exists() {
+			translated, _ = sjson.DeleteBytes(translated, "reasoning")
+		}
 	}
 
 	for {
@@ -843,6 +862,11 @@ func isProxiedBackend(auth *cliproxyauth.Auth) bool {
 func isClaudeModel(model string) bool {
 	lower := strings.ToLower(model)
 	return strings.Contains(lower, "claude")
+}
+
+func isGPT55Model(model string) bool {
+	lower := strings.ToLower(model)
+	return strings.Contains(lower, "gpt-5.5") || strings.Contains(lower, "gpt-5-5")
 }
 
 // normalizeMaxCompletionTokens rewrites max_tokens → max_completion_tokens for
