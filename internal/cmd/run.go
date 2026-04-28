@@ -10,8 +10,11 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/api"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/commercial"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy"
 	log "github.com/sirupsen/logrus"
 )
@@ -25,10 +28,19 @@ import (
 //   - configPath: The path to the configuration file
 //   - localPassword: Optional password accepted for local management requests
 func StartService(cfg *config.Config, configPath string, localPassword string) {
+	var commercialLayer *commercial.Layer
+
 	builder := cliproxy.NewBuilder().
 		WithConfig(cfg).
 		WithConfigPath(configPath).
-		WithLocalManagementPassword(localPassword)
+		WithLocalManagementPassword(localPassword).
+		WithServerOptions(api.WithRouterConfigurator(func(engine *gin.Engine, _ *handlers.BaseAPIHandler, _ *config.Config) {
+			var err error
+			commercialLayer, err = commercial.Start(engine, cfg.Commercial)
+			if err != nil {
+				log.Errorf("commercial layer failed to start: %v", err)
+			}
+		}))
 
 	ctxSignal, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
@@ -47,6 +59,10 @@ func StartService(cfg *config.Config, configPath string, localPassword string) {
 	if err != nil {
 		log.Errorf("failed to build proxy service: %v", err)
 		return
+	}
+
+	if commercialLayer != nil {
+		defer commercialLayer.Stop()
 	}
 
 	err = service.Run(runCtx)

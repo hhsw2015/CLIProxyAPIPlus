@@ -8,14 +8,9 @@ import (
 	"github.com/gin-gonic/gin"
 
 	sub2apiEmbed "github.com/Wei-Shaw/sub2api/internal/embed"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	coreusage "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
 )
-
-// CommercialConfig holds configuration for the commercial layer.
-type CommercialConfig struct {
-	Enabled    bool   `yaml:"enabled" json:"enabled"`
-	ConfigPath string `yaml:"config-path" json:"config_path"`
-}
 
 // Layer represents the commercial layer lifecycle.
 type Layer struct {
@@ -24,7 +19,7 @@ type Layer struct {
 }
 
 // Start initializes the commercial layer and mounts routes on the engine.
-func Start(engine *gin.Engine, cfg CommercialConfig) (*Layer, error) {
+func Start(engine *gin.Engine, cfg config.CommercialConfig) (*Layer, error) {
 	if !cfg.Enabled {
 		return &Layer{}, nil
 	}

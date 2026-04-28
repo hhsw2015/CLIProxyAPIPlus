@@ -43,6 +43,10 @@ type Config struct {
 	// AuthDir is the directory where authentication token files are stored.
 	AuthDir string `yaml:"auth-dir" json:"-"`
 
+	// Commercial enables the sub2api commercial layer (user billing, subscriptions, payment).
+	// Requires build tag 'commercial' and PostgreSQL + Redis.
+	Commercial CommercialConfig `yaml:"commercial" json:"-"`
+
 	// Debug enables or disables debug-level logging and other debug features.
 	Debug bool `yaml:"debug" json:"debug"`
 
@@ -212,6 +216,13 @@ type TLSConfig struct {
 	Cert string `yaml:"cert" json:"cert"`
 	// Key is the path to the TLS private key file.
 	Key string `yaml:"key" json:"key"`
+}
+
+// CommercialConfig holds settings for the optional sub2api commercial layer.
+// Requires the 'commercial' build tag and PostgreSQL + Redis.
+type CommercialConfig struct {
+	Enabled    bool   `yaml:"enabled" json:"enabled"`
+	ConfigPath string `yaml:"config-path" json:"config_path"`
 }
 
 // PprofConfig holds pprof HTTP server settings.

@@ -2,18 +2,16 @@
 
 package commercial
 
-import "github.com/gin-gonic/gin"
-
-// CommercialConfig holds configuration for the commercial layer.
-type CommercialConfig struct {
-	Enabled bool `yaml:"enabled" json:"enabled"`
-}
+import (
+	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+)
 
 // Layer represents the commercial layer lifecycle.
 type Layer struct{}
 
 // Start is a no-op when built without the commercial tag.
-func Start(_ *gin.Engine, _ CommercialConfig) (*Layer, error) {
+func Start(_ *gin.Engine, _ config.CommercialConfig) (*Layer, error) {
 	return &Layer{}, nil
 }
 
