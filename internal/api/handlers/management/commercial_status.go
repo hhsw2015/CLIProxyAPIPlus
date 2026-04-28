@@ -7,10 +7,9 @@ import (
 )
 
 // GetCommercialStatus returns whether the commercial layer is active.
-// Used by the management frontend to decide whether to show commercial tabs.
+// Uses the config's commercial.enabled flag instead of runtime state.
 func (h *Handler) GetCommercialStatus(c *gin.Context) {
-	layer := h.commercialLayer
-	enabled := layer != nil && layer.AuthMiddleware() != nil
+	enabled := h.cfg != nil && h.cfg.Commercial.Enabled
 	c.JSON(http.StatusOK, gin.H{
 		"enabled":   enabled,
 		"admin_url": "/admin/",
