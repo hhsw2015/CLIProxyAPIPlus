@@ -41,7 +41,7 @@ func Start(engine *gin.Engine, cfg config.CommercialConfig) (*Layer, error) {
 
 	return &Layer{
 		cleanup:        result.Cleanup,
-		authMiddleware: result.APIKeyAuthMiddleware,
+		authMiddleware: WrapAuthMiddleware(result.APIKeyAuthMiddleware),
 	}, nil
 }
 
