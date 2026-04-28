@@ -19,13 +19,16 @@ type BillingPlugin struct {
 
 // HandleUsage is called asynchronously by CPA after each request completes.
 // It calculates cost from token usage and deducts from the user's balance.
+//
+// userID is read from the request context where the auth middleware stored it
+// via SetUserID. The middleware must bridge gin context -> request context.
 func (p *BillingPlugin) HandleUsage(ctx context.Context, record coreusage.Record) {
 	if record.Failed {
 		return
 	}
 
-	userID, ok := ctx.Value(commercialUserIDKey).(int64)
-	if !ok || userID == 0 {
+	userID, _ := ctx.Value(commercialUserIDKey).(int64)
+	if userID == 0 {
 		return
 	}
 
