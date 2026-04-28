@@ -28,7 +28,6 @@ import (
 	ampmodule "github.com/router-for-me/CLIProxyAPI/v6/internal/api/modules/amp"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/kiro"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/cache"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/commercial"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/managementasset"
@@ -197,14 +196,6 @@ func (s *Server) SetPoolStatisticsProvider(provider func() any) {
 		return
 	}
 	s.mgmt.SetPoolStatisticsProvider(provider)
-}
-
-// SetCommercialLayer wires the commercial layer into management endpoints.
-func (s *Server) SetCommercialLayer(layer *commercial.Layer) {
-	if s == nil || s.mgmt == nil {
-		return
-	}
-	s.mgmt.SetCommercialLayer(layer)
 }
 
 // SetSelectedAuthObserver forwards selected auth events from request execution.
