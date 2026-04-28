@@ -109,3 +109,7 @@ require (
 	google.golang.org/protobuf v1.34.1 // indirect
 	gopkg.in/ini.v1 v1.67.0 // indirect
 )
+
+require github.com/Wei-Shaw/sub2api v0.0.0
+
+replace github.com/Wei-Shaw/sub2api => ./commercial
