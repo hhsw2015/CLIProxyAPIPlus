@@ -8,6 +8,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	sub2apiEmbed "github.com/Wei-Shaw/sub2api/internal/embed"
+	sub2apiLogger "github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	coreusage "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
 )
@@ -37,6 +38,8 @@ func Start(engine *gin.Engine, cfg config.CommercialConfig) (*Layer, error) {
 		billingSvc:      result.BillingService,
 		billingCacheSvc: result.BillingCacheService,
 	})
+
+	BridgeLogrusToZap(sub2apiLogger.L())
 
 	return &Layer{
 		cleanup:        result.Cleanup,
