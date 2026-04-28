@@ -8,6 +8,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	sub2apiEmbed "github.com/Wei-Shaw/sub2api/internal/embed"
+	coreusage "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
 )
 
 // CommercialConfig holds configuration for the commercial layer.
@@ -32,12 +33,17 @@ func Start(engine *gin.Engine, cfg CommercialConfig) (*Layer, error) {
 		configDir = "."
 	}
 
-	cleanup, err := sub2apiEmbed.Init(engine, configDir)
+	result, err := sub2apiEmbed.Init(engine, configDir)
 	if err != nil {
 		return nil, fmt.Errorf("commercial layer init: %w", err)
 	}
 
-	return &Layer{cleanup: cleanup}, nil
+	coreusage.RegisterPlugin(&BillingPlugin{
+		billingSvc:      result.BillingService,
+		billingCacheSvc: result.BillingCacheService,
+	})
+
+	return &Layer{cleanup: result.Cleanup}, nil
 }
 
 // Stop shuts down the commercial layer.
