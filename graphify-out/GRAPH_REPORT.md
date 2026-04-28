@@ -1,7 +1,7 @@
-# Graph Report - .  (2026-04-28)
+# Graph Report - .  (2026-04-29)
 
 ## Corpus Check
-- 716 files · ~933,262 words
+- 716 files · ~933,240 words
 - Verdict: corpus is large enough that graph structure adds value.
 
 ## Summary
@@ -22,7 +22,7 @@
 10. `bulkDeleteAccounts()` - 2 edges
 
 ## Surprising Connections (you probably didn't know these)
-- `login()` --calls--> `request()`  [EXTRACTED]
+- `fetchAccounts()` --calls--> `request()`  [EXTRACTED]
   temp/apitest/frontend/src/api.ts → temp/apitest/frontend/src/api.ts  _Bridges community 1 → community 2_
 
 ## Communities
@@ -33,11 +33,11 @@ Nodes (0):
 
 ### Community 1 - "Community 1"
 Cohesion: 0.29
-Nodes (7): batchHealthCheck(), bulkDeleteAccounts(), deleteDuplicates(), detectDuplicates(), logout(), request(), testAccount()
+Nodes (7): batchHealthCheck(), bulkDeleteAccounts(), deleteAccount(), detectDuplicates(), login(), request(), testAccount()
 
 ### Community 2 - "Community 2"
 Cohesion: 0.5
-Nodes (4): buildQueryString(), deleteAccount(), fetchAccounts(), login()
+Nodes (4): buildQueryString(), deleteDuplicates(), fetchAccounts(), logout()
 
 ### Community 3 - "Community 3"
 Cohesion: 0.67
