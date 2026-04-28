@@ -14,6 +14,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/buildinfo"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/commercial"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/integration"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
@@ -51,6 +52,7 @@ type Handler struct {
 	postAuthHook        coreauth.PostAuthHook
 	poolStatsProvider   func() any
 	integrationMgr      *integration.Manager
+	commercialLayer     *commercial.Layer
 }
 
 // NewHandler creates a new management handler instance.
@@ -140,6 +142,9 @@ func (h *Handler) SetUsageStatistics(stats *usage.RequestStatistics) { h.usageSt
 
 // SetPoolStatisticsProvider registers an optional runtime pool metrics provider.
 func (h *Handler) SetPoolStatisticsProvider(provider func() any) { h.poolStatsProvider = provider }
+
+// SetCommercialLayer wires the commercial layer for status reporting.
+func (h *Handler) SetCommercialLayer(layer *commercial.Layer) { h.commercialLayer = layer }
 
 // SetLocalPassword configures the runtime-local password accepted for localhost requests.
 func (h *Handler) SetLocalPassword(password string) { h.localPassword = password }

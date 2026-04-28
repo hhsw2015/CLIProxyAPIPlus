@@ -9,7 +9,7 @@
       "source_file": "temp/apitest/frontend/vite.config.ts",
       "source_location": "L1",
       "id": "vite_config",
-      "community": 8
+      "community": 9
     },
     {
       "label": "App.tsx",
@@ -57,7 +57,7 @@
       "source_file": "temp/apitest/frontend/src/api.ts",
       "source_location": "L33",
       "id": "api_buildquerystring",
-      "community": 4
+      "community": 5
     },
     {
       "label": "login()",
@@ -73,7 +73,7 @@
       "source_file": "temp/apitest/frontend/src/api.ts",
       "source_location": "L61",
       "id": "api_fetchaccounts",
-      "community": 4
+      "community": 5
     },
     {
       "label": "detectDuplicates()",
@@ -145,7 +145,7 @@
       "source_file": "temp/apitest/frontend/src/view-types.ts",
       "source_location": "L1",
       "id": "view_types",
-      "community": 2
+      "community": 4
     },
     {
       "label": "account.ts",
@@ -209,7 +209,7 @@
       "source_file": "temp/apitest/frontend/src/components/BulkDeleteModal.tsx",
       "source_location": "L1",
       "id": "bulkdeletemodal",
-      "community": 6
+      "community": 7
     },
     {
       "label": "BulkDeleteModal()",
@@ -217,7 +217,7 @@
       "source_file": "temp/apitest/frontend/src/components/BulkDeleteModal.tsx",
       "source_location": "L11",
       "id": "bulkdeletemodal_bulkdeletemodal",
-      "community": 6
+      "community": 7
     },
     {
       "label": "LoginPanel.tsx",
@@ -225,7 +225,7 @@
       "source_file": "temp/apitest/frontend/src/components/LoginPanel.tsx",
       "source_location": "L1",
       "id": "loginpanel",
-      "community": 5
+      "community": 6
     },
     {
       "label": "LoginPanel()",
@@ -233,7 +233,7 @@
       "source_file": "temp/apitest/frontend/src/components/LoginPanel.tsx",
       "source_location": "L18",
       "id": "loginpanel_loginpanel",
-      "community": 5
+      "community": 6
     },
     {
       "label": "DuplicateAccountsModal.tsx",
@@ -241,7 +241,7 @@
       "source_file": "temp/apitest/frontend/src/components/DuplicateAccountsModal.tsx",
       "source_location": "L1",
       "id": "duplicateaccountsmodal",
-      "community": 2
+      "community": 4
     },
     {
       "label": "FailedAccountsModal.tsx",
@@ -249,7 +249,7 @@
       "source_file": "temp/apitest/frontend/src/components/FailedAccountsModal.tsx",
       "source_location": "L1",
       "id": "failedaccountsmodal",
-      "community": 2
+      "community": 4
     },
     {
       "label": "AccountsTable.tsx",
@@ -289,7 +289,7 @@
       "source_file": "temp/apitest/frontend/src/hooks/useAccountsQuery.ts",
       "source_location": "L1",
       "id": "useaccountsquery",
-      "community": 7
+      "community": 8
     },
     {
       "label": "useAccountsQuery()",
@@ -297,7 +297,7 @@
       "source_file": "temp/apitest/frontend/src/hooks/useAccountsQuery.ts",
       "source_location": "L3",
       "id": "useaccountsquery_useaccountsquery",
-      "community": 7
+      "community": 8
     }
   ],
   "links": [
