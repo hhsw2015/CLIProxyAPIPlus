@@ -137,7 +137,7 @@
       "source_file": "temp/apitest/frontend/src/types.ts",
       "source_location": "L1",
       "id": "types",
-      "community": 2
+      "community": 4
     },
     {
       "label": "view-types.ts",
@@ -145,7 +145,7 @@
       "source_file": "temp/apitest/frontend/src/view-types.ts",
       "source_location": "L1",
       "id": "view_types",
-      "community": 4
+      "community": 2
     },
     {
       "label": "account.ts",
@@ -241,7 +241,7 @@
       "source_file": "temp/apitest/frontend/src/components/DuplicateAccountsModal.tsx",
       "source_location": "L1",
       "id": "duplicateaccountsmodal",
-      "community": 4
+      "community": 2
     },
     {
       "label": "FailedAccountsModal.tsx",
@@ -249,7 +249,7 @@
       "source_file": "temp/apitest/frontend/src/components/FailedAccountsModal.tsx",
       "source_location": "L1",
       "id": "failedaccountsmodal",
-      "community": 4
+      "community": 2
     },
     {
       "label": "AccountsTable.tsx",
@@ -257,7 +257,7 @@
       "source_file": "temp/apitest/frontend/src/components/AccountsTable.tsx",
       "source_location": "L1",
       "id": "accountstable",
-      "community": 2
+      "community": 4
     },
     {
       "label": "ActionToolbar.tsx",
@@ -265,7 +265,7 @@
       "source_file": "temp/apitest/frontend/src/components/ActionToolbar.tsx",
       "source_location": "L1",
       "id": "actiontoolbar",
-      "community": 2
+      "community": 4
     },
     {
       "label": "useAccountList.ts",
