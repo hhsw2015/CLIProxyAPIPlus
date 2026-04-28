@@ -17,7 +17,7 @@
       "source_file": "temp/apitest/frontend/src/App.tsx",
       "source_location": "L1",
       "id": "app",
-      "community": 5
+      "community": 4
     },
     {
       "label": "App()",
@@ -25,7 +25,7 @@
       "source_file": "temp/apitest/frontend/src/App.tsx",
       "source_location": "L28",
       "id": "app_app",
-      "community": 5
+      "community": 4
     },
     {
       "label": "main.tsx",
@@ -33,7 +33,7 @@
       "source_file": "temp/apitest/frontend/src/main.tsx",
       "source_location": "L1",
       "id": "main",
-      "community": 5
+      "community": 4
     },
     {
       "label": "api.ts",
@@ -65,7 +65,7 @@
       "source_file": "temp/apitest/frontend/src/api.ts",
       "source_location": "L49",
       "id": "api_login",
-      "community": 2
+      "community": 1
     },
     {
       "label": "fetchAccounts()",
@@ -89,7 +89,7 @@
       "source_file": "temp/apitest/frontend/src/api.ts",
       "source_location": "L84",
       "id": "api_deleteduplicates",
-      "community": 1
+      "community": 2
     },
     {
       "label": "batchHealthCheck()",
@@ -113,7 +113,7 @@
       "source_file": "temp/apitest/frontend/src/api.ts",
       "source_location": "L109",
       "id": "api_deleteaccount",
-      "community": 2
+      "community": 1
     },
     {
       "label": "bulkDeleteAccounts()",
@@ -129,7 +129,7 @@
       "source_file": "temp/apitest/frontend/src/api.ts",
       "source_location": "L126",
       "id": "api_logout",
-      "community": 1
+      "community": 2
     },
     {
       "label": "types.ts",
@@ -145,7 +145,7 @@
       "source_file": "temp/apitest/frontend/src/view-types.ts",
       "source_location": "L1",
       "id": "view_types",
-      "community": 4
+      "community": 5
     },
     {
       "label": "account.ts",
@@ -241,7 +241,7 @@
       "source_file": "temp/apitest/frontend/src/components/DuplicateAccountsModal.tsx",
       "source_location": "L1",
       "id": "duplicateaccountsmodal",
-      "community": 4
+      "community": 5
     },
     {
       "label": "FailedAccountsModal.tsx",
@@ -249,7 +249,7 @@
       "source_file": "temp/apitest/frontend/src/components/FailedAccountsModal.tsx",
       "source_location": "L1",
       "id": "failedaccountsmodal",
-      "community": 4
+      "community": 5
     },
     {
       "label": "AccountsTable.tsx",
