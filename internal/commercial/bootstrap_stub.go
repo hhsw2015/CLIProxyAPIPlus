@@ -17,5 +17,8 @@ func Start(_ *gin.Engine, _ CommercialConfig) (*Layer, error) {
 	return &Layer{}, nil
 }
 
+// AuthMiddleware returns nil when commercial is not enabled.
+func (l *Layer) AuthMiddleware() gin.HandlerFunc { return nil }
+
 // Stop is a no-op.
 func (l *Layer) Stop() {}

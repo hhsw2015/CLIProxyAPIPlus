@@ -19,7 +19,8 @@ type CommercialConfig struct {
 
 // Layer represents the commercial layer lifecycle.
 type Layer struct {
-	cleanup func()
+	cleanup      func()
+	authMiddleware gin.HandlerFunc
 }
 
 // Start initializes the commercial layer and mounts routes on the engine.
@@ -43,7 +44,19 @@ func Start(engine *gin.Engine, cfg CommercialConfig) (*Layer, error) {
 		billingCacheSvc: result.BillingCacheService,
 	})
 
-	return &Layer{cleanup: result.Cleanup}, nil
+	return &Layer{
+		cleanup:        result.Cleanup,
+		authMiddleware: result.APIKeyAuthMiddleware,
+	}, nil
+}
+
+// AuthMiddleware returns the sub2api API key auth middleware.
+// Returns nil when commercial is not enabled.
+func (l *Layer) AuthMiddleware() gin.HandlerFunc {
+	if l == nil {
+		return nil
+	}
+	return l.authMiddleware
 }
 
 // Stop shuts down the commercial layer.
