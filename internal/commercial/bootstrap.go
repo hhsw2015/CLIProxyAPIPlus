@@ -14,7 +14,7 @@ import (
 
 // Layer represents the commercial layer lifecycle.
 type Layer struct {
-	cleanup      func()
+	cleanup        func()
 	authMiddleware gin.HandlerFunc
 }
 
@@ -24,12 +24,11 @@ func Start(engine *gin.Engine, cfg config.CommercialConfig) (*Layer, error) {
 		return &Layer{}, nil
 	}
 
-	configDir := cfg.ConfigPath
-	if configDir == "" {
-		configDir = "."
+	if cfg.Sub2API == nil || len(cfg.Sub2API) == 0 {
+		return nil, fmt.Errorf("commercial layer enabled but sub2api config is empty")
 	}
 
-	result, err := sub2apiEmbed.Init(engine, configDir)
+	result, err := sub2apiEmbed.InitFromMap(engine, cfg.Sub2API)
 	if err != nil {
 		return nil, fmt.Errorf("commercial layer init: %w", err)
 	}
@@ -46,7 +45,6 @@ func Start(engine *gin.Engine, cfg config.CommercialConfig) (*Layer, error) {
 }
 
 // AuthMiddleware returns the sub2api API key auth middleware.
-// Returns nil when commercial is not enabled.
 func (l *Layer) AuthMiddleware() gin.HandlerFunc {
 	if l == nil {
 		return nil
