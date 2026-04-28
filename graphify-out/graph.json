@@ -17,7 +17,7 @@
       "source_file": "temp/apitest/frontend/src/App.tsx",
       "source_location": "L1",
       "id": "app",
-      "community": 4
+      "community": 3
     },
     {
       "label": "App()",
@@ -25,7 +25,7 @@
       "source_file": "temp/apitest/frontend/src/App.tsx",
       "source_location": "L28",
       "id": "app_app",
-      "community": 4
+      "community": 3
     },
     {
       "label": "main.tsx",
@@ -33,7 +33,7 @@
       "source_file": "temp/apitest/frontend/src/main.tsx",
       "source_location": "L1",
       "id": "main",
-      "community": 4
+      "community": 3
     },
     {
       "label": "api.ts",
@@ -145,7 +145,7 @@
       "source_file": "temp/apitest/frontend/src/view-types.ts",
       "source_location": "L1",
       "id": "view_types",
-      "community": 3
+      "community": 4
     },
     {
       "label": "account.ts",
@@ -241,7 +241,7 @@
       "source_file": "temp/apitest/frontend/src/components/DuplicateAccountsModal.tsx",
       "source_location": "L1",
       "id": "duplicateaccountsmodal",
-      "community": 3
+      "community": 4
     },
     {
       "label": "FailedAccountsModal.tsx",
@@ -249,7 +249,7 @@
       "source_file": "temp/apitest/frontend/src/components/FailedAccountsModal.tsx",
       "source_location": "L1",
       "id": "failedaccountsmodal",
-      "community": 3
+      "community": 4
     },
     {
       "label": "AccountsTable.tsx",
