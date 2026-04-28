@@ -17,7 +17,7 @@
       "source_file": "temp/apitest/frontend/src/App.tsx",
       "source_location": "L1",
       "id": "app",
-      "community": 3
+      "community": 5
     },
     {
       "label": "App()",
@@ -25,7 +25,7 @@
       "source_file": "temp/apitest/frontend/src/App.tsx",
       "source_location": "L28",
       "id": "app_app",
-      "community": 3
+      "community": 5
     },
     {
       "label": "main.tsx",
@@ -33,7 +33,7 @@
       "source_file": "temp/apitest/frontend/src/main.tsx",
       "source_location": "L1",
       "id": "main",
-      "community": 3
+      "community": 5
     },
     {
       "label": "api.ts",
@@ -41,7 +41,7 @@
       "source_file": "temp/apitest/frontend/src/api.ts",
       "source_location": "L1",
       "id": "api",
-      "community": 0
+      "community": 2
     },
     {
       "label": "request()",
@@ -49,7 +49,7 @@
       "source_file": "temp/apitest/frontend/src/api.ts",
       "source_location": "L6",
       "id": "api_request",
-      "community": 0
+      "community": 1
     },
     {
       "label": "buildQueryString()",
@@ -57,7 +57,7 @@
       "source_file": "temp/apitest/frontend/src/api.ts",
       "source_location": "L33",
       "id": "api_buildquerystring",
-      "community": 5
+      "community": 2
     },
     {
       "label": "login()",
@@ -65,7 +65,7 @@
       "source_file": "temp/apitest/frontend/src/api.ts",
       "source_location": "L49",
       "id": "api_login",
-      "community": 0
+      "community": 2
     },
     {
       "label": "fetchAccounts()",
@@ -73,7 +73,7 @@
       "source_file": "temp/apitest/frontend/src/api.ts",
       "source_location": "L61",
       "id": "api_fetchaccounts",
-      "community": 5
+      "community": 2
     },
     {
       "label": "detectDuplicates()",
@@ -81,7 +81,7 @@
       "source_file": "temp/apitest/frontend/src/api.ts",
       "source_location": "L65",
       "id": "api_detectduplicates",
-      "community": 0
+      "community": 1
     },
     {
       "label": "deleteDuplicates()",
@@ -89,7 +89,7 @@
       "source_file": "temp/apitest/frontend/src/api.ts",
       "source_location": "L84",
       "id": "api_deleteduplicates",
-      "community": 0
+      "community": 1
     },
     {
       "label": "batchHealthCheck()",
@@ -97,7 +97,7 @@
       "source_file": "temp/apitest/frontend/src/api.ts",
       "source_location": "L91",
       "id": "api_batchhealthcheck",
-      "community": 0
+      "community": 1
     },
     {
       "label": "testAccount()",
@@ -105,7 +105,7 @@
       "source_file": "temp/apitest/frontend/src/api.ts",
       "source_location": "L102",
       "id": "api_testaccount",
-      "community": 0
+      "community": 1
     },
     {
       "label": "deleteAccount()",
@@ -113,7 +113,7 @@
       "source_file": "temp/apitest/frontend/src/api.ts",
       "source_location": "L109",
       "id": "api_deleteaccount",
-      "community": 0
+      "community": 2
     },
     {
       "label": "bulkDeleteAccounts()",
@@ -121,7 +121,7 @@
       "source_file": "temp/apitest/frontend/src/api.ts",
       "source_location": "L116",
       "id": "api_bulkdeleteaccounts",
-      "community": 0
+      "community": 1
     },
     {
       "label": "logout()",
@@ -129,7 +129,7 @@
       "source_file": "temp/apitest/frontend/src/api.ts",
       "source_location": "L126",
       "id": "api_logout",
-      "community": 0
+      "community": 1
     },
     {
       "label": "types.ts",
@@ -137,7 +137,7 @@
       "source_file": "temp/apitest/frontend/src/types.ts",
       "source_location": "L1",
       "id": "types",
-      "community": 4
+      "community": 3
     },
     {
       "label": "view-types.ts",
@@ -145,7 +145,7 @@
       "source_file": "temp/apitest/frontend/src/view-types.ts",
       "source_location": "L1",
       "id": "view_types",
-      "community": 2
+      "community": 4
     },
     {
       "label": "account.ts",
@@ -153,7 +153,7 @@
       "source_file": "temp/apitest/frontend/src/utils/account.ts",
       "source_location": "L1",
       "id": "account",
-      "community": 1
+      "community": 0
     },
     {
       "label": "getAccountKey()",
@@ -161,7 +161,7 @@
       "source_file": "temp/apitest/frontend/src/utils/account.ts",
       "source_location": "L3",
       "id": "account_getaccountkey",
-      "community": 1
+      "community": 0
     },
     {
       "label": "getAccountIdentity()",
@@ -169,7 +169,7 @@
       "source_file": "temp/apitest/frontend/src/utils/account.ts",
       "source_location": "L7",
       "id": "account_getaccountidentity",
-      "community": 1
+      "community": 0
     },
     {
       "label": "withAccountKeys()",
@@ -177,7 +177,7 @@
       "source_file": "temp/apitest/frontend/src/utils/account.ts",
       "source_location": "L14",
       "id": "account_withaccountkeys",
-      "community": 1
+      "community": 0
     },
     {
       "label": "formatDateTime()",
@@ -185,7 +185,7 @@
       "source_file": "temp/apitest/frontend/src/utils/account.ts",
       "source_location": "L18",
       "id": "account_formatdatetime",
-      "community": 1
+      "community": 0
     },
     {
       "label": "nowText()",
@@ -193,7 +193,7 @@
       "source_file": "temp/apitest/frontend/src/utils/account.ts",
       "source_location": "L38",
       "id": "account_nowtext",
-      "community": 1
+      "community": 0
     },
     {
       "label": "toAccountPayload()",
@@ -201,7 +201,7 @@
       "source_file": "temp/apitest/frontend/src/utils/account.ts",
       "source_location": "L42",
       "id": "account_toaccountpayload",
-      "community": 1
+      "community": 0
     },
     {
       "label": "BulkDeleteModal.tsx",
@@ -241,7 +241,7 @@
       "source_file": "temp/apitest/frontend/src/components/DuplicateAccountsModal.tsx",
       "source_location": "L1",
       "id": "duplicateaccountsmodal",
-      "community": 2
+      "community": 4
     },
     {
       "label": "FailedAccountsModal.tsx",
@@ -249,7 +249,7 @@
       "source_file": "temp/apitest/frontend/src/components/FailedAccountsModal.tsx",
       "source_location": "L1",
       "id": "failedaccountsmodal",
-      "community": 2
+      "community": 4
     },
     {
       "label": "AccountsTable.tsx",
@@ -257,7 +257,7 @@
       "source_file": "temp/apitest/frontend/src/components/AccountsTable.tsx",
       "source_location": "L1",
       "id": "accountstable",
-      "community": 4
+      "community": 3
     },
     {
       "label": "ActionToolbar.tsx",
@@ -265,7 +265,7 @@
       "source_file": "temp/apitest/frontend/src/components/ActionToolbar.tsx",
       "source_location": "L1",
       "id": "actiontoolbar",
-      "community": 4
+      "community": 3
     },
     {
       "label": "useAccountList.ts",
@@ -273,7 +273,7 @@
       "source_file": "temp/apitest/frontend/src/hooks/useAccountList.ts",
       "source_location": "L1",
       "id": "useaccountlist",
-      "community": 1
+      "community": 0
     },
     {
       "label": "useAccountList()",
@@ -281,7 +281,7 @@
       "source_file": "temp/apitest/frontend/src/hooks/useAccountList.ts",
       "source_location": "L20",
       "id": "useaccountlist_useaccountlist",
-      "community": 1
+      "community": 0
     },
     {
       "label": "useAccountsQuery.ts",

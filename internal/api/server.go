@@ -411,16 +411,18 @@ func (s *Server) setupRoutes() {
 	}
 
 	// Root endpoint
-	s.engine.GET("/", func(c *gin.Context) {
-		c.JSON(http.StatusOK, gin.H{
-			"message": "CLI Proxy API Server",
-			"endpoints": []string{
-				"POST /v1/chat/completions",
-				"POST /v1/completions",
-				"GET /v1/models",
-			},
+	if !s.cfg.Commercial.Enabled {
+		s.engine.GET("/", func(c *gin.Context) {
+			c.JSON(http.StatusOK, gin.H{
+				"message": "CLI Proxy API Server",
+				"endpoints": []string{
+					"POST /v1/chat/completions",
+					"POST /v1/completions",
+					"GET /v1/models",
+				},
+			})
 		})
-	})
+	}
 
 	// Event logging endpoint - handles Claude Code telemetry requests
 	// Returns 200 OK to prevent 404 errors in logs
