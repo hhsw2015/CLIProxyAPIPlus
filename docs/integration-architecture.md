@@ -89,6 +89,13 @@ func (s *Server) proxyAuthMiddleware() gin.HandlerFunc {
 }
 ```
 
+**认证优先级:**
+1. CPA api-keys (配置文件中的 `api-keys`) → 直通，不走计费。和商业层关闭时行为完全一致。
+2. Sub2API APIKey (用户注册后获取的 `sk-xxx`) → 商业层鉴权 + 计费。
+3. 都不匹配 → 401
+
+**向后兼容:** 商业层开/关对 CPA admin api-key 用户零影响。CPA api-key 永远走第一条路径，商业层代码不被触碰。
+
 **指针延迟初始化:** commercialAuth 变量在 routerConfigurator 中赋值(路由注册之后、HTTP 监听之前)。proxyAuthMiddleware 在请求时解引用，保证值已设置。
 
 **覆盖路由:** /v1, /v1beta, /backend-api/codex, /gpt-proxy, /kling, /suno, WebSocket, Amp
