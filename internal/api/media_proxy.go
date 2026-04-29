@@ -222,7 +222,7 @@ func (s *Server) setupGptProxyRoutes(engine *gin.Engine) {
 	// Catch-all for gpt-proxy media routes.
 	// Clients use the same paths as gpt-proxy, CPA just forwards.
 	proxy := engine.Group("/gpt-proxy")
-	proxy.Use(AuthMiddleware(s.accessManager))
+	proxy.Use(s.proxyAuthMiddleware())
 	proxy.Any("/*path", s.gptProxyPassthrough())
 }
 

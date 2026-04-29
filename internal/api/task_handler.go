@@ -47,7 +47,7 @@ func (s *Server) setupTaskRoutes(v1 *gin.RouterGroup) {
 
 	// Kling
 	kling := s.engine.Group("/kling/v1")
-	kling.Use(AuthMiddleware(s.accessManager))
+	kling.Use(s.proxyAuthMiddleware())
 	kling.POST("/videos/text2video", s.taskSubmitHandler("kling"))
 	kling.POST("/videos/image2video", s.taskSubmitHandler("kling"))
 	kling.GET("/videos/text2video/:task_id", s.taskFetchHandler())
@@ -55,7 +55,7 @@ func (s *Server) setupTaskRoutes(v1 *gin.RouterGroup) {
 
 	// Suno
 	suno := s.engine.Group("/suno")
-	suno.Use(AuthMiddleware(s.accessManager))
+	suno.Use(s.proxyAuthMiddleware())
 	suno.POST("/submit/:action", s.taskSubmitHandler("suno"))
 	suno.GET("/fetch/:task_id", s.taskFetchHandler())
 

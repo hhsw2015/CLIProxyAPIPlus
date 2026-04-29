@@ -222,8 +222,9 @@ type TLSConfig struct {
 // Requires the 'commercial' build tag and PostgreSQL + Redis.
 // Sub2api settings are embedded inline under the 'commercial' YAML key.
 type CommercialConfig struct {
-	Enabled bool              `yaml:"enabled" json:"enabled"`
-	Sub2API map[string]any    `yaml:"sub2api" json:"sub2api"`
+	Enabled    bool           `yaml:"enabled" json:"enabled"`
+	SyncDryRun bool           `yaml:"sync-dry-run" json:"sync-dry-run"`
+	Sub2API    map[string]any `yaml:"sub2api" json:"sub2api"`
 }
 
 // PprofConfig holds pprof HTTP server settings.
