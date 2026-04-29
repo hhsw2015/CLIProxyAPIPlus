@@ -120,6 +120,18 @@ gin context → 读 userID/apiKeyID/rateMultiplier
 - `internal/commercial/billing_plugin.go`
 - `internal/commercial/middleware.go` (WrapAuthMiddleware)
 
+### 4b. 配置变更同步
+
+使用 fsnotify 监听 config.yaml 文件变化(和 CPA 自身的 watcher 相同机制):
+
+```
+config.yaml 被修改 → fsnotify 事件 → 2s debounce → DataSyncer.Sync()
+```
+
+- 文件没变时: 零 CPU 开销(内核事件驱动)
+- 文件变了时: ~2 秒内触发增量同步(新 key 创建、删除的 key disable)
+- 不再使用 5 分钟轮询
+
 ### 5. 状态回写
 
 每 60 秒从 CPA auth manager 读取运行时状态，更新 PG 中对应 Account 的 status:
