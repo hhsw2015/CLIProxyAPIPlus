@@ -1201,6 +1201,9 @@ def main():
     sections['openai-compatibility'].extend(gpm)
     register('gpt-proxy', gpm)
 
+    # Reuse secrets from existing config if present
+    _load_existing_secrets(str(OUTPUT_DIR / 'cpa-new-config.yaml'))
+
     # Global Config (aligned with v1 base_config + routing)
     conf_lines = [
         'host: ""',
@@ -1298,9 +1301,7 @@ def main():
     # Sort openai-compat by priority desc
     sections['openai-compatibility'].sort(key=get_prio, reverse=True)
 
-    # Reuse secrets from existing config if present
     output_path = OUTPUT_DIR / 'cpa-new-config.yaml'
-    _load_existing_secrets(str(output_path))
     with open(output_path, 'w') as f:
         f.write('\n'.join(conf_lines) + '\n\n')
         if sections['claude-api-key']:
