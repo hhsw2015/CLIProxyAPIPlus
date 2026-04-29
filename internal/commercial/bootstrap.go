@@ -8,6 +8,7 @@ import (
 	"log"
 	"time"
 
+	"github.com/fsnotify/fsnotify"
 	"github.com/gin-gonic/gin"
 
 	sub2apiEmbed "github.com/Wei-Shaw/sub2api/pkg/embed"
@@ -103,20 +104,25 @@ func (l *Layer) StartStatusSync(authMgr *coreauth.Manager) {
 
 func (l *Layer) statusSyncLoop(authMgr *coreauth.Manager) {
 	statusTicker := time.NewTicker(60 * time.Second)
-	configSyncTicker := time.NewTicker(5 * time.Minute)
 	defer statusTicker.Stop()
-	defer configSyncTicker.Stop()
+
+	// Watch config file for changes (event-driven, not polling)
+	var configEvents <-chan struct{}
+	if l.configPath != "" {
+		configEvents = l.watchConfigFile()
+	}
+
 	for {
 		select {
 		case <-statusTicker.C:
 			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 			l.syncer.SyncAuthStatus(ctx, authMgr.List())
 			cancel()
-		case <-configSyncTicker.C:
+		case <-configEvents:
 			if l.configPath != "" {
 				freshCfg, err := config.LoadConfig(l.configPath)
 				if err != nil {
-					log.Printf("[commercial] periodic config re-sync: load failed: %v", err)
+					log.Printf("[commercial] config change sync: load failed: %v", err)
 				} else {
 					ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 					l.syncer.Sync(ctx, freshCfg)
@@ -127,6 +133,48 @@ func (l *Layer) statusSyncLoop(authMgr *coreauth.Manager) {
 			return
 		}
 	}
+}
+
+func (l *Layer) watchConfigFile() <-chan struct{} {
+	ch := make(chan struct{}, 1)
+	watcher, err := fsnotify.NewWatcher()
+	if err != nil {
+		log.Printf("[commercial] fsnotify init failed, config watch disabled: %v", err)
+		return ch
+	}
+	if err := watcher.Add(l.configPath); err != nil {
+		log.Printf("[commercial] fsnotify watch failed for %s: %v", l.configPath, err)
+		watcher.Close()
+		return ch
+	}
+	go func() {
+		defer watcher.Close()
+		var debounce *time.Timer
+		for {
+			select {
+			case event, ok := <-watcher.Events:
+				if !ok {
+					return
+				}
+				if event.Op&(fsnotify.Write|fsnotify.Create) == 0 {
+					continue
+				}
+				if debounce != nil {
+					debounce.Stop()
+				}
+				debounce = time.AfterFunc(2*time.Second, func() {
+					select {
+					case ch <- struct{}{}:
+					default:
+					}
+				})
+			case <-watcher.Errors:
+			case <-l.stopStatusSync:
+				return
+			}
+		}
+	}()
+	return ch
 }
 
 // Stop shuts down the commercial layer.
