@@ -17,7 +17,7 @@
       "source_file": "temp/apitest/frontend/src/App.tsx",
       "source_location": "L1",
       "id": "app",
-      "community": 4
+      "community": 2
     },
     {
       "label": "App()",
@@ -25,7 +25,7 @@
       "source_file": "temp/apitest/frontend/src/App.tsx",
       "source_location": "L28",
       "id": "app_app",
-      "community": 4
+      "community": 2
     },
     {
       "label": "main.tsx",
@@ -33,7 +33,7 @@
       "source_file": "temp/apitest/frontend/src/main.tsx",
       "source_location": "L1",
       "id": "main",
-      "community": 4
+      "community": 2
     },
     {
       "label": "api.ts",
@@ -137,7 +137,7 @@
       "source_file": "temp/apitest/frontend/src/types.ts",
       "source_location": "L1",
       "id": "types",
-      "community": 3
+      "community": 4
     },
     {
       "label": "view-types.ts",
@@ -145,7 +145,7 @@
       "source_file": "temp/apitest/frontend/src/view-types.ts",
       "source_location": "L1",
       "id": "view_types",
-      "community": 2
+      "community": 3
     },
     {
       "label": "account.ts",
@@ -241,7 +241,7 @@
       "source_file": "temp/apitest/frontend/src/components/DuplicateAccountsModal.tsx",
       "source_location": "L1",
       "id": "duplicateaccountsmodal",
-      "community": 2
+      "community": 3
     },
     {
       "label": "FailedAccountsModal.tsx",
@@ -249,7 +249,7 @@
       "source_file": "temp/apitest/frontend/src/components/FailedAccountsModal.tsx",
       "source_location": "L1",
       "id": "failedaccountsmodal",
-      "community": 2
+      "community": 3
     },
     {
       "label": "AccountsTable.tsx",
@@ -257,7 +257,7 @@
       "source_file": "temp/apitest/frontend/src/components/AccountsTable.tsx",
       "source_location": "L1",
       "id": "accountstable",
-      "community": 3
+      "community": 4
     },
     {
       "label": "ActionToolbar.tsx",
@@ -265,7 +265,7 @@
       "source_file": "temp/apitest/frontend/src/components/ActionToolbar.tsx",
       "source_location": "L1",
       "id": "actiontoolbar",
-      "community": 3
+      "community": 4
     },
     {
       "label": "useAccountList.ts",
