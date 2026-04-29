@@ -36,6 +36,40 @@ def _gen_db_password() -> str:
     return ''.join(secrets.choice(alphabet) for _ in range(24))
 
 
+# Cache: reuse secrets from existing config to avoid breaking DB/JWT on re-generation.
+_cached_secrets = {}
+
+
+def _load_existing_secrets(config_path: str):
+    """Read JWT secret and DB password from an existing config file."""
+    global _cached_secrets
+    try:
+        import yaml
+        with open(config_path) as f:
+            cfg = yaml.safe_load(f)
+        if not cfg or 'commercial' not in cfg:
+            return
+        sub = cfg['commercial'].get('sub2api', {})
+        db = sub.get('database', {})
+        jwt_cfg = sub.get('jwt', {})
+        if db.get('password'):
+            _cached_secrets['db_password'] = db['password']
+        if jwt_cfg.get('secret'):
+            _cached_secrets['jwt_secret'] = jwt_cfg['secret']
+    except Exception:
+        pass
+
+
+def _get_jwt_secret() -> str:
+    """Get JWT secret: reuse existing or generate new."""
+    return _cached_secrets.get('jwt_secret', _gen_jwt_secret())
+
+
+def _get_db_password() -> str:
+    """Get DB password: reuse existing or generate new."""
+    return _cached_secrets.get('db_password', _gen_db_password())
+
+
 # --- Configuration & Paths ---
 
 CPA_ROOT = Path(__file__).parent.parent.absolute()
@@ -1231,13 +1265,13 @@ def main():
         f'      host: localhost',
         f'      port: 5432',
         f'      user: sub2api',
-        f'      password: "{_gen_db_password()}"',
+        f'      password: "{_get_db_password()}"',
         f'      dbname: sub2api',
         f'      sslmode: disable',
         f'    redis:',
         f'      addr: localhost:6379',
         f'    jwt:',
-        f'      secret: "{_gen_jwt_secret()}"',
+        f'      secret: "{_get_jwt_secret()}"',
         f'    server:',
         f'      mode: release',
         f'    log:',
@@ -1264,8 +1298,9 @@ def main():
     # Sort openai-compat by priority desc
     sections['openai-compatibility'].sort(key=get_prio, reverse=True)
 
-    # Assembly
+    # Reuse secrets from existing config if present
     output_path = OUTPUT_DIR / 'cpa-new-config.yaml'
+    _load_existing_secrets(str(output_path))
     with open(output_path, 'w') as f:
         f.write('\n'.join(conf_lines) + '\n\n')
         if sections['claude-api-key']:
