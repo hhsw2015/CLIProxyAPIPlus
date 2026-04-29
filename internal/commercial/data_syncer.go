@@ -15,13 +15,14 @@ import (
 
 // DataSyncer synchronizes CPA config data into Sub2API's PostgreSQL database.
 type DataSyncer struct {
-	adminSvc sub2api.AdminService
-	dryRun   bool
+	adminSvc   sub2api.AdminService
+	channelSvc *sub2api.ChannelService
+	dryRun     bool
 }
 
 // NewDataSyncer creates a DataSyncer. When dryRun is true, no writes are performed.
-func NewDataSyncer(adminSvc sub2api.AdminService, dryRun bool) *DataSyncer {
-	return &DataSyncer{adminSvc: adminSvc, dryRun: dryRun}
+func NewDataSyncer(adminSvc sub2api.AdminService, channelSvc *sub2api.ChannelService, dryRun bool) *DataSyncer {
+	return &DataSyncer{adminSvc: adminSvc, channelSvc: channelSvc, dryRun: dryRun}
 }
 
 // SyncReport summarizes the sync operation results.
@@ -33,13 +34,16 @@ type SyncReport struct {
 	AccountsUpdated  int
 	AccountsDisabled int
 	AccountsSkipped  int
+	ChannelsCreated  int
+	ChannelsSkipped  int
 	Errors           []string
 }
 
 func (r *SyncReport) String() string {
-	return fmt.Sprintf("groups(created=%d updated=%d skipped=%d) accounts(created=%d updated=%d disabled=%d skipped=%d) errors=%d",
+	return fmt.Sprintf("groups(created=%d updated=%d skipped=%d) accounts(created=%d updated=%d disabled=%d skipped=%d) channels(created=%d skipped=%d) errors=%d",
 		r.GroupsCreated, r.GroupsUpdated, r.GroupsSkipped,
 		r.AccountsCreated, r.AccountsUpdated, r.AccountsDisabled, r.AccountsSkipped,
+		r.ChannelsCreated, r.ChannelsSkipped,
 		len(r.Errors))
 }
 
@@ -61,6 +65,9 @@ func (s *DataSyncer) Sync(ctx context.Context, cfg *config.Config) *SyncReport {
 
 	// Phase 2: Sync accounts
 	s.syncAccounts(ctx, mappings, groupIDMap, report)
+
+	// Phase 3: Ensure Channels exist (one per platform, linking Groups)
+	s.syncChannels(ctx, groupSpecs, groupIDMap, report)
 
 	log.Printf("[data-sync] %s", report)
 	return report
@@ -270,6 +277,85 @@ func accountNeedsUpdate(existing *sub2api.Account, mapping *AccountMapping) bool
 		}
 	}
 	return false
+}
+
+// syncChannels creates one Channel per platform, linking all CPA Groups of that platform.
+func (s *DataSyncer) syncChannels(ctx context.Context, specs []GroupSpec, groupIDMap map[string]int64, report *SyncReport) {
+	if s.channelSvc == nil {
+		return
+	}
+
+	// Collect group IDs by platform
+	platformGroups := map[string][]int64{}
+	platformNames := map[string]string{
+		"anthropic": "CPA-Claude",
+		"openai":    "CPA-OpenAI",
+		"gemini":    "CPA-Gemini",
+	}
+	for _, spec := range specs {
+		gid, ok := groupIDMap[spec.Name]
+		if !ok {
+			continue
+		}
+		platformGroups[spec.Platform] = append(platformGroups[spec.Platform], gid)
+	}
+
+	if len(platformGroups) == 0 {
+		return
+	}
+
+	// List existing channels to check for duplicates
+	existingChannels := s.listExistingChannels(ctx)
+
+	for platform, groupIDs := range platformGroups {
+		channelName, ok := platformNames[platform]
+		if !ok {
+			channelName = "CPA-" + platform
+		}
+
+		if s.dryRun {
+			log.Printf("[data-sync][DRY-RUN] would create channel: %s (platform=%s, groups=%d)", channelName, platform, len(groupIDs))
+			report.ChannelsSkipped++
+			continue
+		}
+
+		if _, exists := existingChannels[channelName]; exists {
+			report.ChannelsSkipped++
+			continue
+		}
+
+		_, err := s.channelSvc.Create(ctx, &sub2api.CreateChannelInput{
+			Name:               channelName,
+			Description:        fmt.Sprintf("Auto-synced from CPA (%s platform)", platform),
+			GroupIDs:           groupIDs,
+			BillingModelSource: "requested",
+		})
+		if err != nil {
+			if strings.Contains(err.Error(), "exists") || strings.Contains(err.Error(), "unique") {
+				report.ChannelsSkipped++
+			} else {
+				report.Errors = append(report.Errors, fmt.Sprintf("create channel %s: %v", channelName, err))
+			}
+			continue
+		}
+		report.ChannelsCreated++
+		log.Printf("[data-sync] created channel: %s (platform=%s, groups=%d)", channelName, platform, len(groupIDs))
+	}
+}
+
+func (s *DataSyncer) listExistingChannels(ctx context.Context) map[string]bool {
+	result := map[string]bool{}
+	if s.channelSvc == nil {
+		return result
+	}
+	channels, _, err := s.channelSvc.List(ctx, sub2api.PaginationParams{Page: 1, PageSize: 100}, "", "")
+	if err != nil {
+		return result
+	}
+	for _, ch := range channels {
+		result[ch.Name] = true
+	}
+	return result
 }
 
 // credentialsChanged compares key credential fields (ignores transient metadata).

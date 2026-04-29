@@ -52,7 +52,7 @@ func Start(engine *gin.Engine, cfg config.CommercialConfig, cpaConfig *config.Co
 	// Sync CPA provider/auth data to Sub2API database
 	var syncer *DataSyncer
 	if result.AdminService != nil {
-		syncer = NewDataSyncer(result.AdminService, cfg.SyncDryRun)
+		syncer = NewDataSyncer(result.AdminService, result.ChannelService, cfg.SyncDryRun)
 		if cpaConfig != nil {
 			syncCtx, syncCancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer syncCancel()
