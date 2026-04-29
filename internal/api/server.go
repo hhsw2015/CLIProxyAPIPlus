@@ -1243,16 +1243,35 @@ func (s *Server) SetWebsocketAuthChangeHandler(fn func(bool, bool)) {
 // (management handlers moved to internal/api/handlers/management)
 
 // proxyAuthMiddleware returns auth middleware for proxy routes.
-// In commercial mode (WithCommercialAuthRef), it uses Sub2API's APIKey auth.
-// Otherwise, it falls back to CPA's built-in auth.
+// CPA api-keys always take priority (admin direct access, no billing).
+// Non-CPA keys go through commercial auth (Sub2API) when available.
 func (s *Server) proxyAuthMiddleware() gin.HandlerFunc {
-	cpaAuth := AuthMiddleware(s.accessManager)
 	return func(c *gin.Context) {
+		// 1. CPA api-keys: same behavior as pure CPA mode, zero overhead difference
+		if s.accessManager == nil {
+			c.Next()
+			return
+		}
+		result, err := s.accessManager.Authenticate(c.Request.Context(), c.Request)
+		if err == nil {
+			if result != nil {
+				c.Set("apiKey", result.Principal)
+				c.Set("accessProvider", result.Provider)
+				if len(result.Metadata) > 0 {
+					c.Set("accessMetadata", result.Metadata)
+				}
+			}
+			c.Next()
+			return
+		}
+		// 2. Not a CPA api-key: try commercial auth (Sub2API billing)
 		if s.commercialAuthRef != nil && *s.commercialAuthRef != nil {
 			(*s.commercialAuthRef)(c)
 			return
 		}
-		cpaAuth(c)
+		// 3. No commercial layer: reject with CPA's error
+		statusCode := err.HTTPStatusCode()
+		c.AbortWithStatusJSON(statusCode, gin.H{"error": err.Message})
 	}
 }
 
