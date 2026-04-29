@@ -30,6 +30,7 @@ import (
 func StartService(cfg *config.Config, configPath string, localPassword string) {
 	var commercialLayer *commercial.Layer
 	var commercialAuth gin.HandlerFunc
+	var commercialJWTValidator func(string) bool
 
 	builder := cliproxy.NewBuilder().
 		WithConfig(cfg).
@@ -37,6 +38,7 @@ func StartService(cfg *config.Config, configPath string, localPassword string) {
 		WithLocalManagementPassword(localPassword).
 		WithServerOptions(
 			api.WithCommercialAuthRef(&commercialAuth),
+			api.WithCommercialJWTValidator(&commercialJWTValidator),
 			api.WithRouterConfigurator(func(engine *gin.Engine, baseHandler *handlers.BaseAPIHandler, _ *config.Config) {
 				var err error
 				commercialLayer, err = commercial.Start(engine, cfg.Commercial, cfg, configPath)
@@ -46,6 +48,9 @@ func StartService(cfg *config.Config, configPath string, localPassword string) {
 				}
 				if mw := commercialLayer.AuthMiddleware(); mw != nil {
 					commercialAuth = mw
+				}
+				if jv := commercialLayer.JWTValidator(); jv != nil {
+					commercialJWTValidator = jv
 				}
 				if baseHandler != nil && baseHandler.AuthManager != nil {
 					commercialLayer.StartStatusSync(baseHandler.AuthManager)

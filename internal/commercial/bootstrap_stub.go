@@ -22,5 +22,8 @@ func (l *Layer) AuthMiddleware() gin.HandlerFunc { return nil }
 // StartStatusSync is a no-op when commercial is not enabled.
 func (l *Layer) StartStatusSync(_ *coreauth.Manager) {}
 
+// JWTValidator returns nil when commercial is not enabled.
+func (l *Layer) JWTValidator() func(string) bool { return nil }
+
 // Stop is a no-op.
 func (l *Layer) Stop() {}

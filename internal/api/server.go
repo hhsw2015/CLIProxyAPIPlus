@@ -58,7 +58,8 @@ type serverOptionConfig struct {
 	keepAliveTimeout     time.Duration
 	keepAliveOnTimeout   func()
 	postAuthHook         auth.PostAuthHook
-	commercialAuthRef *gin.HandlerFunc
+	commercialAuthRef          *gin.HandlerFunc
+	commercialJWTValidatorRef  *func(string) bool
 }
 
 // ServerOption customises HTTP server construction.
@@ -130,6 +131,14 @@ func WithPostAuthHook(hook auth.PostAuthHook) ServerOption {
 func WithCommercialAuthRef(ref *gin.HandlerFunc) ServerOption {
 	return func(cfg *serverOptionConfig) {
 		cfg.commercialAuthRef = ref
+	}
+}
+
+// WithCommercialJWTValidator provides a pointer to a JWT validator that will be
+// populated after commercial layer init. Management endpoints accept valid admin JWTs.
+func WithCommercialJWTValidator(ref *func(string) bool) ServerOption {
+	return func(cfg *serverOptionConfig) {
+		cfg.commercialJWTValidatorRef = ref
 	}
 }
 
@@ -315,6 +324,15 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	}
 	s.localPassword = optionState.localPassword
 	s.commercialAuthRef = optionState.commercialAuthRef
+	if optionState.commercialJWTValidatorRef != nil {
+		s.mgmt.SetCommercialJWTValidator(func(token string) bool {
+			fn := *optionState.commercialJWTValidatorRef
+			if fn == nil {
+				return false
+			}
+			return fn(token)
+		})
+	}
 
 	// Setup routes
 	s.setupRoutes()

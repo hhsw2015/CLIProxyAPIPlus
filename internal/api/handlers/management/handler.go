@@ -51,6 +51,8 @@ type Handler struct {
 	postAuthHook        coreauth.PostAuthHook
 	poolStatsProvider   func() any
 	integrationMgr      *integration.Manager
+	// commercialJWTValidator validates a Sub2API JWT token and returns true if admin.
+	commercialJWTValidator func(token string) bool
 }
 
 // NewHandler creates a new management handler instance.
@@ -163,6 +165,12 @@ func (h *Handler) SetPostAuthHook(hook coreauth.PostAuthHook) {
 	h.postAuthHook = hook
 }
 
+// SetCommercialJWTValidator sets a function that validates Sub2API JWT tokens.
+// When set, management endpoints accept valid admin JWTs as authentication.
+func (h *Handler) SetCommercialJWTValidator(fn func(token string) bool) {
+	h.commercialJWTValidator = fn
+}
+
 // Middleware enforces access control for management endpoints.
 // All requests (local and remote) require a valid management key.
 // Additionally, remote access requires allow-remote-management=true.
@@ -239,6 +247,13 @@ func (h *Handler) AuthenticateManagementKey(clientIP string, localClient bool, p
 
 	if !localClient && !allowRemote {
 		return false, http.StatusForbidden, "remote management disabled"
+	}
+
+	// Commercial SSO: accept valid Sub2API admin JWT
+	if provided != "" && h.commercialJWTValidator != nil && strings.Count(provided, ".") == 2 {
+		if h.commercialJWTValidator(provided) {
+			return true, 0, ""
+		}
 	}
 
 	fail := func() {

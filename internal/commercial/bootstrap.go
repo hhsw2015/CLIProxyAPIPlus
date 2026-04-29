@@ -19,11 +19,12 @@ import (
 
 // Layer represents the commercial layer lifecycle.
 type Layer struct {
-	cleanup        func()
-	authMiddleware gin.HandlerFunc
-	syncer         *DataSyncer
-	configPath     string
-	stopStatusSync chan struct{}
+	cleanup          func()
+	authMiddleware   gin.HandlerFunc
+	syncer           *DataSyncer
+	configPath       string
+	stopStatusSync   chan struct{}
+	validateAdminJWT func(token string) bool
 }
 
 // Start initializes the commercial layer and mounts routes on the engine.
@@ -67,10 +68,11 @@ func Start(engine *gin.Engine, cfg config.CommercialConfig, cpaConfig *config.Co
 	}
 
 	return &Layer{
-		cleanup:        result.Cleanup,
-		authMiddleware: WrapAuthMiddleware(result.APIKeyAuthMiddleware),
-		syncer:         syncer,
-		configPath:     configPath,
+		cleanup:          result.Cleanup,
+		authMiddleware:   WrapAuthMiddleware(result.APIKeyAuthMiddleware),
+		syncer:           syncer,
+		configPath:       configPath,
+		validateAdminJWT: result.ValidateAdminJWT,
 	}, nil
 }
 
@@ -80,6 +82,14 @@ func (l *Layer) AuthMiddleware() gin.HandlerFunc {
 		return nil
 	}
 	return l.authMiddleware
+}
+
+// JWTValidator returns a function that validates Sub2API admin JWTs.
+func (l *Layer) JWTValidator() func(string) bool {
+	if l == nil {
+		return nil
+	}
+	return l.validateAdminJWT
 }
 
 // StartStatusSync begins periodic sync of CPA auth status to Sub2API database.
