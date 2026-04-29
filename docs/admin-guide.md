@@ -181,6 +181,10 @@ tail -f ~/CLIProxyAPIPlus-new/cpa-new.log
 
 ## 常见问题
 
+### Q: 开启商业层后，我自己的 CPA api-key 还能用吗？
+
+**可以。** CPA 配置文件中的 `api-keys` 永远优先。无论商业层开不开，你的 api-key 都直接放行，不走计费。商业层只影响 Sub2API 注册用户的 API Key。
+
 ### Q: 用户请求返回 401
 
 **原因**: API Key 无效、过期、或未分配到有效分组。
