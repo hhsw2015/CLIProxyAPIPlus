@@ -29,18 +29,29 @@ import (
 //   - localPassword: Optional password accepted for local management requests
 func StartService(cfg *config.Config, configPath string, localPassword string) {
 	var commercialLayer *commercial.Layer
+	var commercialAuth gin.HandlerFunc
 
 	builder := cliproxy.NewBuilder().
 		WithConfig(cfg).
 		WithConfigPath(configPath).
 		WithLocalManagementPassword(localPassword).
-		WithServerOptions(api.WithRouterConfigurator(func(engine *gin.Engine, _ *handlers.BaseAPIHandler, _ *config.Config) {
-			var err error
-			commercialLayer, err = commercial.Start(engine, cfg.Commercial)
-			if err != nil {
-				log.Errorf("commercial layer failed to start: %v", err)
-			}
-		}))
+		WithServerOptions(
+			api.WithCommercialAuthRef(&commercialAuth),
+			api.WithRouterConfigurator(func(engine *gin.Engine, baseHandler *handlers.BaseAPIHandler, _ *config.Config) {
+				var err error
+				commercialLayer, err = commercial.Start(engine, cfg.Commercial, cfg, configPath)
+				if err != nil {
+					log.Errorf("commercial layer failed to start: %v", err)
+					return
+				}
+				if mw := commercialLayer.AuthMiddleware(); mw != nil {
+					commercialAuth = mw
+				}
+				if baseHandler != nil && baseHandler.AuthManager != nil {
+					commercialLayer.StartStatusSync(baseHandler.AuthManager)
+				}
+			}),
+		)
 
 	ctxSignal, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
