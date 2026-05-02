@@ -251,6 +251,8 @@ func (h *Handler) AuthenticateManagementKey(clientIP string, localClient bool, p
 		if h.commercialJWTValidator(provided) {
 			return true, 0, ""
 		}
+		// JWT format but validation failed: don't count as password attempt, just reject
+		return false, http.StatusUnauthorized, "invalid token"
 	}
 
 	fail := func() {
