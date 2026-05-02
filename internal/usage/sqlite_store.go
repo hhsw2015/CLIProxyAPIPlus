@@ -3,6 +3,7 @@ package usage
 import (
 	"fmt"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -122,7 +123,26 @@ func (s *SQLiteStore) Record(r UsageRecord) {
 func (s *SQLiteStore) calculateCost(r UsageRecord) float64 {
 	var price ModelPrice
 	if err := s.db.Where("model = ?", r.Model).First(&price).Error; err != nil {
-		return 0
+		// Try fuzzy match: claude-opus-4-7 → claude-opus-4.7
+		normalized := strings.ReplaceAll(r.Model, "-", ".")
+		if err := s.db.Where("REPLACE(model, '-', '.') = ?", normalized).First(&price).Error; err != nil {
+			// Try stripping date suffix: claude-opus-4-7-20250514 → claude-opus-4.7
+			parts := strings.Split(r.Model, "-")
+			if len(parts) > 1 {
+				last := parts[len(parts)-1]
+				if len(last) == 8 && last[0] >= '2' {
+					trimmed := strings.Join(parts[:len(parts)-1], "-")
+					normalized = strings.ReplaceAll(trimmed, "-", ".")
+					if err := s.db.Where("REPLACE(model, '-', '.') = ?", normalized).First(&price).Error; err != nil {
+						return 0
+					}
+				} else {
+					return 0
+				}
+			} else {
+				return 0
+			}
+		}
 	}
 	inputCost := float64(r.InputTokens) * price.InputPricePer1M / 1_000_000
 	outputCost := float64(r.OutputTokens+r.ReasoningTokens) * price.OutputPricePer1M / 1_000_000
