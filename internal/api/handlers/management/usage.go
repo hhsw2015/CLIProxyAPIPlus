@@ -88,6 +88,37 @@ func (h *Handler) GetUsageHistory(c *gin.Context) {
 	})
 }
 
+// GetUsagePricing returns model pricing settings from SQLite.
+func (h *Handler) GetUsagePricing(c *gin.Context) {
+	store := usage.GetSQLiteStore()
+	if store == nil {
+		c.JSON(http.StatusOK, gin.H{"prices": []any{}})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"prices": store.GetModelPrices()})
+}
+
+// SetUsagePricing updates a model's pricing.
+func (h *Handler) SetUsagePricing(c *gin.Context) {
+	store := usage.GetSQLiteStore()
+	if store == nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "usage persistence not enabled"})
+		return
+	}
+	var req struct {
+		Model          string  `json:"model"`
+		InputPer1M     float64 `json:"input_price_per_1m"`
+		OutputPer1M    float64 `json:"output_price_per_1m"`
+		CacheReadPer1M float64 `json:"cache_read_price_per_1m"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil || req.Model == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
+		return
+	}
+	store.SetModelPrice(req.Model, req.InputPer1M, req.OutputPer1M, req.CacheReadPer1M)
+	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
 // ImportUsageStatistics merges a previously exported usage snapshot into memory.
 func (h *Handler) ImportUsageStatistics(c *gin.Context) {
 	if h == nil || h.usageStats == nil {
