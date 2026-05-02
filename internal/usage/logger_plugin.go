@@ -28,6 +28,14 @@ func init() {
 // GetLoggerPlugin returns the default logger plugin instance.
 func GetLoggerPlugin() *LoggerPlugin { return defaultLoggerPlugin }
 
+// GetSQLiteStore returns the SQLite store if configured, or nil.
+func GetSQLiteStore() *SQLiteStore {
+	if defaultLoggerPlugin != nil {
+		return defaultLoggerPlugin.sqliteStore
+	}
+	return nil
+}
+
 // LoggerPlugin collects in-memory request statistics for usage analysis.
 // It implements coreusage.Plugin to receive usage records emitted by the runtime.
 type LoggerPlugin struct {

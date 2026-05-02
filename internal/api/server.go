@@ -624,6 +624,7 @@ func (s *Server) registerManagementRoutes() {
 	{
 		mgmt.GET("/health", s.mgmt.GetHealthScore)
 		mgmt.GET("/usage", s.mgmt.GetUsageStatistics)
+		mgmt.GET("/usage/history", s.mgmt.GetUsageHistory)
 		mgmt.GET("/usage/export", s.mgmt.ExportUsageStatistics)
 		mgmt.POST("/usage/import", s.mgmt.ImportUsageStatistics)
 		mgmt.GET("/auth-index", s.mgmt.GetAuthByIndex)

@@ -130,6 +130,148 @@ func (s *SQLiteStore) cleanupLoop() {
 	}
 }
 
+// QuerySummary returns aggregated usage statistics from SQLite.
+func (s *SQLiteStore) QuerySummary(since time.Time) map[string]any {
+	if s.db == nil {
+		return nil
+	}
+
+	type summaryRow struct {
+		TotalRequests   int64
+		FailedRequests  int64
+		TotalInput      int64
+		TotalOutput     int64
+		TotalReasoning  int64
+		TotalCached     int64
+		TotalTokens     int64
+		AvgLatency      float64
+	}
+
+	var row summaryRow
+	s.db.Model(&UsageRecord{}).
+		Where("timestamp >= ?", since).
+		Select(`
+			COUNT(*) as total_requests,
+			SUM(CASE WHEN failed = 1 THEN 1 ELSE 0 END) as failed_requests,
+			COALESCE(SUM(input_tokens), 0) as total_input,
+			COALESCE(SUM(output_tokens), 0) as total_output,
+			COALESCE(SUM(reasoning_tokens), 0) as total_reasoning,
+			COALESCE(SUM(cached_tokens), 0) as total_cached,
+			COALESCE(SUM(total_tokens), 0) as total_tokens,
+			COALESCE(AVG(latency_ms), 0) as avg_latency
+		`).Scan(&row)
+
+	return map[string]any{
+		"total_requests":   row.TotalRequests,
+		"failed_requests":  row.FailedRequests,
+		"total_input":      row.TotalInput,
+		"total_output":     row.TotalOutput,
+		"total_reasoning":  row.TotalReasoning,
+		"total_cached":     row.TotalCached,
+		"total_tokens":     row.TotalTokens,
+		"avg_latency_ms":   row.AvgLatency,
+	}
+}
+
+// QueryByModel returns per-model aggregated stats.
+func (s *SQLiteStore) QueryByModel(since time.Time, limit int) []map[string]any {
+	if s.db == nil {
+		return nil
+	}
+	if limit <= 0 {
+		limit = 20
+	}
+
+	type modelRow struct {
+		Model        string
+		Requests     int64
+		Failed       int64
+		InputTokens  int64
+		OutputTokens int64
+		TotalTokens  int64
+		AvgLatency   float64
+	}
+
+	var rows []modelRow
+	s.db.Model(&UsageRecord{}).
+		Where("timestamp >= ?", since).
+		Select(`
+			model,
+			COUNT(*) as requests,
+			SUM(CASE WHEN failed = 1 THEN 1 ELSE 0 END) as failed,
+			COALESCE(SUM(input_tokens), 0) as input_tokens,
+			COALESCE(SUM(output_tokens), 0) as output_tokens,
+			COALESCE(SUM(total_tokens), 0) as total_tokens,
+			COALESCE(AVG(latency_ms), 0) as avg_latency
+		`).
+		Group("model").
+		Order("requests DESC").
+		Limit(limit).
+		Scan(&rows)
+
+	result := make([]map[string]any, len(rows))
+	for i, r := range rows {
+		result[i] = map[string]any{
+			"model":         r.Model,
+			"requests":      r.Requests,
+			"failed":        r.Failed,
+			"input_tokens":  r.InputTokens,
+			"output_tokens": r.OutputTokens,
+			"total_tokens":  r.TotalTokens,
+			"avg_latency_ms": r.AvgLatency,
+		}
+	}
+	return result
+}
+
+// QueryDaily returns daily aggregated stats.
+func (s *SQLiteStore) QueryDaily(since time.Time) []map[string]any {
+	if s.db == nil {
+		return nil
+	}
+
+	type dailyRow struct {
+		Day          string
+		Requests     int64
+		Failed       int64
+		TotalTokens  int64
+	}
+
+	var rows []dailyRow
+	s.db.Model(&UsageRecord{}).
+		Where("timestamp >= ?", since).
+		Select(`
+			DATE(timestamp) as day,
+			COUNT(*) as requests,
+			SUM(CASE WHEN failed = 1 THEN 1 ELSE 0 END) as failed,
+			COALESCE(SUM(total_tokens), 0) as total_tokens
+		`).
+		Group("day").
+		Order("day ASC").
+		Scan(&rows)
+
+	result := make([]map[string]any, len(rows))
+	for i, r := range rows {
+		result[i] = map[string]any{
+			"day":          r.Day,
+			"requests":     r.Requests,
+			"failed":       r.Failed,
+			"total_tokens": r.TotalTokens,
+		}
+	}
+	return result
+}
+
+// RecordCount returns total record count in SQLite.
+func (s *SQLiteStore) RecordCount() int64 {
+	if s.db == nil {
+		return 0
+	}
+	var count int64
+	s.db.Model(&UsageRecord{}).Count(&count)
+	return count
+}
+
 func (s *SQLiteStore) cleanup() {
 	if s.retentionDays <= 0 {
 		return
