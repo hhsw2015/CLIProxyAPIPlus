@@ -12,6 +12,9 @@ import (
 // statistics and infrastructure metrics.
 func (h *Handler) GetHealthScore(c *gin.Context) {
 	var snap usage.StatisticsSnapshot
+	if h != nil && h.usageStats != nil {
+		snap = h.usageStats.Snapshot()
+	}
 	metrics := usage.HealthMetricsFromSnapshot(snap)
 	score := usage.ComputeHealthScore(metrics)
 

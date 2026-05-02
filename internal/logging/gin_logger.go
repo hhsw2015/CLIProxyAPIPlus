@@ -6,6 +6,8 @@ package logging
 import (
 	"errors"
 	"fmt"
+
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	"net/http"
 	"runtime/debug"
 	"strings"
@@ -87,7 +89,12 @@ func GinLogrusLogger() gin.HandlerFunc {
 		if requestID == "" {
 			requestID = "--------"
 		}
-		logLine := fmt.Sprintf("%3d | %13v | %15s | %-7s \"%s\"", statusCode, latency, clientIP, method, path)
+		provider := usage.GetGinProvider(c)
+		providerPart := ""
+		if provider != "" {
+			providerPart = fmt.Sprintf(" | %-12s", provider)
+		}
+		logLine := fmt.Sprintf("%3d%s | %13v | %15s | %-7s \"%s\"", statusCode, providerPart, latency, clientIP, method, path)
 		if creditsUsed(c) {
 			logLine += " [credits]"
 		}

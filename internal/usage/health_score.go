@@ -6,27 +6,6 @@ import (
 	"time"
 )
 
-// StatisticsSnapshot is a minimal representation of usage statistics
-// for health score calculation. The full implementation was removed upstream.
-type StatisticsSnapshot struct {
-	TotalRequests int64
-	SuccessCount  int64
-	FailureCount  int64
-	APIs          map[string]*APIStats
-}
-
-type APIStats struct {
-	Models map[string]*ModelStats
-}
-
-type ModelStats struct {
-	Details []RequestDetail
-}
-
-type RequestDetail struct {
-	LatencyMs int64
-}
-
 // HealthMetrics contains the inputs for health score computation.
 type HealthMetrics struct {
 	TotalRequests int64
