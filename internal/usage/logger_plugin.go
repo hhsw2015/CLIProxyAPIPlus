@@ -17,22 +17,33 @@ import (
 
 var statisticsEnabled atomic.Bool
 
+var defaultLoggerPlugin *LoggerPlugin
+
 func init() {
 	statisticsEnabled.Store(true)
-	coreusage.RegisterPlugin(NewLoggerPlugin())
+	defaultLoggerPlugin = NewLoggerPlugin()
+	coreusage.RegisterPlugin(defaultLoggerPlugin)
 }
+
+// GetLoggerPlugin returns the default logger plugin instance.
+func GetLoggerPlugin() *LoggerPlugin { return defaultLoggerPlugin }
 
 // LoggerPlugin collects in-memory request statistics for usage analysis.
 // It implements coreusage.Plugin to receive usage records emitted by the runtime.
 type LoggerPlugin struct {
-	stats *RequestStatistics
+	stats       *RequestStatistics
+	sqliteStore *SQLiteStore
 }
 
 // NewLoggerPlugin constructs a new logger plugin instance.
-//
-// Returns:
-//   - *LoggerPlugin: A new logger plugin instance wired to the shared statistics store.
 func NewLoggerPlugin() *LoggerPlugin { return &LoggerPlugin{stats: defaultRequestStatistics} }
+
+// SetSQLiteStore attaches a SQLite persistence store to the logger plugin.
+func (p *LoggerPlugin) SetSQLiteStore(store *SQLiteStore) {
+	if p != nil {
+		p.sqliteStore = store
+	}
+}
 
 const ginProviderKey = "__provider__"
 
@@ -56,6 +67,26 @@ func (p *LoggerPlugin) HandleUsage(ctx context.Context, record coreusage.Record)
 		}
 	}
 	p.stats.Record(ctx, record)
+
+	// Persist to SQLite (admin api-key traffic only)
+	if p.sqliteStore != nil && p.sqliteStore.IsAdminKey(record.APIKey) {
+		eventKey := fmt.Sprintf("%s:%s:%s:%d", record.AuthID, record.Model, record.Provider, record.RequestedAt.UnixNano())
+		p.sqliteStore.Record(UsageRecord{
+			EventKey:        eventKey,
+			Model:           record.Model,
+			Timestamp:       record.RequestedAt,
+			Source:          record.Source,
+			AuthIndex:       record.AuthIndex,
+			Provider:        record.Provider,
+			Failed:          record.Failed,
+			LatencyMS:       record.Latency.Milliseconds(),
+			InputTokens:     record.Detail.InputTokens,
+			OutputTokens:    record.Detail.OutputTokens,
+			ReasoningTokens: record.Detail.ReasoningTokens,
+			CachedTokens:    record.Detail.CachedTokens,
+			TotalTokens:     record.Detail.TotalTokens,
+		})
+	}
 }
 
 // GetGinProvider returns the provider name stored in the gin context, or empty string.

@@ -70,6 +70,9 @@ type Config struct {
 	// UsageStatisticsEnabled toggles in-memory usage aggregation; when false, usage data is discarded.
 	UsageStatisticsEnabled bool `yaml:"usage-statistics-enabled" json:"usage-statistics-enabled"`
 
+	// UsagePersistence controls SQLite-based persistent storage of admin usage data.
+	UsagePersistence UsagePersistenceConfig `yaml:"usage-persistence" json:"usage-persistence"`
+
 	// DisableCooling disables quota cooldown scheduling when true.
 	DisableCooling bool `yaml:"disable-cooling" json:"disable-cooling"`
 
@@ -225,6 +228,13 @@ type CommercialConfig struct {
 	Enabled    bool           `yaml:"enabled" json:"enabled"`
 	SyncDryRun bool           `yaml:"sync-dry-run" json:"sync-dry-run"`
 	Sub2API    map[string]any `yaml:"sub2api" json:"sub2api"`
+}
+
+// UsagePersistenceConfig controls SQLite-based usage data persistence for admin traffic.
+type UsagePersistenceConfig struct {
+	Enabled       bool   `yaml:"enabled" json:"enabled"`
+	SQLitePath    string `yaml:"sqlite-path" json:"sqlite-path"`
+	RetentionDays int    `yaml:"retention-days" json:"retention-days"`
 }
 
 // PprofConfig holds pprof HTTP server settings.
