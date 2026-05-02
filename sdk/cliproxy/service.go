@@ -21,7 +21,7 @@ import (
 	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/redisqueue"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor"
-	internalusage "github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/watcher"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/wsrelay"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v6/sdk/access"
@@ -93,8 +93,6 @@ type Service struct {
 	// accessManager handles request authentication providers.
 	accessManager *sdkaccess.Manager
 
-	// usageStats allows tests and future integrations to provide a dedicated usage statistics source.
-	usageStats *internalusage.RequestStatistics
 
 	// coreManager handles core authentication and execution.
 	coreManager *coreauth.Manager
@@ -2016,7 +2014,7 @@ func (s *Service) logPoolEvaluation() {
 		return
 	}
 	poolSnapshot := s.poolMetricsSnapshotCurrent()
-	usageSnapshot := s.usageStatistics().Snapshot()
+	var usageSnapshot usage.StatisticsSnapshot
 	successRate := 0.0
 	if usageSnapshot.TotalRequests > 0 {
 		successRate = float64(usageSnapshot.SuccessCount) * 100 / float64(usageSnapshot.TotalRequests)
@@ -2040,12 +2038,6 @@ func (s *Service) logPoolEvaluation() {
 	)
 }
 
-func (s *Service) usageStatistics() *internalusage.RequestStatistics {
-	if s != nil && s.usageStats != nil {
-		return s.usageStats
-	}
-	return internalusage.GetRequestStatistics()
-}
 
 func (s *Service) runPoolEvalCycle(now time.Time) {
 	if s == nil || s.poolManager == nil || s.poolMetrics == nil || !s.poolManager.Enabled() {
@@ -2056,7 +2048,7 @@ func (s *Service) runPoolEvalCycle(now time.Time) {
 	}
 
 	poolSnapshot := s.poolMetricsSnapshotCurrent()
-	usageSnapshot := s.usageStatistics().Snapshot()
+	var usageSnapshot usage.StatisticsSnapshot
 	current := &poolEvalWindowSnapshot{
 		At:                 now,
 		TotalRequests:      usageSnapshot.TotalRequests,

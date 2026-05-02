@@ -335,7 +335,8 @@ func (e *GeminiVertexExecutor) executeWithServiceAccount(ctx context.Context, au
 
 		body = fixGeminiImageAspectRatio(baseModel, body)
 		requestedModel := helps.PayloadRequestedModel(opts, req.Model)
-		body = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", body, originalTranslated, requestedModel)
+		requestPath := helps.PayloadRequestPath(opts)
+		body = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", body, originalTranslated, requestedModel, requestPath)
 		body, _ = sjson.SetBytes(body, "model", baseModel)
 	}
 
@@ -491,7 +492,8 @@ func (e *GeminiVertexExecutor) executeWithAPIKey(ctx context.Context, auth *clip
 
 	body = fixGeminiImageAspectRatio(baseModel, body)
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
-	body = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", body, originalTranslated, requestedModel)
+	requestPath := helps.PayloadRequestPath(opts)
+	body = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", body, originalTranslated, requestedModel, requestPath)
 	body, _ = sjson.SetBytes(body, "model", baseModel)
 
 	action := getVertexAction(baseModel, false)
@@ -601,7 +603,8 @@ func (e *GeminiVertexExecutor) executeStreamWithServiceAccount(ctx context.Conte
 
 	body = fixGeminiImageAspectRatio(baseModel, body)
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
-	body = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", body, originalTranslated, requestedModel)
+	requestPath := helps.PayloadRequestPath(opts)
+	body = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", body, originalTranslated, requestedModel, requestPath)
 	body, _ = sjson.SetBytes(body, "model", baseModel)
 
 	action := getVertexAction(baseModel, true)
@@ -730,7 +733,8 @@ func (e *GeminiVertexExecutor) executeStreamWithAPIKey(ctx context.Context, auth
 
 	body = fixGeminiImageAspectRatio(baseModel, body)
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
-	body = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", body, originalTranslated, requestedModel)
+	requestPath := helps.PayloadRequestPath(opts)
+	body = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", body, originalTranslated, requestedModel, requestPath)
 	body, _ = sjson.SetBytes(body, "model", baseModel)
 
 	action := getVertexAction(baseModel, true)
