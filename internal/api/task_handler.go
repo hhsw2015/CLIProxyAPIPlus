@@ -12,7 +12,6 @@ import (
 	"github.com/gin-gonic/gin"
 	log "github.com/sirupsen/logrus"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 )
 
 // taskRegistry maps platform names to their adaptors.
@@ -594,12 +593,10 @@ func (s *Server) pollTaskUntilDone(taskID string) {
 
 		if info.Status == TaskStatusSuccess {
 			log.Infof("task completed (dedicated): %s url=%s", taskID, info.URL)
-			usage.GetRequestStatistics().RecordMedia("", task.Model, "video", 1, false, time.Since(task.CreatedAt))
 			return
 		}
 		if info.Status == TaskStatusFailure {
 			log.Warnf("task failed (dedicated): %s reason=%s", taskID, info.Reason)
-			usage.GetRequestStatistics().RecordMedia("", task.Model, "video", 0, true, time.Since(task.CreatedAt))
 			return
 		}
 
