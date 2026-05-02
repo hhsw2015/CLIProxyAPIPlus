@@ -334,6 +334,24 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 		})
 	}
 
+	// Initialize SQLite usage persistence (admin traffic only)
+	if cfg.UsagePersistence.Enabled {
+		dbPath := cfg.UsagePersistence.SQLitePath
+		if dbPath == "" {
+			dbPath = filepath.Join(filepath.Dir(configFilePath), "data", "usage.db")
+		}
+		if dir := filepath.Dir(dbPath); dir != "" && dir != "." {
+			os.MkdirAll(dir, 0755)
+		}
+		store, err := usage.NewSQLiteStore(dbPath, cfg.APIKeys, cfg.UsagePersistence.RetentionDays)
+		if err != nil {
+			log.Warnf("usage persistence disabled: %v", err)
+		} else {
+			usage.GetLoggerPlugin().SetSQLiteStore(store)
+			log.Infof("usage persistence enabled: %s", dbPath)
+		}
+	}
+
 	// Setup routes
 	s.setupRoutes()
 
