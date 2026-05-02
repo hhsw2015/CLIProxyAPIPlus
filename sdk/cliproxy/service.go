@@ -21,7 +21,7 @@ import (
 	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/redisqueue"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
+	internalusage "github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/watcher"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/wsrelay"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v6/sdk/access"
@@ -93,6 +93,9 @@ type Service struct {
 	// accessManager handles request authentication providers.
 	accessManager *sdkaccess.Manager
 
+
+	// usageStats tracks request usage statistics.
+	usageStats *internalusage.RequestStatistics
 
 	// coreManager handles core authentication and execution.
 	coreManager *coreauth.Manager
@@ -2014,7 +2017,7 @@ func (s *Service) logPoolEvaluation() {
 		return
 	}
 	poolSnapshot := s.poolMetricsSnapshotCurrent()
-	var usageSnapshot usage.StatisticsSnapshot
+	usageSnapshot := s.usageStatistics().Snapshot()
 	successRate := 0.0
 	if usageSnapshot.TotalRequests > 0 {
 		successRate = float64(usageSnapshot.SuccessCount) * 100 / float64(usageSnapshot.TotalRequests)
@@ -2048,7 +2051,7 @@ func (s *Service) runPoolEvalCycle(now time.Time) {
 	}
 
 	poolSnapshot := s.poolMetricsSnapshotCurrent()
-	var usageSnapshot usage.StatisticsSnapshot
+	usageSnapshot := s.usageStatistics().Snapshot()
 	current := &poolEvalWindowSnapshot{
 		At:                 now,
 		TotalRequests:      usageSnapshot.TotalRequests,
@@ -3948,4 +3951,11 @@ func generateKiroAgenticVariants(models []*ModelInfo) []*ModelInfo {
 	}
 
 	return result
+}
+
+func (s *Service) usageStatistics() *internalusage.RequestStatistics {
+	if s != nil && s.usageStats != nil {
+		return s.usageStats
+	}
+	return internalusage.GetRequestStatistics()
 }

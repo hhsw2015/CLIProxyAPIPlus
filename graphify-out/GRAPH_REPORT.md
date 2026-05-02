@@ -1,7 +1,7 @@
-# Graph Report - .  (2026-04-30)
+# Graph Report - .  (2026-05-02)
 
 ## Corpus Check
-- 721 files · ~945,554 words
+- 727 files · ~947,907 words
 - Verdict: corpus is large enough that graph structure adds value.
 
 ## Summary
@@ -23,21 +23,21 @@
 
 ## Surprising Connections (you probably didn't know these)
 - `fetchAccounts()` --calls--> `request()`  [EXTRACTED]
-  temp/apitest/frontend/src/api.ts → temp/apitest/frontend/src/api.ts  _Bridges community 1 → community 2_
+  temp/apitest/frontend/src/api.ts → temp/apitest/frontend/src/api.ts  _Bridges community 0 → community 5_
 
 ## Communities
 
 ### Community 0 - "Community 0"
+Cohesion: 0.38
+Nodes (9): batchHealthCheck(), bulkDeleteAccounts(), deleteAccount(), deleteDuplicates(), detectDuplicates(), login(), logout(), request() (+1 more)
+
+### Community 1 - "Community 1"
 Cohesion: 0.22
 Nodes (0): 
 
-### Community 1 - "Community 1"
-Cohesion: 0.29
-Nodes (7): batchHealthCheck(), bulkDeleteAccounts(), deleteAccount(), deleteDuplicates(), detectDuplicates(), login(), request()
-
 ### Community 2 - "Community 2"
-Cohesion: 0.5
-Nodes (4): buildQueryString(), fetchAccounts(), logout(), testAccount()
+Cohesion: 0.67
+Nodes (0): 
 
 ### Community 3 - "Community 3"
 Cohesion: 0.67
@@ -48,8 +48,8 @@ Cohesion: 0.67
 Nodes (0): 
 
 ### Community 5 - "Community 5"
-Cohesion: 0.67
-Nodes (0): 
+Cohesion: 1.0
+Nodes (2): buildQueryString(), fetchAccounts()
 
 ### Community 6 - "Community 6"
 Cohesion: 1.0
@@ -68,6 +68,8 @@ Cohesion: 1.0
 Nodes (0): 
 
 ## Knowledge Gaps
+- **Thin community `Community 5`** (2 nodes): `buildQueryString()`, `fetchAccounts()`
+  Too small to be a meaningful cluster - may be noise or needs more connections extracted.
 - **Thin community `Community 6`** (2 nodes): `LoginPanel.tsx`, `LoginPanel()`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
 - **Thin community `Community 7`** (2 nodes): `BulkDeleteModal.tsx`, `BulkDeleteModal()`
@@ -80,7 +82,7 @@ Nodes (0):
 ## Suggested Questions
 _Questions this graph is uniquely positioned to answer:_
 
-- **Why does `request()` connect `Community 1` to `Community 2`?**
+- **Why does `request()` connect `Community 0` to `Community 5`?**
   _High betweenness centrality (0.029) - this node is a cross-community bridge._
-- **Why does `fetchAccounts()` connect `Community 2` to `Community 1`?**
+- **Why does `fetchAccounts()` connect `Community 5` to `Community 0`?**
   _High betweenness centrality (0.001) - this node is a cross-community bridge._

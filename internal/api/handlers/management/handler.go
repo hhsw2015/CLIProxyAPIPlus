@@ -16,6 +16,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/buildinfo"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/integration"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v6/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	"golang.org/x/crypto/bcrypt"
@@ -47,6 +48,7 @@ type Handler struct {
 	envSecret           string
 	logDir              string
 	postAuthHook        coreauth.PostAuthHook
+	usageStats          *usage.RequestStatistics
 	poolStatsProvider   func() any
 	integrationMgr      *integration.Manager
 	// commercialJWTValidator validates a Sub2API JWT token and returns true if admin.
@@ -133,6 +135,9 @@ func (h *Handler) SetAuthManager(manager *coreauth.Manager) {
 	h.authManager = manager
 	h.mu.Unlock()
 }
+
+// SetUsageStatistics allows replacing the usage statistics reference.
+func (h *Handler) SetUsageStatistics(stats *usage.RequestStatistics) { h.usageStats = stats }
 
 // SetPoolStatisticsProvider registers an optional runtime pool metrics provider.
 func (h *Handler) SetPoolStatisticsProvider(provider func() any) { h.poolStatsProvider = provider }
