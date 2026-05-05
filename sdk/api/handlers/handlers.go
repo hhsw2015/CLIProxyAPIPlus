@@ -585,7 +585,7 @@ func (h *BaseAPIHandler) ExecuteWithAuthManager(ctx context.Context, handlerType
 	if callback := h.combinedSelectedAuthCallback(ctx); callback != nil {
 		reqMeta[coreexecutor.SelectedAuthCallbackMetadataKey] = callback
 	}
-	reqMeta[coreexecutor.RequestedModelMetadataKey] = normalizedModel
+	reqMeta[coreexecutor.RequestedModelMetadataKey] = modelName
 	payload := rawJSON
 	if len(payload) == 0 {
 		payload = nil
@@ -636,7 +636,7 @@ func (h *BaseAPIHandler) ExecuteCountWithAuthManager(ctx context.Context, handle
 	if callback := h.combinedSelectedAuthCallback(ctx); callback != nil {
 		reqMeta[coreexecutor.SelectedAuthCallbackMetadataKey] = callback
 	}
-	reqMeta[coreexecutor.RequestedModelMetadataKey] = normalizedModel
+	reqMeta[coreexecutor.RequestedModelMetadataKey] = modelName
 	payload := rawJSON
 	if len(payload) == 0 {
 		payload = nil
@@ -691,7 +691,7 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 	if callback := h.combinedSelectedAuthCallback(ctx); callback != nil {
 		reqMeta[coreexecutor.SelectedAuthCallbackMetadataKey] = callback
 	}
-	reqMeta[coreexecutor.RequestedModelMetadataKey] = normalizedModel
+	reqMeta[coreexecutor.RequestedModelMetadataKey] = modelName
 	payload := rawJSON
 	if len(payload) == 0 {
 		payload = nil
