@@ -7,53 +7,92 @@ import (
 	"testing"
 
 	"github.com/gin-gonic/gin"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/redisqueue"
 )
 
-func TestGetUsageStatistics_IncludesPoolMetrics(t *testing.T) {
-	t.Setenv("MANAGEMENT_PASSWORD", "")
+func TestGetUsageQueuePopsRequestedRecords(t *testing.T) {
 	gin.SetMode(gin.TestMode)
+	withManagementUsageQueue(t, func() {
+		redisqueue.Enqueue([]byte(`{"id":1}`))
+		redisqueue.Enqueue([]byte(`{"id":2}`))
+		redisqueue.Enqueue([]byte(`{"id":3}`))
 
-	stats := usage.NewRequestStatistics()
-	h := &Handler{usageStats: stats}
-	h.SetPoolStatisticsProvider(func() any {
-		return map[string]any{
-			"enabled":       true,
-			"provider":      "codex",
-			"target_size":   100,
-			"active_count":  96,
-			"reserve_count": 2048,
-			"limit_count":   31,
-			"underfilled":   true,
+		rec := httptest.NewRecorder()
+		ginCtx, _ := gin.CreateTestContext(rec)
+		ginCtx.Request = httptest.NewRequest(http.MethodGet, "/v0/management/usage-queue?count=2", nil)
+
+		h := &Handler{}
+		h.GetUsageQueue(ginCtx)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
+		}
+
+		var payload []json.RawMessage
+		if errUnmarshal := json.Unmarshal(rec.Body.Bytes(), &payload); errUnmarshal != nil {
+			t.Fatalf("unmarshal response: %v", errUnmarshal)
+		}
+		if len(payload) != 2 {
+			t.Fatalf("response records = %d, want 2", len(payload))
+		}
+		requireRecordID(t, payload[0], 1)
+		requireRecordID(t, payload[1], 2)
+
+		remaining := redisqueue.PopOldest(10)
+		if len(remaining) != 1 || string(remaining[0]) != `{"id":3}` {
+			t.Fatalf("remaining queue = %q, want third item only", remaining)
 		}
 	})
+}
 
-	rec := httptest.NewRecorder()
-	ctx, _ := gin.CreateTestContext(rec)
-	ctx.Request = httptest.NewRequest(http.MethodGet, "/v0/management/usage", nil)
+func TestGetUsageQueueInvalidCountDoesNotPop(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	withManagementUsageQueue(t, func() {
+		redisqueue.Enqueue([]byte(`{"id":1}`))
 
-	h.GetUsageStatistics(ctx)
+		rec := httptest.NewRecorder()
+		ginCtx, _ := gin.CreateTestContext(rec)
+		ginCtx.Request = httptest.NewRequest(http.MethodGet, "/v0/management/usage-queue?count=0", nil)
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("expected status 200, got %d body=%s", rec.Code, rec.Body.String())
-	}
+		h := &Handler{}
+		h.GetUsageQueue(ginCtx)
 
-	var payload map[string]any
-	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
-		t.Fatalf("decode response: %v", err)
-	}
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want %d body=%s", rec.Code, http.StatusBadRequest, rec.Body.String())
+		}
 
-	pool, ok := payload["pool"].(map[string]any)
-	if !ok {
-		t.Fatalf("expected pool metrics in response, got %#v", payload)
+		remaining := redisqueue.PopOldest(10)
+		if len(remaining) != 1 || string(remaining[0]) != `{"id":1}` {
+			t.Fatalf("remaining queue = %q, want original item", remaining)
+		}
+	})
+}
+
+func withManagementUsageQueue(t *testing.T, fn func()) {
+	t.Helper()
+
+	prevQueueEnabled := redisqueue.Enabled()
+	redisqueue.SetEnabled(false)
+	redisqueue.SetEnabled(true)
+
+	defer func() {
+		redisqueue.SetEnabled(false)
+		redisqueue.SetEnabled(prevQueueEnabled)
+	}()
+
+	fn()
+}
+
+func requireRecordID(t *testing.T, raw json.RawMessage, want int) {
+	t.Helper()
+
+	var payload struct {
+		ID int `json:"id"`
 	}
-	if enabled, ok := pool["enabled"].(bool); !ok || !enabled {
-		t.Fatalf("expected pool.enabled=true, got %#v", pool["enabled"])
+	if errUnmarshal := json.Unmarshal(raw, &payload); errUnmarshal != nil {
+		t.Fatalf("unmarshal record: %v", errUnmarshal)
 	}
-	if activeCount, ok := pool["active_count"].(float64); !ok || int(activeCount) != 96 {
-		t.Fatalf("expected pool.active_count=96, got %#v", pool["active_count"])
-	}
-	if reserveCount, ok := pool["reserve_count"].(float64); !ok || int(reserveCount) != 2048 {
-		t.Fatalf("expected pool.reserve_count=2048, got %#v", pool["reserve_count"])
+	if payload.ID != want {
+		t.Fatalf("record id = %d, want %d", payload.ID, want)
 	}
 }

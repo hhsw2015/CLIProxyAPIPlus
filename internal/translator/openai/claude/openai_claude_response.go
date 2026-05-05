@@ -269,7 +269,7 @@ func convertOpenAIStreamingChunkToAnthropic(rawJSON []byte, param *ConvertOpenAI
 
 				// Handle function name
 				if function := toolCall.Get("function"); function.Exists() {
-					if name := function.Get("name"); name.Exists() {
+					if name := function.Get("name"); name.Exists() && name.String() != "" {
 						mappedName := strings.TrimSpace(util.MapToolName(param.ToolNameMap, name.String()))
 						if mappedName != "" {
 							accumulator.Name = mappedName

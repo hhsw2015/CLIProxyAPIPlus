@@ -515,7 +515,10 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 					if pool != nil && cookieEntry != nil {
 						pool.MarkDead(cookieEntry.ID(), 10*time.Minute)
 					}
-					out <- cliproxyexecutor.StreamChunk{Err: rateLimitErr}
+					select {
+					case out <- cliproxyexecutor.StreamChunk{Err: rateLimitErr}:
+					case <-ctx.Done():
+					}
 					return
 				}
 				if len(line) == 0 {
@@ -537,19 +540,23 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 				// Pass through translator; it yields one or more chunks for the target schema.
 				chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, translated, bytes.Clone(line), &param)
 				for i := range chunks {
-					out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}
+					select {
+					case out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}:
+					case <-ctx.Done():
+						return
+					}
 				}
 			}
 			if errScan := scanner.Err(); errScan != nil {
 				helps.RecordAPIResponseError(ctx, e.cfg, errScan)
 				reporter.PublishFailure(ctx)
-				// On context canceled, clear sticky preference so next Pick() selects
-				// a random cookie. Don't MarkDead because we can't distinguish user
-				// cancel (Ctrl+C) from timeout — both are context.Canceled.
 				if pool != nil && ctx.Err() != nil {
 					pool.ClearPreferred()
 				}
-				out <- cliproxyexecutor.StreamChunk{Err: errScan}
+				select {
+				case out <- cliproxyexecutor.StreamChunk{Err: errScan}:
+				case <-ctx.Done():
+				}
 				return
 			}
 			// Empty content stream guard: stream EOF'd cleanly but no content-bearing
@@ -564,7 +571,11 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 			// response.completed events are still emitted exactly once.
 			chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, translated, []byte("data: [DONE]"), &param)
 			for i := range chunks {
-				out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}
+				select {
+				case out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}:
+				case <-ctx.Done():
+					return
+				}
 			}
 			// Ensure we record the request if no usage chunk was ever seen
 			reporter.EnsurePublished(ctx)

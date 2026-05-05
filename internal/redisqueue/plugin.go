@@ -36,6 +36,10 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 	if modelName == "" {
 		modelName = "unknown"
 	}
+	aliasName := strings.TrimSpace(record.Alias)
+	if aliasName == "" {
+		aliasName = modelName
+	}
 	provider := strings.TrimSpace(record.Provider)
 	if provider == "" {
 		provider = "unknown"
@@ -84,6 +88,7 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 		RequestDetail: detail,
 		Provider:      provider,
 		Model:         modelName,
+		Alias:         aliasName,
 		Endpoint:      resolveEndpoint(ctx),
 		AuthType:      authType,
 		APIKey:        apiKey,
@@ -99,6 +104,7 @@ type queuedUsageDetail struct {
 	internalusage.RequestDetail
 	Provider  string `json:"provider"`
 	Model     string `json:"model"`
+	Alias     string `json:"alias"`
 	Endpoint  string `json:"endpoint"`
 	AuthType  string `json:"auth_type"`
 	APIKey    string `json:"api_key"`
