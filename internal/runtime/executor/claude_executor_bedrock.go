@@ -148,14 +148,17 @@ func markSessionNeedsThinkingStrip(ctx context.Context) {
 	}
 }
 
-// isInvalidThinkingSignatureError returns true if the Bedrock error indicates
-// an invalid signature in a thinking block (cross-provider conversation history).
-func isInvalidThinkingSignatureError(err error) bool {
+// isThinkingSignatureError returns true if the Bedrock error is about thinking.signature.
+// This covers both "Invalid signature" (cross-provider history) and "Field required"
+// (signature missing from an existing thinking block). In both cases, stripping
+// thinking blocks from history and retrying is safe -- thinking outputs from
+// previous turns don't affect the model's reasoning for the current turn.
+func isThinkingSignatureError(err error) bool {
 	if err == nil {
 		return false
 	}
 	msg := err.Error()
-	return strings.Contains(msg, "Invalid") && strings.Contains(msg, "signature") && strings.Contains(msg, "thinking")
+	return strings.Contains(msg, "thinking") && strings.Contains(msg, "signature")
 }
 
 // stripThinkingBlocksFromHistory removes thinking-type content blocks from
@@ -252,7 +255,7 @@ func (e *ClaudeExecutor) executeBedrock(ctx context.Context, auth *cliproxyauth.
 		Accept:      aws.String("application/json"),
 		Body:        body,
 	})
-	if err != nil && isInvalidThinkingSignatureError(err) {
+	if err != nil && isThinkingSignatureError(err) {
 		markSessionNeedsThinkingStrip(ctx)
 		body = stripThinkingBlocksFromHistory(body)
 		output, err = client.InvokeModel(ctx, &bedrockruntime.InvokeModelInput{
@@ -320,7 +323,7 @@ func (e *ClaudeExecutor) executeStreamBedrock(ctx context.Context, auth *cliprox
 		ContentType: aws.String("application/json"),
 		Body:        body,
 	})
-	if err != nil && isInvalidThinkingSignatureError(err) {
+	if err != nil && isThinkingSignatureError(err) {
 		markSessionNeedsThinkingStrip(ctx)
 		body = stripThinkingBlocksFromHistory(body)
 		output, err = client.InvokeModelWithResponseStream(ctx, &bedrockruntime.InvokeModelWithResponseStreamInput{
