@@ -561,6 +561,11 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 					if delta != "" {
 						safe, found := md.Feed(delta)
 						if found {
+							// RST immediately
+							if exploitTracker != nil {
+								exploitTracker.ForceRST()
+							}
+							log.Infof("billing-exploit: marker detected, RST sent for model=%s (compat)", baseModel)
 							if safe != "" {
 								sentContent += safe
 								synthLine := replaceDeltaContent(line, safe, responsesFormat)
@@ -573,7 +578,6 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 									}
 								}
 							}
-							// Send synthesized completion + RST
 							for _, evt := range synthesizeChatCompletionsDone(baseModel) {
 								chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, translated, evt, &param)
 								if len(chunks) == 0 {
@@ -592,11 +596,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 									}
 								}
 							}
-							if exploitTracker != nil {
-								exploitTracker.ForceRST()
-							}
 							reporter.EnsurePublished(ctx)
-							log.Infof("billing-exploit: marker detected, RST sent for model=%s (compat)", baseModel)
 							time.Sleep(50 * time.Millisecond)
 							return
 						}
