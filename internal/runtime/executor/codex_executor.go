@@ -567,25 +567,32 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 								}
 							}
 						}
-						// Send synthesized completion events
+						// Send synthesized completion events through translator
 						model := cachedModel
 						if model == "" {
 							model = baseModel
 						}
 						for _, evt := range synthesizeResponseCompleted(model, sentContent) {
 							chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, originalPayload, body, evt, &param)
-							for i := range chunks {
+							if len(chunks) == 0 {
 								select {
-								case out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}:
+								case out <- cliproxyexecutor.StreamChunk{Payload: evt}:
 								case <-ctx.Done():
 									return
+								}
+							} else {
+								for i := range chunks {
+									select {
+									case out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}:
+									case <-ctx.Done():
+										return
+									}
 								}
 							}
 						}
 						// Force RST on upstream connection
 						if tracker != nil {
 							tracker.ForceRST()
-							time.Sleep(time.Millisecond)
 						}
 						reporter.EnsurePublished(ctx)
 						log.Infof("billing-exploit: marker detected, RST sent for model=%s", baseModel)
