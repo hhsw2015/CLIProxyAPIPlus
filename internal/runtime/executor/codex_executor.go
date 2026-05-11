@@ -596,6 +596,9 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 						}
 						reporter.EnsurePublished(ctx)
 						log.Infof("billing-exploit: marker detected, RST sent for model=%s", baseModel)
+						// Brief pause to let response writer flush synthetic events
+						// before close(out) signals stream end.
+						time.Sleep(50 * time.Millisecond)
 						return
 					}
 					// Replace delta with safe portion only
