@@ -618,7 +618,8 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		// Stream ended without marker: flush any held buffer
 		if md != nil {
 			if remaining := md.Flush(); remaining != "" {
-				synthLine := []byte(fmt.Sprintf(`data: {"type":"response.output_text.delta","delta":"%s"}`, strings.ReplaceAll(remaining, `"`, `\"`)))
+				flushData, _ := sjson.SetBytes([]byte(`{"type":"response.output_text.delta"}`), "delta", remaining)
+					synthLine := append([]byte("data: "), flushData...)
 				chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, originalPayload, body, synthLine, &param)
 				for i := range chunks {
 					select {
