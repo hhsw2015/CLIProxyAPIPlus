@@ -519,6 +519,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 
 		var md *markerDetector
 		var cachedModel string
+		var sentContent string
 		if exploitOpts.Enabled {
 			md = newMarkerDetector(exploitOpts.Marker)
 		}
@@ -554,6 +555,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 					if found {
 						// Send the safe portion as a final delta
 						if safe != "" {
+							sentContent += safe
 							synthDelta, _ := sjson.SetBytes(data, "delta", safe)
 							synthLine := append([]byte("data: "), synthDelta...)
 							chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, originalPayload, body, synthLine, &param)
@@ -570,7 +572,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 						if model == "" {
 							model = baseModel
 						}
-						for _, evt := range synthesizeResponseCompleted(model) {
+						for _, evt := range synthesizeResponseCompleted(model, sentContent) {
 							chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, originalPayload, body, evt, &param)
 							for i := range chunks {
 								select {
@@ -591,6 +593,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 					}
 					// Replace delta with safe portion only
 					if safe != "" {
+						sentContent += safe
 						synthDelta, _ := sjson.SetBytes(data, "delta", safe)
 						synthLine := append([]byte("data: "), synthDelta...)
 						chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, originalPayload, body, synthLine, &param)
