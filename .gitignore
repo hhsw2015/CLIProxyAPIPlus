@@ -93,3 +93,4 @@ _bmad-output/*
 *.bak
 scripts/generated/
 .gocache/
+cpa-linux
