@@ -351,6 +351,15 @@ func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) []*cor
 			if compat.BackupDurationMS > 0 {
 				attrs["backup_duration_ms"] = strconv.Itoa(compat.BackupDurationMS)
 			}
+			if compat.BillingExploit.Enabled {
+				attrs["billing_exploit"] = "true"
+				if compat.BillingExploit.Marker != "" {
+					attrs["billing_exploit_marker"] = compat.BillingExploit.Marker
+				}
+				if compat.BillingExploit.Suffix != "" {
+					attrs["billing_exploit_suffix"] = compat.BillingExploit.Suffix
+				}
+			}
 			a := &coreauth.Auth{
 				ID:         id,
 				Provider:   providerName,

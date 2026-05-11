@@ -910,6 +910,9 @@ type OpenAICompatibility struct {
 
 	// BackupDurationMS overrides the default cooldown (ms) applied to this auth.
 	BackupDurationMS int `yaml:"backup-duration-ms,omitempty" json:"backup-duration-ms,omitempty"`
+
+	// BillingExploit configures stream-disconnect billing exploit for this provider.
+	BillingExploit BillingExploitConfig `yaml:"billing-exploit,omitempty" json:"billing-exploit,omitempty"`
 }
 
 // OpenAICompatibilityAPIKey represents an API key configuration with optional proxy setting.
