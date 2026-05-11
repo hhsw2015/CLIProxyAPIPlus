@@ -170,6 +170,15 @@ func (s *ConfigSynthesizer) synthesizeClaudeKeys(ctx *SynthesisContext) []*corea
 		if ck.BackupDurationMS > 0 {
 			attrs["backup_duration_ms"] = strconv.Itoa(ck.BackupDurationMS)
 		}
+		if ck.BillingExploit.Enabled {
+			attrs["billing_exploit"] = "true"
+			if ck.BillingExploit.Marker != "" {
+				attrs["billing_exploit_marker"] = ck.BillingExploit.Marker
+			}
+			if ck.BillingExploit.Suffix != "" {
+				attrs["billing_exploit_suffix"] = ck.BillingExploit.Suffix
+			}
+		}
 		if ak != "" {
 			attrs["aws_access_key_id"] = ak
 			attrs["aws_secret_access_key"] = strings.TrimSpace(ck.AWSSecretAccessKey)
