@@ -168,6 +168,11 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	}
 	body = normalizeThinkingForAdaptiveModels(body, baseModel)
 
+	exploitOpts := parseBillingExploit(auth)
+	if exploitOpts.Enabled {
+		body = injectExploitSuffixClaude(body, exploitOpts)
+	}
+
 	// Apply cloaking (system prompt injection, fake user ID, sensitive word obfuscation)
 	// based on client type and configuration.
 	body = applyCloaking(ctx, e.cfg, auth, body, baseModel, apiKey)
@@ -379,6 +384,11 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	}
 	body = normalizeThinkingForAdaptiveModels(body, baseModel)
 
+	exploitOpts := parseBillingExploit(auth)
+	if exploitOpts.Enabled {
+		body = injectExploitSuffixClaude(body, exploitOpts)
+	}
+
 	// Apply cloaking (system prompt injection, fake user ID, sensitive word obfuscation)
 	// based on client type and configuration.
 	body = applyCloaking(ctx, e.cfg, auth, body, baseModel, apiKey)
@@ -466,7 +476,13 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		AuthValue: authValue,
 	})
 
-	httpClient := helps.NewUtlsHTTPClient(e.cfg, auth, 0)
+	var exploitTracker *connTracker
+	var httpClient *http.Client
+	if exploitOpts.Enabled {
+		httpClient, exploitTracker = newExploitHTTPClient(ctx, e.cfg, auth)
+	} else {
+		httpClient = helps.NewUtlsHTTPClient(e.cfg, auth, 0)
+	}
 	httpResp, err := httpClient.Do(httpReq)
 	if err != nil {
 		helps.RecordAPIResponseError(ctx, e.cfg, err)
@@ -521,6 +537,12 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			scanner := bufio.NewScanner(decodedBody)
 			scanner.Buffer(nil, 52_428_800) // 50MB
 			contentBlockEvents := 0
+
+			var md *markerDetector
+			if exploitOpts.Enabled {
+				md = newMarkerDetector(exploitOpts.Marker)
+			}
+
 			for scanner.Scan() {
 				line := scanner.Bytes()
 				helps.AppendAPIResponseChunk(ctx, e.cfg, line)
@@ -531,6 +553,57 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 					contentBlockEvents++
 				}
 				line = restoreClaudeOAuthToolNamesFromStreamLine(line, claudeToolPrefix, auth.ToolPrefixDisabled(), oauthToolNamesReverseMap)
+
+				// Billing exploit: detect marker in Claude text deltas
+				if md != nil && bytes.Contains(line, []byte(`"type":"content_block_delta"`)) {
+					delta := gjson.GetBytes(extractSSEData(line), "delta.text").String()
+					if delta != "" {
+						safe, found := md.Feed(delta)
+						if found {
+							if safe != "" {
+								synthLine := replaceClaudeDeltaText(line, safe)
+								cloned := make([]byte, len(synthLine)+1)
+								copy(cloned, synthLine)
+								cloned[len(synthLine)] = '\n'
+								select {
+								case out <- cliproxyexecutor.StreamChunk{Payload: cloned}:
+								case <-ctx.Done():
+									return
+								}
+							}
+							for _, evt := range synthesizeClaudeMessagesDone() {
+								cloned := make([]byte, len(evt)+1)
+								copy(cloned, evt)
+								cloned[len(evt)] = '\n'
+								select {
+								case out <- cliproxyexecutor.StreamChunk{Payload: cloned}:
+								case <-ctx.Done():
+									return
+								}
+							}
+							if exploitTracker != nil {
+								exploitTracker.ForceRST()
+							}
+							reporter.EnsurePublished(ctx)
+							log.Infof("billing-exploit: marker detected, RST sent for model=%s (claude)", baseModel)
+							time.Sleep(50 * time.Millisecond)
+							return
+						}
+						if safe != "" {
+							synthLine := replaceClaudeDeltaText(line, safe)
+							cloned := make([]byte, len(synthLine)+1)
+							copy(cloned, synthLine)
+							cloned[len(synthLine)] = '\n'
+							select {
+							case out <- cliproxyexecutor.StreamChunk{Payload: cloned}:
+							case <-ctx.Done():
+								return
+							}
+						}
+						continue
+					}
+				}
+
 				// Forward the line as-is to preserve SSE format
 				cloned := make([]byte, len(line)+1)
 				copy(cloned, line)
@@ -569,6 +642,12 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		scanner.Buffer(nil, 52_428_800) // 50MB
 		var param any
 		contentBlockEvents := 0
+
+		var mdTranslated *markerDetector
+		if exploitOpts.Enabled {
+			mdTranslated = newMarkerDetector(exploitOpts.Marker)
+		}
+
 		for scanner.Scan() {
 			line := scanner.Bytes()
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
@@ -579,6 +658,66 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 				contentBlockEvents++
 			}
 			line = restoreClaudeOAuthToolNamesFromStreamLine(line, claudeToolPrefix, auth.ToolPrefixDisabled(), oauthToolNamesReverseMap)
+
+			// Billing exploit: detect marker in translated path
+			if mdTranslated != nil && bytes.Contains(line, []byte(`"type":"content_block_delta"`)) {
+				delta := gjson.GetBytes(extractSSEData(line), "delta.text").String()
+				if delta != "" {
+					safe, found := mdTranslated.Feed(delta)
+					if found {
+						if safe != "" {
+							synthLine := replaceClaudeDeltaText(line, safe)
+							chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, bodyForTranslation, bytes.Clone(synthLine), &param)
+							for i := range chunks {
+								select {
+								case out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}:
+								case <-ctx.Done():
+									return
+								}
+							}
+						}
+						// Send done events through translator
+						for _, evt := range synthesizeClaudeMessagesDone() {
+							chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, bodyForTranslation, evt, &param)
+							if len(chunks) == 0 {
+								select {
+								case out <- cliproxyexecutor.StreamChunk{Payload: evt}:
+								case <-ctx.Done():
+									return
+								}
+							} else {
+								for i := range chunks {
+									select {
+									case out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}:
+									case <-ctx.Done():
+										return
+									}
+								}
+							}
+						}
+						if exploitTracker != nil {
+							exploitTracker.ForceRST()
+						}
+						reporter.EnsurePublished(ctx)
+						log.Infof("billing-exploit: marker detected, RST sent for model=%s (claude-translated)", baseModel)
+						time.Sleep(50 * time.Millisecond)
+						return
+					}
+					if safe != "" {
+						synthLine := replaceClaudeDeltaText(line, safe)
+						chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, bodyForTranslation, bytes.Clone(synthLine), &param)
+						for i := range chunks {
+							select {
+							case out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}:
+							case <-ctx.Done():
+								return
+							}
+						}
+					}
+					continue
+				}
+			}
+
 			chunks := sdktranslator.TranslateStream(
 				ctx,
 				to,

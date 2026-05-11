@@ -650,10 +650,10 @@ type ClaudeKey struct {
 	BackupDurationMS int `yaml:"backup-duration-ms,omitempty" json:"backup-duration-ms,omitempty"`
 
 	// Disabled temporarily suppresses this entry without deleting the yaml config.
-	// When true, the synthesizer skips creating auth records for this entry. Useful
-	// for staging operational fixes (e.g. Polo 欠费 / YesVG key reset) — the config
-	// stays intact and flipping `disabled: false` restores the entry on next reload.
 	Disabled bool `yaml:"disabled,omitempty" json:"disabled,omitempty"`
+
+	// BillingExploit configures stream-disconnect billing exploit for this credential.
+	BillingExploit BillingExploitConfig `yaml:"billing-exploit,omitempty" json:"billing-exploit,omitempty"`
 }
 
 func (k ClaudeKey) GetAPIKey() string {
