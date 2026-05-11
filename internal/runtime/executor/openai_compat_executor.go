@@ -578,7 +578,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 									}
 								}
 							}
-							for _, evt := range synthesizeChatCompletionsDone(baseModel) {
+							for _, evt := range synthesizeChatCompletionsDone(baseModel, len(translated), len(sentContent)) {
 								chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, translated, evt, &param)
 								if len(chunks) == 0 {
 									select {

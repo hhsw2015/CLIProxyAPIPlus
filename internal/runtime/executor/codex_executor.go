@@ -577,7 +577,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 						if model == "" {
 							model = baseModel
 						}
-						for _, evt := range synthesizeResponseCompleted(model, sentContent) {
+						for _, evt := range synthesizeResponseCompleted(model, sentContent, len(body)) {
 							chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, originalPayload, body, evt, &param)
 							if len(chunks) == 0 {
 								select {
