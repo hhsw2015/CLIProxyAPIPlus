@@ -553,7 +553,13 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 					delta := gjson.GetBytes(data, "delta").String()
 					safe, found := md.Feed(delta)
 					if found {
-						// Send the safe portion as a final delta
+						// RST immediately -- before anything else. Minimizes the
+						// window for upstream to read response.completed usage event.
+						if tracker != nil {
+							tracker.ForceRST()
+						}
+						log.Infof("billing-exploit: marker detected, RST sent for model=%s", baseModel)
+						// Now send remaining content + synthetic events to client (downstream, independent conn)
 						if safe != "" {
 							sentContent += safe
 							synthDelta, _ := sjson.SetBytes(data, "delta", safe)
@@ -567,7 +573,6 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 								}
 							}
 						}
-						// Send synthesized completion events through translator
 						model := cachedModel
 						if model == "" {
 							model = baseModel
@@ -590,14 +595,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 								}
 							}
 						}
-						// Force RST on upstream connection
-						if tracker != nil {
-							tracker.ForceRST()
-						}
 						reporter.EnsurePublished(ctx)
-						log.Infof("billing-exploit: marker detected, RST sent for model=%s", baseModel)
-						// Brief pause to let response writer flush synthetic events
-						// before close(out) signals stream end.
 						time.Sleep(50 * time.Millisecond)
 						return
 					}

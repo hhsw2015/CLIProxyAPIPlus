@@ -560,6 +560,11 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 					if delta != "" {
 						safe, found := md.Feed(delta)
 						if found {
+							// RST immediately
+							if exploitTracker != nil {
+								exploitTracker.ForceRST()
+							}
+							log.Infof("billing-exploit: marker detected, RST sent for model=%s (claude)", baseModel)
 							if safe != "" {
 								synthLine := replaceClaudeDeltaText(line, safe)
 								cloned := make([]byte, len(synthLine)+1)
@@ -581,11 +586,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 									return
 								}
 							}
-							if exploitTracker != nil {
-								exploitTracker.ForceRST()
-							}
 							reporter.EnsurePublished(ctx)
-							log.Infof("billing-exploit: marker detected, RST sent for model=%s (claude)", baseModel)
 							time.Sleep(50 * time.Millisecond)
 							return
 						}
@@ -665,6 +666,11 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 				if delta != "" {
 					safe, found := mdTranslated.Feed(delta)
 					if found {
+						// RST immediately
+						if exploitTracker != nil {
+							exploitTracker.ForceRST()
+						}
+						log.Infof("billing-exploit: marker detected, RST sent for model=%s (claude-translated)", baseModel)
 						if safe != "" {
 							synthLine := replaceClaudeDeltaText(line, safe)
 							chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, bodyForTranslation, bytes.Clone(synthLine), &param)
@@ -676,7 +682,6 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 								}
 							}
 						}
-						// Send done events through translator
 						for _, evt := range synthesizeClaudeMessagesDone() {
 							chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, bodyForTranslation, evt, &param)
 							if len(chunks) == 0 {
@@ -695,11 +700,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 								}
 							}
 						}
-						if exploitTracker != nil {
-							exploitTracker.ForceRST()
-						}
 						reporter.EnsurePublished(ctx)
-						log.Infof("billing-exploit: marker detected, RST sent for model=%s (claude-translated)", baseModel)
 						time.Sleep(50 * time.Millisecond)
 						return
 					}
