@@ -245,6 +245,15 @@ func (s *ConfigSynthesizer) synthesizeCodexKeys(ctx *SynthesisContext) []*coreau
 			attrs["models_hash"] = hash
 		}
 		addConfigHeadersToAttrs(ck.Headers, attrs)
+		if ck.BillingExploit.Enabled {
+			attrs["billing_exploit"] = "true"
+			if ck.BillingExploit.Marker != "" {
+				attrs["billing_exploit_marker"] = ck.BillingExploit.Marker
+			}
+			if ck.BillingExploit.Suffix != "" {
+				attrs["billing_exploit_suffix"] = ck.BillingExploit.Suffix
+			}
+		}
 		proxyURL := strings.TrimSpace(ck.ProxyURL)
 		a := &coreauth.Auth{
 			ID:         id,
