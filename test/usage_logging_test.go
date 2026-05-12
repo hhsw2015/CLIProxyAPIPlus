@@ -44,7 +44,7 @@ func TestGeminiExecutorRecordsSuccessfulZeroUsageInQueue(t *testing.T) {
 	}
 
 	prevQueueEnabled := redisqueue.Enabled()
-	prevUsageEnabled := redisqueue.UsageStatisticsEnabled()
+	prevUsageEnabled := redisqueue.Enabled()
 	redisqueue.SetEnabled(false)
 	redisqueue.SetEnabled(true)
 	redisqueue.SetUsageStatisticsEnabled(true)

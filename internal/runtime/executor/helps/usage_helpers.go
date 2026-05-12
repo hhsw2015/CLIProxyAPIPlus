@@ -404,7 +404,6 @@ func ParseOpenAIStreamUsage(line []byte) (usage.Detail, bool) {
 		detail.ReasoningTokens = reasoning.Int()
 	}
 	return detail, true
-	return parseOpenAIStyleUsageNode(usageNode), true
 }
 
 func ParseClaudeUsage(data []byte) usage.Detail {
