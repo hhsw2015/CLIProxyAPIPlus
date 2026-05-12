@@ -19,6 +19,7 @@ import (
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/home"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/headroom"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
@@ -916,6 +917,10 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 		execReq := req
 		execReq.Model = execModel
 		execStart := time.Now()
+		if auth != nil {
+			accountType, _ := auth.AccountInfo()
+			ctx = headroom.WithAuthMode(ctx, headroom.AuthModeFromAccountType(accountType))
+		}
 		streamResult, errStream := executor.ExecuteStream(ctx, auth, execReq, opts)
 		if errStream != nil {
 			execLatency := time.Since(execStart)
@@ -1431,6 +1436,10 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			execReq := req
 			execReq.Model = upstreamModel
 			execStart := time.Now()
+			if auth != nil {
+				accountType, _ := auth.AccountInfo()
+				execCtx = headroom.WithAuthMode(execCtx, headroom.AuthModeFromAccountType(accountType))
+			}
 			resp, errExec := executor.Execute(execCtx, auth, execReq, opts)
 			execLatency := time.Since(execStart)
 			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: errExec == nil, Latency: execLatency}
@@ -3699,6 +3708,10 @@ func (m *Manager) tryAntigravityCreditsExecute(ctx context.Context, req cliproxy
 			resultModel := m.stateModelForExecution(c.auth, routeModel, upstreamModel, len(models) > 1)
 			execReq := req
 			execReq.Model = upstreamModel
+			if c.auth != nil {
+				accountType, _ := c.auth.AccountInfo()
+				creditsCtx = headroom.WithAuthMode(creditsCtx, headroom.AuthModeFromAccountType(accountType))
+			}
 			resp, errExec := c.executor.Execute(creditsCtx, c.auth, execReq, creditsOpts)
 			result := Result{AuthID: c.auth.ID, Provider: c.provider, Model: resultModel, Success: errExec == nil}
 			if errExec != nil {

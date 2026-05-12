@@ -36,6 +36,14 @@ char* headroom_compress_anthropic(
     uint8_t auth_mode
 );
 
+// Compress OpenAI /v1/responses body (Responses API — Codex format).
+char* headroom_compress_openai_responses(
+    const uint8_t* body,
+    size_t body_len,
+    const char* model,
+    uint8_t auth_mode
+);
+
 // Retrieve original content from CCR store by hash.
 // Returns: heap-allocated JSON of shape {found, content, error}.
 // Caller MUST free with headroom_result_free().
@@ -47,6 +55,16 @@ char* headroom_ccr_get(const char* hash);
 // On success the previous backend is replaced atomically. In-flight calls
 // still holding the old store continue with it until they finish.
 char* headroom_ccr_init_sqlite(const char* path, unsigned long long ttl_seconds);
+
+// Initialize a Redis-backed CCR store at the given URL (for fleet-wide
+// shared CCR across multiple CPA instances).
+// key_prefix: namespace prefix (NULL = headroom default).
+// ttl_seconds: entry lifetime; 0 = headroom default (300s).
+// Same atomic-swap semantics as headroom_ccr_init_sqlite.
+char* headroom_ccr_init_redis(
+    const char* url,
+    const char* key_prefix,
+    unsigned long long ttl_seconds);
 
 // Free a string returned by any headroom_* FFI call. Passing NULL is safe;
 // calling libc free() on these pointers is undefined behavior.
