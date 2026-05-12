@@ -103,7 +103,7 @@ func (e *GeminiCLIExecutor) HttpRequest(ctx context.Context, auth *cliproxyauth.
 		return nil, err
 	}
 	httpClient := newHTTPClient(ctx, e.cfg, auth, 0)
-	return httpClient.Do(httpReq)
+	return helps.HeadroomDo(httpClient, httpReq)
 }
 
 // Execute performs a non-streaming request to the Gemini CLI API.
@@ -210,7 +210,7 @@ func (e *GeminiCLIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth
 			AuthValue: authValue,
 		})
 
-		httpResp, errDo := httpClient.Do(reqHTTP)
+		httpResp, errDo := helps.HeadroomDo(httpClient, reqHTTP)
 		if errDo != nil {
 			helps.RecordAPIResponseError(ctx, e.cfg, errDo)
 			err = errDo
@@ -357,7 +357,7 @@ func (e *GeminiCLIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 			AuthValue: authValue,
 		})
 
-		httpResp, errDo := httpClient.Do(reqHTTP)
+		httpResp, errDo := helps.HeadroomDo(httpClient, reqHTTP)
 		if errDo != nil {
 			helps.RecordAPIResponseError(ctx, e.cfg, errDo)
 			err = errDo
@@ -563,7 +563,7 @@ func (e *GeminiCLIExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.
 			AuthValue: authValue,
 		})
 
-		resp, errDo := httpClient.Do(reqHTTP)
+		resp, errDo := helps.HeadroomDo(httpClient, reqHTTP)
 		if errDo != nil {
 			helps.RecordAPIResponseError(ctx, e.cfg, errDo)
 			return cliproxyexecutor.Response{}, errDo

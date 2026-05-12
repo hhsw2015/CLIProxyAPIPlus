@@ -5,6 +5,33 @@
 package config
 
 // SDKConfig represents the application's configuration, loaded from a YAML file.
+// HeadroomConfig controls in-process compression via headroom-core FFI.
+// Falls back to original body if compression fails or is disabled.
+//
+// Filters are evaluated in this order; failing any one skips compression:
+//   1. Enabled must be true
+//   2. body length must be >= MinBytes (when MinBytes > 0)
+//   3. model must NOT match any Deny glob
+//   4. when Allow is non-empty, model must match at least one Allow glob
+//
+// Globs use Go path.Match semantics: '*' / '?' / '[a-z]'. Note that '*' does
+// NOT cross '/' (path.Match treats '/' as a separator), so for vendor/model
+// style names match each segment explicitly (e.g. "vendor/*"). The empty
+// model string (no "model" field in body) is treated as "unknown" for
+// matching, so deny: ["unknown"] suppresses unrecognised payloads.
+type HeadroomConfig struct {
+	Enabled  bool     `yaml:"enabled" json:"enabled"`
+	MinBytes int      `yaml:"min-bytes,omitempty" json:"min-bytes,omitempty"`
+	Allow    []string `yaml:"allow,omitempty" json:"allow,omitempty"`
+	Deny     []string `yaml:"deny,omitempty" json:"deny,omitempty"`
+	// CCRSqlitePath enables a persistent SQLite-backed CCR store at the
+	// given path. Empty string keeps the default in-memory store.
+	CCRSqlitePath string `yaml:"ccr-sqlite-path,omitempty" json:"ccr-sqlite-path,omitempty"`
+	// CCRTtlSeconds sets entry TTL for the SQLite store. 0 = headroom
+	// default (300s).
+	CCRTtlSeconds uint64 `yaml:"ccr-ttl-seconds,omitempty" json:"ccr-ttl-seconds,omitempty"`
+}
+
 // ProxyPoolConfig controls the embedded ECH worker proxy pool.
 // When enabled, CPA manages ECH worker processes directly and routes requests
 // through persistent per-worker connections, eliminating the external warp-pool hop.
@@ -32,6 +59,9 @@ type SDKConfig struct {
 	// ProxyPool embeds ECH worker management with per-worker connection pools.
 	// Priority: per-auth proxy-url > proxy-pool > global proxy-url.
 	ProxyPool ProxyPoolConfig `yaml:"proxy-pool" json:"proxy-pool"`
+
+	// Headroom enables in-process compression via headroom-core FFI.
+	Headroom HeadroomConfig `yaml:"headroom" json:"headroom"`
 
 	// DisableImageGeneration controls whether the built-in image_generation tool is injected/allowed.
 	//

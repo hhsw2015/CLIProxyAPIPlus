@@ -26,6 +26,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/managementasset"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/headroom"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/proxypool"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/redisqueue"
@@ -548,6 +549,26 @@ func main() {
 	redisqueue.SetEnabled(cfg.UsageStatisticsEnabled)
 	redisqueue.SetRetentionSeconds(cfg.RedisUsageQueueRetentionSeconds)
 	coreauth.SetQuotaCooldownDisabled(cfg.DisableCooling)
+
+	// Headroom FFI compression (default disabled)
+	headroom.SetConfig(headroom.Config{
+		Enabled:  cfg.Headroom.Enabled,
+		MinBytes: cfg.Headroom.MinBytes,
+		Allow:    cfg.Headroom.Allow,
+		Deny:     cfg.Headroom.Deny,
+	})
+	if cfg.Headroom.CCRSqlitePath != "" {
+		if dir := filepath.Dir(cfg.Headroom.CCRSqlitePath); dir != "" && dir != "." {
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				log.Errorf("[headroom] cannot create ccr dir %s: %v — falling back to in-memory", dir, err)
+			}
+		}
+		if err := headroom.RegisterSqliteCCRStore(cfg.Headroom.CCRSqlitePath, cfg.Headroom.CCRTtlSeconds); err != nil {
+			log.Errorf("[headroom] sqlite ccr init failed (%s): %v — falling back to in-memory", cfg.Headroom.CCRSqlitePath, err)
+		} else {
+			log.Infof("[headroom] sqlite ccr backend at %s (ttl=%ds)", cfg.Headroom.CCRSqlitePath, cfg.Headroom.CCRTtlSeconds)
+		}
+	}
 
 	if cfg.ProxyPool.Enabled {
 		if err := proxypool.Init(context.Background(), cfg.ProxyPool); err != nil {
