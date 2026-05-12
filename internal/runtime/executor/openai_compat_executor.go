@@ -7,22 +7,17 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"regexp"
 	"strings"
 	"time"
 
-	"github.com/gin-gonic/gin"
-	"github.com/google/uuid"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/cookiepool"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor/helps"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 	log "github.com/sirupsen/logrus"
-	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
 
@@ -56,8 +51,6 @@ func (e *OpenAICompatExecutor) PrepareRequest(req *http.Request, auth *cliproxya
 		attrs = auth.Attributes
 	}
 	util.ApplyCustomHeadersFromAttrs(req, attrs)
-	// Cookie pool: if this auth has a cookie pool, pick a cookie and inject its headers.
-	applyCookiePoolHeaders(req, auth)
 	return nil
 }
 
@@ -92,11 +85,6 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("openai")
 	endpoint := "/chat/completions"
-	responsesFormat := isResponsesFormatAuth(auth)
-	if responsesFormat {
-		to = sdktranslator.FromString("openai-response")
-		endpoint = "/v1/responses"
-	}
 	if opts.Alt == "responses/compact" {
 		to = sdktranslator.FromString("openai-response")
 		endpoint = "/responses/compact"
@@ -108,6 +96,12 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	originalPayload := originalPayloadSource
 	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, opts.Stream)
 	translated := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, opts.Stream)
+
+	translated, err = thinking.ApplyThinking(translated, req.Model, from.String(), to.String(), e.Identifier())
+	if err != nil {
+		return resp, err
+	}
+
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	requestPath := helps.PayloadRequestPath(opts)
 	translated = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", translated, originalTranslated, requestedModel, requestPath)
@@ -117,180 +111,72 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 		}
 	}
 
-	// OpenRouter with Anthropic path (/v1/messages) should skip thinking translation
-	// to maintain native Anthropic format as in v1.
-	endpointPath := authAttrEndpointPath(auth)
-	if !strings.Contains(strings.ToLower(endpointPath), "/messages") {
-		translated, err = thinking.ApplyThinking(translated, req.Model, from.String(), to.String(), e.Identifier())
-		if err != nil {
-			return resp, err
-		}
-	}
-	translated = injectOpenRouterProvider(translated, auth, baseModel)
-	translated = normalizeMaxCompletionTokens(translated, baseModel)
-	if responsesFormat {
-		translated = applyPromptCacheKey(ctx, translated, from.String(), baseModel, auth)
-	}
-
-	if endpointPath != "" {
-		endpoint = endpointPath
-	}
 	url := strings.TrimSuffix(baseURL, "/") + endpoint
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(translated))
+	if err != nil {
+		return resp, err
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	if apiKey != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+	httpReq.Header.Set("User-Agent", "cli-proxy-openai-compat")
+	var attrs map[string]string
+	if auth != nil {
+		attrs = auth.Attributes
+	}
+	util.ApplyCustomHeadersFromAttrs(httpReq, attrs)
+	var authID, authLabel, authType, authValue string
+	if auth != nil {
+		authID = auth.ID
+		authLabel = auth.Label
+		authType, authValue = auth.AccountInfo()
+	}
+	helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
+		URL:       url,
+		Method:    http.MethodPost,
+		Headers:   httpReq.Header.Clone(),
+		Body:      translated,
+		Provider:  e.Identifier(),
+		AuthID:    authID,
+		AuthLabel: authLabel,
+		AuthType:  authType,
+		AuthValue: authValue,
+	})
+
 	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
-
-	var pool *cookiepool.Pool
-	if auth != nil && auth.Attributes != nil {
-		if poolName := strings.TrimSpace(auth.Attributes["cookie_pool_name"]); poolName != "" {
-			pool = cookiepool.Get(poolName)
-		}
+	httpResp, err := httpClient.Do(httpReq)
+	if err != nil {
+		helps.RecordAPIResponseError(ctx, e.cfg, err)
+		return resp, err
 	}
-
-	// For Claude models going through proxied backends (cookie pool or entries with
-	// custom headers), convert reasoning_effort to native thinking object format.
-	// These backends forward to Bedrock which rejects reasoning_effort but accepts
-	// the thinking object.
-	if isProxiedBackend(auth) && isClaudeModel(baseModel) {
-		translated = stripReasoningContent(translated)
+	defer func() {
+		if errClose := httpResp.Body.Close(); errClose != nil {
+			log.Errorf("openai compat executor: close response body error: %v", errClose)
+		}
+	}()
+	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
+		b, _ := io.ReadAll(httpResp.Body)
+		helps.AppendAPIResponseChunk(ctx, e.cfg, b)
+		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
+		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
+		return resp, err
 	}
-
-	// Azure gpt-5.5 chat/completions rejects reasoning_effort when tools are present.
-	// Strip reasoning_effort only in that combination; the model still uses built-in
-	// reasoning at default level.
-	if !responsesFormat && isGPT55Model(baseModel) &&
-		gjson.GetBytes(translated, "tools").Exists() &&
-		gjson.GetBytes(translated, "reasoning_effort").Exists() {
-		translated, _ = sjson.DeleteBytes(translated, "reasoning_effort")
+	body, err := io.ReadAll(httpResp.Body)
+	if err != nil {
+		helps.RecordAPIResponseError(ctx, e.cfg, err)
+		return resp, err
 	}
-
-	for {
-		if ctx.Err() != nil {
-			err = ctx.Err()
-			return
-		}
-
-		httpReq, errReq := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(translated))
-		if errReq != nil {
-			return resp, errReq
-		}
-		httpReq.Header.Set("Content-Type", "application/json")
-		var attrs map[string]string
-		if auth != nil {
-			attrs = auth.Attributes
-		}
-		applyOpenAICompatAuthHeaders(httpReq, attrs, apiKey)
-		util.ApplyCustomHeadersFromAttrs(httpReq, attrs)
-		cookieEntry := applyCookiePoolHeaders(httpReq, auth)
-
-		// All cookies in the pool are dead; signal auth-level failure so the
-		// conductor penalizes this entry and falls back to the next provider.
-		if pool != nil && cookieEntry == nil {
-			return resp, statusErr{code: http.StatusUnauthorized, msg: "cookie pool exhausted, all cookies dead"}
-		}
-
-		// Update usage reporter source with cookie hash for panel visibility.
-		if cookieEntry != nil {
-			reporter.SetSourceSuffix(shortCookieHash(cookieEntry))
-		}
-
-		var authID, authLabel, authType, authValue string
-		if auth != nil {
-			authID = auth.ID
-			authLabel = auth.Label
-			authType, authValue = auth.AccountInfo()
-		}
-		helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
-			URL:       url,
-			Method:    http.MethodPost,
-			Headers:   httpReq.Header.Clone(),
-			Body:      translated,
-			Provider:  e.Identifier(),
-			AuthID:    authID,
-			AuthLabel: authLabel,
-			AuthType:  authType,
-			AuthValue: authValue,
-		})
-
-		httpResp, errExec := httpClient.Do(httpReq)
-		if errExec != nil {
-			helps.RecordAPIResponseError(ctx, e.cfg, errExec)
-			if pool != nil && cookieEntry != nil {
-				if ctx.Err() != nil {
-					pool.ClearPreferred()
-				} else {
-					pool.MarkDead(cookieEntry.ID(), 1*time.Minute)
-					log.Warnf("openai compat executor: request error: %v, marking cookie dead 1m, retrying", errExec)
-					continue
-				}
-			}
-			return resp, errExec
-		}
-
-		helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
-		if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-			b, _ := io.ReadAll(httpResp.Body)
-			httpResp.Body.Close()
-			helps.AppendAPIResponseChunk(ctx, e.cfg, b)
-			helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
-
-			if pool != nil && cookieEntry != nil && ctx.Err() == nil {
-				// Retry on account-specific errors: 401 (Expired), 403 (Banned), 429 (Rate Limit)
-				if httpResp.StatusCode == 401 || httpResp.StatusCode == 403 || httpResp.StatusCode == 429 {
-					duration := 24 * time.Hour
-					if httpResp.StatusCode == 429 {
-						duration = 10 * time.Minute
-					}
-					pool.MarkDead(cookieEntry.ID(), duration)
-					log.Warnf("openai compat executor: cookie failed with status %d, marking dead and retrying", httpResp.StatusCode)
-					continue
-				}
-			}
-
-			err = statusErr{code: httpResp.StatusCode, msg: string(b)}
-			return resp, err
-		}
-
-		body, errReadAll := io.ReadAll(httpResp.Body)
-		httpResp.Body.Close()
-		if errReadAll != nil {
-			helps.RecordAPIResponseError(ctx, e.cfg, errReadAll)
-			return resp, errReadAll
-		}
-
-		// Detect embedded errors in HTTP 200 responses (e.g. proxy backends
-		// wrapping upstream errors as 200 with error in body).
-		if isEmbeddedErrorResponse(body) {
-			embeddedCode := int(gjson.GetBytes(body, "code").Int())
-			if embeddedCode == 0 {
-				embeddedCode = 502
-			}
-			embeddedMsg := gjson.GetBytes(body, "error.message").String()
-			if embeddedMsg == "" {
-				embeddedMsg = gjson.GetBytes(body, "data.error_message").String()
-			}
-			if embeddedMsg == "" {
-				embeddedMsg = string(body[:min(len(body), 200)])
-			}
-			log.Warnf("openai compat executor: 200 with embedded error (code=%d): %s", embeddedCode, embeddedMsg)
-			if pool != nil && cookieEntry != nil {
-				deadDuration := 10 * time.Minute
-				if isDailyLimitError(embeddedMsg) {
-					deadDuration = 24 * time.Hour
-				}
-				pool.MarkDead(cookieEntry.ID(), deadDuration)
-				continue
-			}
-			err = statusErr{code: embeddedCode, msg: embeddedMsg}
-			return resp, err
-		}
-
-		helps.AppendAPIResponseChunk(ctx, e.cfg, body)
-		reporter.Publish(ctx, helps.ParseOpenAIUsage(body))
-		reporter.EnsurePublished(ctx)
-		var param any
-		out := sdktranslator.TranslateNonStream(ctx, to, from, req.Model, opts.OriginalRequest, translated, body, &param)
-		resp = cliproxyexecutor.Response{Payload: out, Headers: httpResp.Header.Clone()}
-		return resp, nil
-	}
+	helps.AppendAPIResponseChunk(ctx, e.cfg, body)
+	reporter.Publish(ctx, helps.ParseOpenAIUsage(body))
+	// Ensure we at least record the request even if upstream doesn't return usage
+	reporter.EnsurePublished(ctx)
+	// Translate response back to source format when needed
+	var param any
+	out := sdktranslator.TranslateNonStream(ctx, to, from, req.Model, opts.OriginalRequest, translated, body, &param)
+	resp = cliproxyexecutor.Response{Payload: out, Headers: httpResp.Header.Clone()}
+	return resp, nil
 }
 
 func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (_ *cliproxyexecutor.StreamResult, err error) {
@@ -307,12 +193,6 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("openai")
-	endpoint := "/chat/completions"
-	responsesFormat := isResponsesFormatAuth(auth)
-	if responsesFormat {
-		to = sdktranslator.FromString("openai-response")
-		endpoint = "/v1/responses"
-	}
 	originalPayloadSource := req.Payload
 	if len(opts.OriginalRequest) > 0 {
 		originalPayloadSource = opts.OriginalRequest
@@ -320,347 +200,131 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	originalPayload := originalPayloadSource
 	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, true)
 	translated := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, true)
-	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
-	requestPath := helps.PayloadRequestPath(opts)
-	translated = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", translated, originalTranslated, requestedModel, requestPath)
 
 	translated, err = thinking.ApplyThinking(translated, req.Model, from.String(), to.String(), e.Identifier())
 	if err != nil {
 		return nil, err
 	}
 
-	exploitOpts := parseBillingExploit(auth)
-	if exploitOpts.Enabled {
-		if responsesFormat {
-			translated = injectExploitSuffix(translated, exploitOpts)
-		} else {
-			translated = injectExploitSuffixChatCompletions(translated, exploitOpts)
-		}
-	}
+	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
+	requestPath := helps.PayloadRequestPath(opts)
+	translated = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", translated, originalTranslated, requestedModel, requestPath)
 
 	// Request usage data in the final streaming chunk so that token statistics
 	// are captured even when the upstream is an OpenAI-compatible provider.
-	// Responses API doesn't support stream_options.
-	if !responsesFormat {
-		translated, _ = sjson.SetBytes(translated, "stream_options.include_usage", true)
+	translated, _ = sjson.SetBytes(translated, "stream_options.include_usage", true)
+
+	url := strings.TrimSuffix(baseURL, "/") + "/chat/completions"
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(translated))
+	if err != nil {
+		return nil, err
 	}
-	translated = injectOpenRouterProvider(translated, auth, baseModel)
-	translated = normalizeMaxCompletionTokens(translated, baseModel)
-	if isResponsesFormatAuth(auth) {
-		translated = applyPromptCacheKey(ctx, translated, from.String(), baseModel, auth)
+	httpReq.Header.Set("Content-Type", "application/json")
+	if apiKey != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+apiKey)
 	}
-
-	if override := authAttrEndpointPath(auth); override != "" {
-		endpoint = override
+	httpReq.Header.Set("User-Agent", "cli-proxy-openai-compat")
+	var attrs map[string]string
+	if auth != nil {
+		attrs = auth.Attributes
 	}
-	url := strings.TrimSuffix(baseURL, "/") + endpoint
-	var exploitTracker *connTracker
-	var httpClient *http.Client
-	if exploitOpts.Enabled {
-		httpClient, exploitTracker = newExploitHTTPClient(ctx, e.cfg, auth)
-	} else {
-		httpClient = helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
+	util.ApplyCustomHeadersFromAttrs(httpReq, attrs)
+	httpReq.Header.Set("Accept", "text/event-stream")
+	httpReq.Header.Set("Cache-Control", "no-cache")
+	var authID, authLabel, authType, authValue string
+	if auth != nil {
+		authID = auth.ID
+		authLabel = auth.Label
+		authType, authValue = auth.AccountInfo()
 	}
+	helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
+		URL:       url,
+		Method:    http.MethodPost,
+		Headers:   httpReq.Header.Clone(),
+		Body:      translated,
+		Provider:  e.Identifier(),
+		AuthID:    authID,
+		AuthLabel: authLabel,
+		AuthType:  authType,
+		AuthValue: authValue,
+	})
 
-	var pool *cookiepool.Pool
-	if auth != nil && auth.Attributes != nil {
-		if poolName := strings.TrimSpace(auth.Attributes["cookie_pool_name"]); poolName != "" {
-			pool = cookiepool.Get(poolName)
-		}
+	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
+	httpResp, err := httpClient.Do(httpReq)
+	if err != nil {
+		helps.RecordAPIResponseError(ctx, e.cfg, err)
+		return nil, err
 	}
-
-	if isProxiedBackend(auth) && isClaudeModel(baseModel) {
-		translated = stripReasoningContent(translated)
+	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
+		b, _ := io.ReadAll(httpResp.Body)
+		helps.AppendAPIResponseChunk(ctx, e.cfg, b)
+		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
+		if errClose := httpResp.Body.Close(); errClose != nil {
+			log.Errorf("openai compat executor: close response body error: %v", errClose)
+		}
+		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
+		return nil, err
 	}
+	out := make(chan cliproxyexecutor.StreamChunk)
+	go func() {
+		defer close(out)
+		defer func() {
+			if errClose := httpResp.Body.Close(); errClose != nil {
+				log.Errorf("openai compat executor: close response body error: %v", errClose)
+			}
+		}()
+		scanner := bufio.NewScanner(httpResp.Body)
+		scanner.Buffer(nil, 52_428_800) // 50MB
+		var param any
+		for scanner.Scan() {
+			line := scanner.Bytes()
+			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
+			if detail, ok := helps.ParseOpenAIStreamUsage(line); ok {
+				reporter.Publish(ctx, detail)
+			}
+			trimmedLine := bytes.TrimSpace(line)
+			if len(trimmedLine) == 0 {
+				continue
+			}
 
-	// Azure gpt-5.5 chat/completions rejects reasoning_effort when tools are present.
-	if !responsesFormat && isGPT55Model(baseModel) && gjson.GetBytes(translated, "tools").Exists() {
-		if gjson.GetBytes(translated, "reasoning_effort").Exists() {
-			translated, _ = sjson.DeleteBytes(translated, "reasoning_effort")
-		}
-		if gjson.GetBytes(translated, "reasoning.effort").Exists() {
-			translated, _ = sjson.DeleteBytes(translated, "reasoning")
-		}
-	}
-
-	for {
-		if ctx.Err() != nil {
-			err = ctx.Err()
-			return nil, err
-		}
-
-		httpReq, errReq := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(translated))
-		if errReq != nil {
-			return nil, errReq
-		}
-		httpReq.Header.Set("Content-Type", "application/json")
-		var attrs map[string]string
-		if auth != nil {
-			attrs = auth.Attributes
-		}
-		applyOpenAICompatAuthHeaders(httpReq, attrs, apiKey)
-		util.ApplyCustomHeadersFromAttrs(httpReq, attrs)
-		httpReq.Header.Set("Accept", "text/event-stream")
-		httpReq.Header.Set("Cache-Control", "no-cache")
-		cookieEntry := applyCookiePoolHeaders(httpReq, auth)
-
-		if pool != nil && cookieEntry == nil {
-			return nil, statusErr{code: http.StatusUnauthorized, msg: "cookie pool exhausted, all cookies dead"}
-		}
-
-		if cookieEntry != nil {
-			reporter.SetSourceSuffix(shortCookieHash(cookieEntry))
-		}
-
-		var authID, authLabel, authType, authValue string
-		if auth != nil {
-			authID = auth.ID
-			authLabel = auth.Label
-			authType, authValue = auth.AccountInfo()
-		}
-		helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
-			URL:       url,
-			Method:    http.MethodPost,
-			Headers:   httpReq.Header.Clone(),
-			Body:      translated,
-			Provider:  e.Identifier(),
-			AuthID:    authID,
-			AuthLabel: authLabel,
-			AuthType:  authType,
-			AuthValue: authValue,
-		})
-
-		httpResp, errExec := httpClient.Do(httpReq)
-		if errExec != nil {
-			helps.RecordAPIResponseError(ctx, e.cfg, errExec)
-			if pool != nil && cookieEntry != nil {
-				if ctx.Err() != nil {
-					pool.ClearPreferred()
-				} else {
-					pool.MarkDead(cookieEntry.ID(), 1*time.Minute)
-					log.Warnf("openai compat executor (stream): request error: %v, marking cookie dead 1m, retrying", errExec)
+			if !bytes.HasPrefix(trimmedLine, []byte("data:")) {
+				if bytes.HasPrefix(trimmedLine, []byte(":")) || bytes.HasPrefix(trimmedLine, []byte("event:")) ||
+					bytes.HasPrefix(trimmedLine, []byte("id:")) || bytes.HasPrefix(trimmedLine, []byte("retry:")) {
 					continue
 				}
-			}
-			return nil, errExec
-		}
-
-		helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
-		if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-			b, _ := io.ReadAll(httpResp.Body)
-			httpResp.Body.Close()
-			helps.AppendAPIResponseChunk(ctx, e.cfg, b)
-			helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
-
-			if pool != nil && cookieEntry != nil && ctx.Err() == nil {
-				if httpResp.StatusCode == 401 || httpResp.StatusCode == 403 || httpResp.StatusCode == 429 {
-					duration := 24 * time.Hour
-					if httpResp.StatusCode == 429 {
-						duration = 10 * time.Minute
-					}
-					pool.MarkDead(cookieEntry.ID(), duration)
-					log.Warnf("openai compat executor (stream): cookie failed with status %d, marking dead and retrying", httpResp.StatusCode)
-					continue
-				}
-			}
-
-			err = statusErr{code: httpResp.StatusCode, msg: string(b)}
-			return nil, err
-		}
-
-		// Peek at the first bytes to detect embedded errors in HTTP 200 responses
-		// before committing to the streaming goroutine.
-		{
-			peek := make([]byte, 512)
-			n, _ := httpResp.Body.Read(peek)
-			peek = peek[:n]
-			if isEmbeddedErrorResponse(peek) {
-				httpResp.Body.Close()
-				embeddedCode := int(gjson.GetBytes(peek, "code").Int())
-				if embeddedCode == 0 {
-					embeddedCode = 502
-				}
-				embeddedMsg := gjson.GetBytes(peek, "data.error_message").String()
-				if embeddedMsg == "" {
-					embeddedMsg = gjson.GetBytes(peek, "error.message").String()
-				}
-				if embeddedMsg == "" {
-					embeddedMsg = string(peek[:min(len(peek), 200)])
-				}
-				log.Warnf("openai compat executor (stream): 200 with embedded error (code=%d): %s", embeddedCode, embeddedMsg)
-				if pool != nil && cookieEntry != nil {
-					deadDuration := 10 * time.Minute
-					if isDailyLimitError(embeddedMsg) {
-						deadDuration = 24 * time.Hour
-					}
-					pool.MarkDead(cookieEntry.ID(), deadDuration)
-					continue
-				}
-				err = statusErr{code: embeddedCode, msg: embeddedMsg}
-				return nil, err
-			}
-			// Prepend peeked bytes back for the scanner.
-			httpResp.Body = io.NopCloser(io.MultiReader(bytes.NewReader(peek), httpResp.Body))
-		}
-
-		out := make(chan cliproxyexecutor.StreamChunk)
-		go func() {
-			defer close(out)
-			defer func() {
-				if errClose := httpResp.Body.Close(); errClose != nil {
-					log.Errorf("openai compat executor: close response body error: %v", errClose)
-				}
-			}()
-			scanner := bufio.NewScanner(httpResp.Body)
-			scanner.Buffer(nil, 52_428_800) // 50MB
-			var param any
-			deltaEvents := 0
-
-			var md *markerDetector
-			var sentContent string
-			if exploitOpts.Enabled {
-				md = newMarkerDetector(exploitOpts.Marker)
-			}
-
-			for scanner.Scan() {
-				line := scanner.Bytes()
-				helps.AppendAPIResponseChunk(ctx, e.cfg, line)
-				if detail, ok := helps.ParseOpenAIStreamUsage(line); ok {
-					reporter.Publish(ctx, detail)
-				} else if detail, ok := helps.ParseClaudeStreamUsage(line); ok {
-					reporter.Publish(ctx, detail)
-				}
-				// Detect rate_limit_error hidden inside SSE JSON lines (GPT Proxy §4).
-				if rateLimitErr := detectSSERateLimitError(line); rateLimitErr != nil {
-					reporter.PublishFailure(ctx)
-					if pool != nil && cookieEntry != nil {
-						pool.MarkDead(cookieEntry.ID(), 10*time.Minute)
-					}
+				if bytes.HasPrefix(trimmedLine, []byte("{")) || bytes.HasPrefix(trimmedLine, []byte("[")) {
+					streamErr := statusErr{code: http.StatusBadGateway, msg: string(trimmedLine)}
+					helps.RecordAPIResponseError(ctx, e.cfg, streamErr)
+					reporter.PublishFailure(ctx, streamErr)
 					select {
-					case out <- cliproxyexecutor.StreamChunk{Err: rateLimitErr}:
+					case out <- cliproxyexecutor.StreamChunk{Err: streamErr}:
 					case <-ctx.Done():
 					}
 					return
 				}
-				if len(line) == 0 {
-					continue
-				}
-
-				if !bytes.HasPrefix(line, []byte("data:")) {
-					continue
-				}
-
-				// Count content-bearing delta events
-				if bytes.Contains(line, []byte(`"content":`)) || bytes.Contains(line, []byte(`"reasoning_content":`)) || bytes.Contains(line, []byte(`"content_block_`)) {
-					deltaEvents++
-				}
-
-				// Billing exploit: detect marker in delta content
-				if md != nil {
-					delta := extractDeltaContent(line, responsesFormat)
-					if delta != "" {
-						safe, found := md.Feed(delta)
-						if found {
-							// RST immediately
-							if exploitTracker != nil {
-								exploitTracker.ForceRST()
-							}
-							log.Infof("billing-exploit: marker detected, RST sent for model=%s (compat)", baseModel)
-							if safe != "" {
-								sentContent += safe
-								synthLine := replaceDeltaContent(line, safe, responsesFormat)
-								chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, translated, synthLine, &param)
-								for i := range chunks {
-									select {
-									case out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}:
-									case <-ctx.Done():
-										return
-									}
-								}
-							}
-							for _, evt := range synthesizeChatCompletionsDone(baseModel, len(translated), len(sentContent)) {
-								chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, translated, evt, &param)
-								if len(chunks) == 0 {
-									select {
-									case out <- cliproxyexecutor.StreamChunk{Payload: evt}:
-									case <-ctx.Done():
-										return
-									}
-								} else {
-									for i := range chunks {
-										select {
-										case out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}:
-										case <-ctx.Done():
-											return
-										}
-									}
-								}
-							}
-							reporter.EnsurePublished(ctx)
-							time.Sleep(50 * time.Millisecond)
-							return
-						}
-						if safe != "" {
-							sentContent += safe
-							synthLine := replaceDeltaContent(line, safe, responsesFormat)
-							chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, translated, synthLine, &param)
-							for i := range chunks {
-								select {
-								case out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}:
-								case <-ctx.Done():
-									return
-								}
-							}
-						}
-						continue
-					}
-				}
-
-				// Normal path: pass through translator
-				chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, translated, bytes.Clone(line), &param)
-				for i := range chunks {
-					select {
-					case out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}:
-					case <-ctx.Done():
-						return
-					}
-				}
+				continue
 			}
-			// Flush held buffer if stream ended without marker
-			if md != nil {
-				if remaining := md.Flush(); remaining != "" {
-					flushData, _ := sjson.SetBytes([]byte(`{"type":"response.output_text.delta"}`), "delta", remaining)
-					synthLine := append([]byte("data: "), flushData...)
-					chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, translated, synthLine, &param)
-					for i := range chunks {
-						select {
-						case out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}:
-						case <-ctx.Done():
-							return
-						}
-					}
-				}
-			}
-			if errScan := scanner.Err(); errScan != nil {
-				helps.RecordAPIResponseError(ctx, e.cfg, errScan)
-				reporter.PublishFailure(ctx)
-				if pool != nil && ctx.Err() != nil {
-					pool.ClearPreferred()
-				}
+
+			// OpenAI-compatible streams must use SSE data lines.
+			chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, translated, bytes.Clone(trimmedLine), &param)
+			for i := range chunks {
 				select {
-				case out <- cliproxyexecutor.StreamChunk{Err: errScan}:
+				case out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}:
 				case <-ctx.Done():
+					return
 				}
-				return
 			}
-			// Empty content stream guard: stream EOF'd cleanly but no content-bearing
-			// deltas were observed. Treat as retryable soft failure so conductor can
-			// fall back. Don't MarkDead the cookie (user may have asked for zero-token
-			// completion); the conductor backoff is sufficient.
-			if checkEmptyStreamGuard(ctx, deltaEvents, reporter, out) {
-				return
+		}
+		if errScan := scanner.Err(); errScan != nil {
+			helps.RecordAPIResponseError(ctx, e.cfg, errScan)
+			reporter.PublishFailure(ctx, errScan)
+			select {
+			case out <- cliproxyexecutor.StreamChunk{Err: errScan}:
+			case <-ctx.Done():
 			}
-			// In case the upstream closes the stream without a terminal [DONE] marker.
+		} else {
+			// In case the upstream close the stream without a terminal [DONE] marker.
 			// Feed a synthetic done marker through the translator so pending
 			// response.completed events are still emitted exactly once.
 			chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, translated, []byte("data: [DONE]"), &param)
@@ -671,11 +335,11 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 					return
 				}
 			}
-			// Ensure we record the request if no usage chunk was ever seen
-			reporter.EnsurePublished(ctx)
-		}()
-		return &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: out}, nil
-	}
+		}
+		// Ensure we record the request if no usage chunk was ever seen
+		reporter.EnsurePublished(ctx)
+	}()
+	return &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: out}, nil
 }
 
 func (e *OpenAICompatExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
@@ -710,7 +374,9 @@ func (e *OpenAICompatExecutor) CountTokens(ctx context.Context, auth *cliproxyau
 // Refresh is a no-op for API-key based compatibility providers.
 func (e *OpenAICompatExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.Auth, error) {
 	log.Debugf("openai compat executor: refresh called")
-	_ = ctx
+	if refreshed, handled, err := helps.RefreshAuthViaHome(ctx, e.cfg, auth); handled {
+		return refreshed, err
+	}
 	return auth, nil
 }
 
@@ -777,358 +443,3 @@ func (e statusErr) Error() string {
 }
 func (e statusErr) StatusCode() int            { return e.code }
 func (e statusErr) RetryAfter() *time.Duration { return e.retryAfter }
-
-func (e *OpenAICompatExecutor) requiresAnthropicImageContent(auth *cliproxyauth.Auth) bool {
-	return isProxiedBackend(auth)
-}
-
-// detectSSERateLimitError checks an SSE line for an embedded rate_limit_error.
-// GPT Proxy detects this via exact 16-byte match on error.type (IDA §4).
-// Returns a statusErr with 429 if detected, nil otherwise.
-func detectSSERateLimitError(line []byte) error {
-	trimmed := bytes.TrimSpace(line)
-	if len(trimmed) == 0 {
-		return nil
-	}
-	if bytes.HasPrefix(trimmed, []byte("data:")) {
-		trimmed = bytes.TrimSpace(trimmed[5:])
-	}
-	if len(trimmed) == 0 || trimmed[0] != '{' {
-		return nil
-	}
-	errType := gjson.GetBytes(trimmed, "error.type").String()
-	if errType == "rate_limit_error" {
-		msg := gjson.GetBytes(trimmed, "error.message").String()
-		if msg == "" {
-			msg = "rate limited (detected in SSE stream)"
-		}
-		return statusErr{code: 429, msg: msg}
-	}
-	return nil
-}
-
-// isProxiedBackend checks if the auth entry routes through a proxy backend
-// that requires thinking format conversion (reasoning_effort → thinking object).
-var proxiedBackendPattern = regexp.MustCompile(`(?i)_llm/v\d+/proxy/?$`)
-
-// isDailyLimitError checks if the error message indicates a daily usage quota exhaustion.
-func isDailyLimitError(msg string) bool {
-	lower := strings.ToLower(msg)
-	return strings.Contains(lower, "daily") || strings.Contains(lower, "usage limit")
-}
-
-// isEmbeddedErrorResponse detects error responses wrapped in HTTP 200.
-// Some proxy backends return 200 with an error body like:
-//   {"type":"error","error":{"type":"api_error","message":"..."}}
-func isEmbeddedErrorResponse(body []byte) bool {
-	if len(body) == 0 {
-		return false
-	}
-	// Trim SSE prefix if present
-	trimmed := bytes.TrimSpace(body)
-	if bytes.HasPrefix(trimmed, []byte("data:")) {
-		trimmed = bytes.TrimSpace(trimmed[5:])
-	}
-	if len(trimmed) == 0 || trimmed[0] != '{' {
-		return false
-	}
-	// Pattern 1: {"type":"error","error":{...}} — upstream error wrapped as 200
-	if gjson.GetBytes(trimmed, "type").String() == "error" {
-		return true
-	}
-	// Pattern 2: {"code":4xx/5xx,...} — proxy returning error status in body
-	if code := gjson.GetBytes(trimmed, "code").Int(); code >= 400 && code < 600 {
-		return true
-	}
-	return false
-}
-
-// applyPromptCacheKey injects prompt_cache_key into the request body to leverage
-// upstream 24h prompt cache (CCP / other Responses-API providers). Mirrors
-// codex_executor.cacheHelper semantics but scoped to the openai-compat path.
-//
-//   - If the client already sent prompt_cache_key: passthrough
-//   - If from claude and payload has metadata.user_id: derive key `<model>-<user_id>`, cache 1h
-//   - If api_key is present on auth: derive stable UUID from api_key (session-stable)
-//   - Otherwise leave empty (no cache_key)
-func applyPromptCacheKey(ctx context.Context, body []byte, from, model string, auth *cliproxyauth.Auth) []byte {
-	// Client-supplied key always wins (passthrough).
-	if existing := gjson.GetBytes(body, "prompt_cache_key"); existing.Exists() {
-		return body
-	}
-	var cacheID string
-	switch from {
-	case "claude":
-		if userID := gjson.GetBytes(body, "metadata.user_id"); userID.Exists() && userID.String() != "" {
-			key := fmt.Sprintf("%s-%s", model, userID.String())
-			if cached, ok := helps.GetCodexCache(key); ok {
-				cacheID = cached.ID
-			} else {
-				cacheID = uuid.New().String()
-				helps.SetCodexCache(key, helps.CodexCache{
-					ID:     cacheID,
-					Expire: time.Now().Add(1 * time.Hour),
-				})
-			}
-		}
-	}
-	// Fallback: derive stable key from auth api_key so same credential reuses cache.
-	if cacheID == "" && auth != nil && auth.Attributes != nil {
-		if apiKey := strings.TrimSpace(auth.Attributes["api_key"]); apiKey != "" {
-			cacheID = uuid.NewSHA1(uuid.NameSpaceOID, []byte("cli-proxy-api:openai-compat:prompt-cache:"+apiKey)).String()
-		}
-	}
-	if cacheID == "" {
-		return body
-	}
-	result, err := sjson.SetBytes(body, "prompt_cache_key", cacheID)
-	if err != nil {
-		return body
-	}
-	return result
-}
-
-// isResponsesFormatAuth reports whether the auth entry uses OpenAI Responses API
-// translator (instead of Chat Completions). Used for CCP GPT codex.
-func isResponsesFormatAuth(auth *cliproxyauth.Auth) bool {
-	if auth == nil || auth.Attributes == nil {
-		return false
-	}
-	return auth.Attributes["responses_format"] == "true"
-}
-
-// authAttrEndpointPath returns the per-entry endpoint path override (e.g. /v1/responses).
-func authAttrEndpointPath(auth *cliproxyauth.Auth) string {
-	if auth == nil || auth.Attributes == nil {
-		return ""
-	}
-	return strings.TrimSpace(auth.Attributes["endpoint_path"])
-}
-
-// applyOpenAICompatAuthHeaders sets auth + identity headers on the outgoing request.
-// Supports:
-//   - auth_style=anthropic (CCP): sets x-api-key + anthropic-version + (optional) anthropic-beta
-//   - auth_style=bearer or unset (default): sets Authorization: Bearer <key>
-//   - user_agent_override: replaces the default User-Agent
-//   - forward_anthropic_beta: forwards inbound anthropic-beta header value
-
-func applyOpenAICompatAuthHeaders(req *http.Request, attrs map[string]string, apiKey string) {
-	style := ""
-	if attrs != nil {
-		style = strings.ToLower(strings.TrimSpace(attrs["auth_style"]))
-	}
-	switch style {
-	case "anthropic", "x-api-key":
-		// "anthropic" and "x-api-key" are aliases for CCP-style auth.
-		if apiKey != "" {
-			req.Header.Set("x-api-key", apiKey)
-		}
-		if v := strings.TrimSpace(attrs["anthropic_version"]); v != "" {
-			req.Header.Set("anthropic-version", v)
-		}
-		if attrs["forward_anthropic_beta"] == "true" {
-			if ginCtx, ok := req.Context().Value("gin").(*gin.Context); ok && ginCtx != nil && ginCtx.Request != nil {
-				if beta := strings.TrimSpace(ginCtx.Request.Header.Get("Anthropic-Beta")); beta != "" {
-					req.Header.Set("anthropic-beta", beta)
-				}
-			}
-		}
-	case "azure-api-key":
-		// Azure OpenAI uses `api-key` header (not x-api-key, not Bearer).
-		if apiKey != "" {
-			req.Header.Set("api-key", apiKey)
-		}
-	case "authorization-raw":
-		// Raw Authorization header without Bearer prefix (Polo 独特 format).
-		if apiKey != "" {
-			req.Header.Set("Authorization", apiKey)
-		}
-	default:
-		// "bearer" / "auto" / empty — standard OpenAI style.
-		if apiKey != "" {
-			req.Header.Set("Authorization", "Bearer "+apiKey)
-		}
-	}
-	userAgent := "cli-proxy-openai-compat"
-	if attrs != nil {
-		if v := strings.TrimSpace(attrs["user_agent_override"]); v != "" {
-			userAgent = v
-		}
-	}
-	req.Header.Set("User-Agent", userAgent)
-}
-
-func isProxiedBackend(auth *cliproxyauth.Auth) bool {
-	if auth == nil || auth.Attributes == nil {
-		return false
-	}
-	return proxiedBackendPattern.MatchString(auth.Attributes["base_url"])
-}
-
-// isClaudeModel checks if the model name refers to a Claude/Anthropic model.
-func isClaudeModel(model string) bool {
-	lower := strings.ToLower(model)
-	return strings.Contains(lower, "claude")
-}
-
-func isGPT55Model(model string) bool {
-	lower := strings.ToLower(model)
-	return strings.Contains(lower, "gpt-5.5") || strings.Contains(lower, "gpt-5-5")
-}
-
-// normalizeMaxCompletionTokens rewrites max_tokens → max_completion_tokens for
-// OpenAI reasoning models (gpt-5*, o1-pro, o3, o3-pro, o4-mini, etc). These models
-// reject max_tokens and require the newer field name. Non-reasoning models
-// (gpt-4o, gpt-4.1) continue to use max_tokens unchanged.
-func normalizeMaxCompletionTokens(body []byte, model string) []byte {
-	lower := strings.ToLower(strings.TrimSpace(model))
-	if lower == "" {
-		return body
-	}
-	needsRewrite := false
-	switch {
-	case strings.HasPrefix(lower, "gpt-5"):
-		needsRewrite = true
-	case strings.HasPrefix(lower, "o1-pro"), lower == "o1":
-		needsRewrite = true
-	case strings.HasPrefix(lower, "o3"):
-		needsRewrite = true
-	case strings.HasPrefix(lower, "o4"):
-		needsRewrite = true
-	}
-	if !needsRewrite {
-		return body
-	}
-	// If max_completion_tokens already set, just drop max_tokens without overwriting.
-	if gjson.GetBytes(body, "max_completion_tokens").Exists() {
-		newBody, err := sjson.DeleteBytes(body, "max_tokens")
-		if err != nil {
-			return body
-		}
-		return newBody
-	}
-	maxTok := gjson.GetBytes(body, "max_tokens")
-	if !maxTok.Exists() {
-		return body
-	}
-	newBody, err := sjson.SetBytes(body, "max_completion_tokens", maxTok.Int())
-	if err != nil {
-		return body
-	}
-	newBody, err = sjson.DeleteBytes(newBody, "max_tokens")
-	if err != nil {
-		return newBody
-	}
-	return newBody
-}
-
-// stripReasoningContent removes the reasoning_content field from all messages
-// in the request payload. This field is a thinking/reasoning output and should
-// not be included as input. Some backends reject it with validation errors.
-func stripReasoningContent(payload []byte) []byte {
-	messages := gjson.GetBytes(payload, "messages")
-	if !messages.Exists() || !messages.IsArray() {
-		return payload
-	}
-	// Collect indices first, then delete in reverse order to avoid offset shifts.
-	var toDelete []int64
-	messages.ForEach(func(idx, msg gjson.Result) bool {
-		if msg.Get("reasoning_content").Exists() {
-			toDelete = append(toDelete, idx.Int())
-		}
-		return true
-	})
-	for i := len(toDelete) - 1; i >= 0; i-- {
-		path := fmt.Sprintf("messages.%d.reasoning_content", toDelete[i])
-		if updated, err := sjson.DeleteBytes(payload, path); err == nil {
-			payload = updated
-		}
-	}
-	// Convert reasoning_effort to Anthropic thinking object format.
-	// Cookie pool backends forward to Bedrock which rejects reasoning_effort
-	// but accepts the native thinking object {type: "enabled", budget_tokens: N}.
-	if effort := gjson.GetBytes(payload, "reasoning_effort"); effort.Exists() {
-		budget := 31999
-		switch strings.ToLower(effort.String()) {
-		case "low":
-			budget = 5000
-		case "medium", "med":
-			budget = 16000
-		case "none":
-			budget = 0
-		}
-		payload, _ = sjson.DeleteBytes(payload, "reasoning_effort")
-		if budget > 0 {
-			payload, _ = sjson.SetBytes(payload, "thinking.type", "enabled")
-			payload, _ = sjson.SetBytes(payload, "thinking.budget_tokens", budget)
-			// Ensure max_tokens > budget_tokens (Anthropic/Bedrock API constraint).
-			maxTokens := gjson.GetBytes(payload, "max_tokens").Int()
-			if maxTokens <= int64(budget) {
-				payload, _ = sjson.SetBytes(payload, "max_tokens", budget+1)
-			}
-		}
-	}
-	// Strip other non-standard fields that backends reject.
-	for _, field := range []string{"effortLevel", "context_management"} {
-		if gjson.GetBytes(payload, field).Exists() {
-			if updated, err := sjson.DeleteBytes(payload, field); err == nil {
-				payload = updated
-			}
-		}
-	}
-	return payload
-}
-
-// applyCookiePoolHeaders checks if the auth is backed by a cookie pool and, if so,
-// picks a cookie to inject into the request headers. The pool entry is a map of
-// header names to values, applied directly to the request. Returns the picked
-// entry or nil.
-func applyCookiePoolHeaders(req *http.Request, auth *cliproxyauth.Auth) *cookiepool.Entry {
-	if req == nil || auth == nil || auth.Attributes == nil {
-		return nil
-	}
-	poolName := strings.TrimSpace(auth.Attributes["cookie_pool_name"])
-	if poolName == "" {
-		return nil
-	}
-	pool := cookiepool.Get(poolName)
-	if pool == nil {
-		return nil
-	}
-	entry := pool.Pick()
-	if entry == nil {
-		return nil
-	}
-	for key, value := range *entry {
-		if strings.TrimSpace(key) != "" && strings.TrimSpace(value) != "" {
-			req.Header.Set(key, value)
-		}
-	}
-	return entry
-}
-
-// shortCookieHash returns a short identifier from the cookie entry's longest
-// header value (typically the session token), formatted as "head..tail" so the
-// cookie can be located by grepping the pool JSON file.
-func shortCookieHash(entry *cookiepool.Entry) string {
-	if entry == nil {
-		return ""
-	}
-	var longest string
-	for _, value := range *entry {
-		if len(value) > len(longest) {
-			longest = value
-		}
-	}
-	// Strip common prefixes like "token=" and suffixes like ".cv3" to maximize uniqueness.
-	if i := strings.IndexByte(longest, '='); i >= 0 && i < 16 {
-		longest = longest[i+1:]
-	}
-	if i := strings.LastIndexByte(longest, '.'); i > 0 && len(longest)-i <= 5 {
-		longest = longest[:i]
-	}
-	if len(longest) > 16 {
-		return longest[:6] + ".." + longest[len(longest)-6:]
-	}
-	return longest
-}

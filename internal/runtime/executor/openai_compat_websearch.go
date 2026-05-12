@@ -10,9 +10,9 @@ import (
 	"strings"
 	"time"
 
-	kiroclaude "github.com/router-for-me/CLIProxyAPI/v6/internal/translator/kiro/claude"
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
+	kiroclaude "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/kiro/claude"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 )
 
 var openAICompatWebSearchFunc = fetchBingRSSWebSearch
@@ -29,9 +29,6 @@ func (e *OpenAICompatExecutor) shouldInterceptWebSearch(auth *cliproxyauth.Auth,
 				return false
 			}
 		}
-	}
-	if !e.requiresAnthropicImageContent(auth) {
-		return false
 	}
 	if opts.SourceFormat != "claude" {
 		return false

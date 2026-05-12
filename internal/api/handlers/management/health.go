@@ -5,7 +5,7 @@ import (
 	"runtime"
 
 	"github.com/gin-gonic/gin"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/usage"
 )
 
 // GetHealthScore returns a 0-100 health score computed from current usage

@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"testing"
 
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 )
 
 func makeSSEChunk(content string) cliproxyexecutor.StreamChunk {

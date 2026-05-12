@@ -10,7 +10,7 @@ import (
 	"time"
 
 	sub2api "github.com/Wei-Shaw/sub2api/pkg/types"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 )
 
 const (

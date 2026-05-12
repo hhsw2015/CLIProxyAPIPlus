@@ -9,7 +9,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	sub2api "github.com/Wei-Shaw/sub2api/pkg/types"
-	coreusage "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
+	coreusage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 )
 
 // BillingPlugin bridges CPA's usage reporting to sub2api's billing engine.

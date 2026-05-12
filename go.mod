@@ -1,4 +1,4 @@
-module github.com/router-for-me/CLIProxyAPI/v6
+module github.com/router-for-me/CLIProxyAPI/v7
 
 go 1.26.0
 
@@ -81,7 +81,7 @@ require (
 	github.com/pquerna/otp v1.5.0 // indirect
 	github.com/quic-go/qpack v0.6.0 // indirect
 	github.com/quic-go/quic-go v0.57.1 // indirect
-	github.com/redis/go-redis/v9 v9.17.2 // indirect
+	github.com/redis/go-redis/v9 v9.17.2
 	github.com/robfig/cron/v3 v3.0.1 // indirect
 	github.com/sagikazarmark/locafero v0.4.0 // indirect
 	github.com/sagikazarmark/slog-shim v0.1.0 // indirect
@@ -195,6 +195,7 @@ require (
 require (
 	github.com/Wei-Shaw/sub2api v0.0.0
 	github.com/glebarez/sqlite v1.11.0
+	github.com/router-for-me/CLIProxyAPI/v6 v6.10.9
 	go.uber.org/zap v1.24.0
 	gorm.io/gorm v1.31.1
 )
