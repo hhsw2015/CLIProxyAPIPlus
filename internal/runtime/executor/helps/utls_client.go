@@ -1,6 +1,7 @@
 package helps
 
 import (
+	"context"
 	"net"
 	"net/http"
 	"strings"
@@ -159,8 +160,9 @@ func NewUtlsHTTPClient(cfg *config.Config, auth *cliproxyauth.Auth, timeout time
 		proxyURL = strings.TrimSpace(auth.ProxyURL)
 	}
 	if proxyURL == "" {
-		if poolURL := proxypool.GetProxyURL(); poolURL != "" {
-			proxyURL = poolURL
+		if dialCtx := proxypool.GetDialContext(); dialCtx != nil {
+			// Pool provides in-process ECH tunnel dialer -- use it directly
+			return buildUtlsClientWithDialer(dialCtx, timeout)
 		}
 	}
 	if proxyURL == "" && cfg != nil {
@@ -187,6 +189,18 @@ func NewUtlsHTTPClient(cfg *config.Config, auth *cliproxyauth.Auth, timeout time
 			fallback: standardTransport,
 		},
 	}
+	if timeout > 0 {
+		client.Timeout = timeout
+	}
+	return client
+}
+
+// buildUtlsClientWithDialer creates an HTTP client using the pool's ECH DialContext.
+// The ECH tunnel provides the connection; TLS is handled within the tunnel.
+func buildUtlsClientWithDialer(dialCtx func(ctx context.Context, network, addr string) (net.Conn, error), timeout time.Duration) *http.Client {
+	transport := buildProxyTransport("")
+	transport.DialContext = dialCtx
+	client := &http.Client{Transport: transport}
 	if timeout > 0 {
 		client.Timeout = timeout
 	}

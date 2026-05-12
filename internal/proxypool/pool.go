@@ -3,7 +3,6 @@ package proxypool
 import (
 	"context"
 	"crypto/tls"
-	"fmt"
 	"net"
 	"net/http"
 	"sync/atomic"
@@ -11,11 +10,11 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	log "github.com/sirupsen/logrus"
-	"golang.org/x/net/proxy"
 )
 
-// Pool manages persistent HTTP transports for each ECH worker,
-// selecting them via weighted round-robin.
+// Pool manages in-process ECH dialers with weighted round-robin.
+// Each dialer corresponds to one Cloudflare Worker (= one exit IP).
+// Connections go directly through ECH WebSocket tunnels -- no IPC, no SOCKS5.
 type Pool struct {
 	entries []*entry
 	weights []int
@@ -25,14 +24,13 @@ type Pool struct {
 
 type entry struct {
 	name      string
-	addr      string
-	proxyURL  string
+	dialer    *ECHDialer // nil for direct entry
 	transport *http.Transport
 	healthy   atomic.Bool
 }
 
-// NewPool creates a connection pool with persistent transports per worker.
-func NewPool(workerAddrs []string, cfg config.ProxyPoolConfig) *Pool {
+// NewPool creates a connection pool with in-process ECH dialers.
+func NewPool(dialers []*ECHDialer, cfg config.ProxyPoolConfig) *Pool {
 	p := &Pool{}
 
 	weightECH := cfg.WeightECH
@@ -44,17 +42,22 @@ func NewPool(workerAddrs []string, cfg config.ProxyPoolConfig) *Pool {
 		weightDirect = 1
 	}
 
-	for i, addr := range workerAddrs {
-		name := fmt.Sprintf("ech-%d", i+1)
-		if i < len(cfg.Workers) {
-			name = cfg.Workers[i].Name
+	for _, d := range dialers {
+		t := &http.Transport{
+			DialContext: func(dialer *ECHDialer) func(ctx context.Context, network, addr string) (net.Conn, error) {
+				return func(ctx context.Context, network, addr string) (net.Conn, error) {
+					return dialer.Dial(addr)
+				}
+			}(d),
+			MaxIdleConns:        10,
+			MaxIdleConnsPerHost: 5,
+			IdleConnTimeout:     90 * time.Second,
+			TLSHandshakeTimeout: 10 * time.Second,
+			TLSClientConfig:    &tls.Config{},
 		}
-
-		t := buildSOCKS5Transport(addr)
 		e := &entry{
-			name:      name,
-			addr:      addr,
-			proxyURL:  fmt.Sprintf("socks5://127.0.0.1:%s", portFromAddr(addr)),
+			name:      d.name,
+			dialer:    d,
 			transport: t,
 		}
 		e.healthy.Store(true)
@@ -72,8 +75,6 @@ func NewPool(workerAddrs []string, cfg config.ProxyPoolConfig) *Pool {
 		}
 		e := &entry{
 			name:      "direct",
-			addr:      "",
-			proxyURL:  "",
 			transport: t,
 		}
 		e.healthy.Store(true)
@@ -86,12 +87,10 @@ func NewPool(workerAddrs []string, cfg config.ProxyPoolConfig) *Pool {
 }
 
 // NextTransport returns the next transport via weighted round-robin.
-// Returns nil if no healthy entries available.
 func (p *Pool) NextTransport() *http.Transport {
 	if len(p.entries) == 0 {
 		return nil
 	}
-
 	start := p.counter.Add(1)
 	for attempts := 0; attempts < len(p.entries)*2; attempts++ {
 		idx := p.weightedIndex(start + uint64(attempts))
@@ -99,32 +98,40 @@ func (p *Pool) NextTransport() *http.Transport {
 			return p.entries[idx].transport
 		}
 	}
-
-	// All unhealthy, return first entry anyway
 	return p.entries[0].transport
 }
 
-// NextProxyURL returns the SOCKS5 URL of the next worker (for utls client).
-// Returns "" if pool is empty or the selected entry is direct.
-func (p *Pool) NextProxyURL() string {
+// DialContext dials target through the next ECH tunnel (for utls client).
+func (p *Pool) DialContext(ctx context.Context, network, addr string) (net.Conn, error) {
 	if len(p.entries) == 0 {
-		return ""
+		return (&net.Dialer{Timeout: 10 * time.Second}).DialContext(ctx, network, addr)
 	}
-
 	start := p.counter.Add(1)
 	for attempts := 0; attempts < len(p.entries)*2; attempts++ {
 		idx := p.weightedIndex(start + uint64(attempts))
-		if p.entries[idx].healthy.Load() && p.entries[idx].proxyURL != "" {
-			return p.entries[idx].proxyURL
+		e := p.entries[idx]
+		if !e.healthy.Load() {
+			continue
 		}
+		if e.dialer == nil {
+			// direct entry
+			return (&net.Dialer{Timeout: 10 * time.Second}).DialContext(ctx, network, addr)
+		}
+		conn, err := e.dialer.Dial(addr)
+		if err != nil {
+			log.Warnf("[proxypool] %s dial failed: %v", e.name, err)
+			e.healthy.Store(false)
+			continue
+		}
+		return conn, nil
 	}
-	return ""
+	return nil, net.ErrClosed
 }
 
-// StartHealthCheck runs periodic health checks on all workers.
+// StartHealthCheck runs periodic health checks.
 func (p *Pool) StartHealthCheck(ctx context.Context) {
 	go func() {
-		ticker := time.NewTicker(30 * time.Second)
+		ticker := time.NewTicker(60 * time.Second)
 		defer ticker.Stop()
 		for {
 			select {
@@ -138,22 +145,21 @@ func (p *Pool) StartHealthCheck(ctx context.Context) {
 }
 
 func (p *Pool) checkAll() {
-	for i := range p.entries {
-		if p.entries[i].addr == "" {
-			continue // direct entry, always healthy
+	for _, e := range p.entries {
+		if e.dialer == nil {
+			continue
 		}
-		conn, err := net.DialTimeout("tcp", p.entries[i].addr, 3*time.Second)
-		if err != nil {
-			if p.entries[i].healthy.Load() {
-				log.Warnf("[proxypool] %s unhealthy: %v", p.entries[i].name, err)
+		// Try refreshing ECH config as health check
+		if err := e.dialer.refreshECH(); err != nil {
+			if e.healthy.Load() {
+				log.Warnf("[proxypool] %s unhealthy: %v", e.name, err)
 			}
-			p.entries[i].healthy.Store(false)
+			e.healthy.Store(false)
 		} else {
-			conn.Close()
-			if !p.entries[i].healthy.Load() {
-				log.Infof("[proxypool] %s recovered", p.entries[i].name)
+			if !e.healthy.Load() {
+				log.Infof("[proxypool] %s recovered", e.name)
 			}
-			p.entries[i].healthy.Store(true)
+			e.healthy.Store(true)
 		}
 	}
 }
@@ -170,35 +176,4 @@ func (p *Pool) weightedIndex(n uint64) int {
 		}
 	}
 	return len(p.entries) - 1
-}
-
-func buildSOCKS5Transport(addr string) *http.Transport {
-	dialer, err := proxy.SOCKS5("tcp", addr, nil, proxy.Direct)
-	if err != nil {
-		log.Errorf("[proxypool] failed to create SOCKS5 dialer for %s: %v", addr, err)
-		return &http.Transport{}
-	}
-
-	ctxDialer, ok := dialer.(proxy.ContextDialer)
-	if !ok {
-		log.Errorf("[proxypool] SOCKS5 dialer for %s does not support ContextDialer", addr)
-		return &http.Transport{}
-	}
-
-	return &http.Transport{
-		DialContext:         ctxDialer.DialContext,
-		MaxIdleConns:        10,
-		MaxIdleConnsPerHost: 5,
-		IdleConnTimeout:     90 * time.Second,
-		TLSClientConfig:    &tls.Config{},
-		TLSHandshakeTimeout: 10 * time.Second,
-	}
-}
-
-func portFromAddr(addr string) string {
-	_, port, err := net.SplitHostPort(addr)
-	if err != nil {
-		return addr
-	}
-	return port
 }

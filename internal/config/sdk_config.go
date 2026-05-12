@@ -10,7 +10,6 @@ package config
 // through persistent per-worker connections, eliminating the external warp-pool hop.
 type ProxyPoolConfig struct {
 	Enabled       bool              `yaml:"enabled" json:"enabled"`
-	ECHBin        string            `yaml:"ech-bin,omitempty" json:"ech-bin,omitempty"`
 	Workers       []ECHWorkerConfig `yaml:"workers" json:"workers"`
 	IncludeDirect bool              `yaml:"include-direct,omitempty" json:"include-direct,omitempty"`
 	WeightECH     int               `yaml:"weight-ech,omitempty" json:"weight-ech,omitempty"`
