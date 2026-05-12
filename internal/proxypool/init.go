@@ -47,6 +47,19 @@ func Init(ctx context.Context, cfg config.ProxyPoolConfig) error {
 	mu.Unlock()
 
 	log.Infof("[proxypool] ready with %d in-process ECH dialers (zero IPC)", len(dialers))
+
+	// Warmup: pre-establish tunnels to common upstream hosts
+	warmupHosts := []string{
+		"bedrock-runtime.us-east-1.amazonaws.com:443",
+		"bedrock-runtime.us-west-2.amazonaws.com:443",
+		"bedrock-runtime.ap-northeast-1.amazonaws.com:443",
+		"api.anthropic.com:443",
+	}
+	go func() {
+		pool.Warmup(warmupHosts)
+		log.Infof("[proxypool] warmup complete")
+	}()
+
 	return nil
 }
 
@@ -58,6 +71,17 @@ func GetTransport() *http.Transport {
 		return nil
 	}
 	return globalPool.NextTransport()
+}
+
+// GetTransportForHost returns a sticky transport for the given host.
+// Same host always maps to same ECH worker → maximizes connection reuse.
+func GetTransportForHost(host string) *http.Transport {
+	mu.RLock()
+	defer mu.RUnlock()
+	if !initialized || globalPool == nil {
+		return nil
+	}
+	return globalPool.TransportForHost(host)
 }
 
 // GetDialContext returns a DialContext function for the pool (used by utls client).
