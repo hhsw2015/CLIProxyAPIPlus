@@ -25,11 +25,23 @@ type HeadroomConfig struct {
 	Allow    []string `yaml:"allow,omitempty" json:"allow,omitempty"`
 	Deny     []string `yaml:"deny,omitempty" json:"deny,omitempty"`
 	// CCRSqlitePath enables a persistent SQLite-backed CCR store at the
-	// given path. Empty string keeps the default in-memory store.
+	// given path. Empty string keeps the default in-memory store. Mutually
+	// exclusive with CCRRedisURL — Redis takes precedence.
 	CCRSqlitePath string `yaml:"ccr-sqlite-path,omitempty" json:"ccr-sqlite-path,omitempty"`
-	// CCRTtlSeconds sets entry TTL for the SQLite store. 0 = headroom
+	// CCRRedisURL enables a Redis-backed CCR store for fleet-wide sharing
+	// (e.g. redis://127.0.0.1:6379). Takes precedence over CCRSqlitePath.
+	CCRRedisURL string `yaml:"ccr-redis-url,omitempty" json:"ccr-redis-url,omitempty"`
+	// CCRRedisKeyPrefix optionally namespaces Redis keys.
+	CCRRedisKeyPrefix string `yaml:"ccr-redis-key-prefix,omitempty" json:"ccr-redis-key-prefix,omitempty"`
+	// CCRTtlSeconds sets entry TTL for the chosen backend. 0 = headroom
 	// default (300s).
 	CCRTtlSeconds uint64 `yaml:"ccr-ttl-seconds,omitempty" json:"ccr-ttl-seconds,omitempty"`
+	// AnthropicFrozenCount pins the first N Anthropic messages from
+	// compression unconditionally. Useful for protecting few-shot examples
+	// or system seed turns. The FFI also auto-detects cache_control
+	// markers — the effective floor is max(this value, computed). 0 means
+	// "rely entirely on cache_control auto-detect".
+	AnthropicFrozenCount int `yaml:"anthropic-frozen-count,omitempty" json:"anthropic-frozen-count,omitempty"`
 }
 
 // ProxyPoolConfig controls the embedded ECH worker proxy pool.

@@ -552,12 +552,20 @@ func main() {
 
 	// Headroom FFI compression (default disabled)
 	headroom.SetConfig(headroom.Config{
-		Enabled:  cfg.Headroom.Enabled,
-		MinBytes: cfg.Headroom.MinBytes,
-		Allow:    cfg.Headroom.Allow,
-		Deny:     cfg.Headroom.Deny,
+		Enabled:              cfg.Headroom.Enabled,
+		MinBytes:             cfg.Headroom.MinBytes,
+		Allow:                cfg.Headroom.Allow,
+		Deny:                 cfg.Headroom.Deny,
+		AnthropicFrozenCount: cfg.Headroom.AnthropicFrozenCount,
 	})
-	if cfg.Headroom.CCRSqlitePath != "" {
+	switch {
+	case cfg.Headroom.CCRRedisURL != "":
+		if err := headroom.RegisterRedisCCRStore(cfg.Headroom.CCRRedisURL, cfg.Headroom.CCRRedisKeyPrefix, cfg.Headroom.CCRTtlSeconds); err != nil {
+			log.Errorf("[headroom] redis ccr init failed (%s): %v — falling back to in-memory", cfg.Headroom.CCRRedisURL, err)
+		} else {
+			log.Infof("[headroom] redis ccr backend at %s (prefix=%q ttl=%ds)", cfg.Headroom.CCRRedisURL, cfg.Headroom.CCRRedisKeyPrefix, cfg.Headroom.CCRTtlSeconds)
+		}
+	case cfg.Headroom.CCRSqlitePath != "":
 		if dir := filepath.Dir(cfg.Headroom.CCRSqlitePath); dir != "" && dir != "." {
 			if err := os.MkdirAll(dir, 0o755); err != nil {
 				log.Errorf("[headroom] cannot create ccr dir %s: %v — falling back to in-memory", dir, err)

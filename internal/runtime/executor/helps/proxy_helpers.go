@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -141,28 +142,51 @@ func extractModel(body []byte) string {
 // bound compression latency. The body itself is still forwarded unchanged.
 const headroomMaxBodyBytes = 8 << 20
 
-// shouldCompress returns true only for endpoints whose body is OpenAI-format
-// chat-completions JSON, which is the only schema headroom-ffi currently
-// understands. Anthropic Messages (/v1/messages, /v1/messages/count_tokens),
-// Google Gemini (:generateContent, :streamGenerateContent), token
-// validation, model listing and OAuth refresh all pass through unchanged.
-func shouldCompress(req *http.Request) bool {
+// bodyFormat indicates the JSON schema of a request body — used to dispatch
+// to the matching FFI compressor.
+type bodyFormat int
+
+const (
+	formatNone bodyFormat = iota
+	formatOpenAIChat
+	formatOpenAIResponses
+	formatAnthropic
+)
+
+
+// classifyRequest returns the body format for endpoints headroom-ffi knows
+// how to compress. Returns formatNone for token validation, model listing,
+// OAuth refresh, count_tokens, Gemini, etc. — those pass through unchanged.
+func classifyRequest(req *http.Request) bodyFormat {
 	if req == nil || req.URL == nil {
-		return false
+		return formatNone
 	}
 	if req.Method != http.MethodPost && req.Method != http.MethodPut {
-		return false
+		return formatNone
 	}
 	p := req.URL.Path
-	return strings.Contains(p, "/chat/completions") ||
-		strings.HasSuffix(p, "/responses")
+	if strings.Contains(p, "/chat/completions") {
+		return formatOpenAIChat
+	}
+	// OpenAI Responses API (Codex `/v1/responses`) — different schema than
+	// chat/completions: top-level `input` array of items.
+	if strings.HasSuffix(p, "/responses") {
+		return formatOpenAIResponses
+	}
+	// Anthropic Messages: /v1/messages or /anthropic/v1/messages, but NOT
+	// /messages/count_tokens (token introspection — must not compress).
+	if strings.HasSuffix(p, "/v1/messages") {
+		return formatAnthropic
+	}
+	return formatNone
 }
 
 // HeadroomDo wraps httpClient.Do with headroom FFI compression.
 // Falls back to the original body on compression failure or when disabled.
 // Safe for nil/empty bodies and non-chat endpoints (passes through).
 func HeadroomDo(httpClient *http.Client, req *http.Request) (*http.Response, error) {
-	if req == nil || req.Body == nil || !shouldCompress(req) {
+	format := classifyRequest(req)
+	if req == nil || req.Body == nil || format == formatNone {
 		return httpClient.Do(req)
 	}
 	// Read the full body — CPA executors have already serialized JSON in
@@ -188,9 +212,31 @@ func HeadroomDo(httpClient *http.Client, req *http.Request) (*http.Response, err
 	}
 
 	modelStr := extractModel(body)
-	result := headroom.CompressBytes(body, modelStr)
+	authMode := headroom.AuthModeFromContext(req.Context())
+	var result *headroom.Result
+	switch format {
+	case formatAnthropic:
+		// FFI auto-detects cache_control markers and raises the frozen
+		// floor accordingly. The user-supplied floor (config + per-request
+		// header X-Headroom-Frozen-Count) is passed through; FFI takes
+		// max(user, computed) so cache_control always wins for safety.
+		userFloor := headroom.AnthropicFrozenCount()
+		if hdr := req.Header.Get("X-Headroom-Frozen-Count"); hdr != "" {
+			if v, err := strconv.Atoi(hdr); err == nil && v >= 0 {
+				userFloor = v
+			}
+		}
+		result = headroom.CompressAnthropicBytes(body, modelStr, userFloor, authMode)
+	case formatOpenAIResponses:
+		result = headroom.CompressResponsesBytes(body, modelStr, authMode)
+	default:
+		result = headroom.CompressBytes(body, modelStr, authMode)
+	}
 	if result.Error != nil {
 		log.Warnf("[headroom] compress error: %v", result.Error)
+	} else if !result.Modified {
+		log.Infof("[headroom] no-change format=%d body=%d model=%q tokens=%d path=%s",
+			format, len(body), modelStr, result.TokensBefore, req.URL.Path)
 	} else if result.Modified && len(result.CompressedBody) > 0 {
 		if modelStr == "" {
 			modelStr = "unknown"
