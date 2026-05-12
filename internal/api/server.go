@@ -31,6 +31,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/kiro"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/cache"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/headroom"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/managementasset"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/redisqueue"
@@ -464,6 +465,7 @@ func (s *Server) setupRoutes() {
 		v1.GET("/responses", openaiResponsesHandlers.ResponsesWebsocket)
 		v1.POST("/responses", openaiResponsesHandlers.Responses)
 		v1.POST("/responses/compact", openaiResponsesHandlers.Compact)
+		v1.GET("/headroom/ccr/:hash", s.handleHeadroomCcrGet)
 	}
 	// Media API proxy routes (images, audio)
 	s.setupMediaRoutes(v1)
@@ -1586,4 +1588,27 @@ func configuredSignatureBypassStrict(cfg *config.Config) bool {
 		return *cfg.AntigravitySignatureBypassStrict
 	}
 	return false
+}
+
+// handleHeadroomCcrGet returns the original content stashed under a CCR hash.
+// Returns 404 if the hash is unknown or expired, 500 on FFI errors. Detailed
+// errors are logged server-side; clients receive a generic message to avoid
+// leaking filesystem paths or backend internals.
+func (s *Server) handleHeadroomCcrGet(c *gin.Context) {
+	hash := c.Param("hash")
+	if hash == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "hash required"})
+		return
+	}
+	content, found, err := headroom.CcrGet(hash)
+	if err != nil {
+		log.Errorf("[headroom] ccr lookup failed (hash=%s): %v", hash, err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "ccr lookup failed"})
+		return
+	}
+	if !found {
+		c.JSON(http.StatusNotFound, gin.H{"error": "not found", "hash": hash})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"hash": hash, "content": content})
 }

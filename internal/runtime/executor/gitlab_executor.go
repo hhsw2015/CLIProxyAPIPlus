@@ -17,6 +17,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
@@ -262,7 +263,7 @@ func (e *GitLabExecutor) HttpRequest(ctx context.Context, auth *cliproxyauth.Aut
 	if token := gitLabPrimaryToken(auth); token != "" {
 		httpReq.Header.Set("Authorization", "Bearer "+token)
 	}
-	return newProxyAwareHTTPClient(ctx, e.cfg, auth, 0).Do(httpReq)
+	return helps.HeadroomDo(newProxyAwareHTTPClient(ctx, e.cfg, auth, 0), httpReq)
 }
 
 func (e *GitLabExecutor) translateToOpenAI(req cliproxyexecutor.Request, opts cliproxyexecutor.Options) ([]byte, error) {

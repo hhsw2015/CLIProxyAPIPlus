@@ -1,13 +1,17 @@
 package helps
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"io"
 	"net/http"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/headroom"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/proxypool"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/proxyutil"
@@ -116,4 +120,91 @@ func buildProxyTransport(proxyURL string) *http.Transport {
 		return nil
 	}
 	return transport
+}
+
+// extractModel reads the "model" field from request body JSON bytes.
+func extractModel(body []byte) string {
+	if len(body) == 0 {
+		return ""
+	}
+	var j map[string]any
+	if json.Unmarshal(body, &j) != nil {
+		return ""
+	}
+	if m, ok := j["model"].(string); ok && m != "" {
+		return m
+	}
+	return ""
+}
+
+// 8 MiB cap on compressible body size; bodies larger than this skip FFI to
+// bound compression latency. The body itself is still forwarded unchanged.
+const headroomMaxBodyBytes = 8 << 20
+
+// shouldCompress returns true only for endpoints whose body is OpenAI-format
+// chat-completions JSON, which is the only schema headroom-ffi currently
+// understands. Anthropic Messages (/v1/messages, /v1/messages/count_tokens),
+// Google Gemini (:generateContent, :streamGenerateContent), token
+// validation, model listing and OAuth refresh all pass through unchanged.
+func shouldCompress(req *http.Request) bool {
+	if req == nil || req.URL == nil {
+		return false
+	}
+	if req.Method != http.MethodPost && req.Method != http.MethodPut {
+		return false
+	}
+	p := req.URL.Path
+	return strings.Contains(p, "/chat/completions") ||
+		strings.HasSuffix(p, "/responses")
+}
+
+// HeadroomDo wraps httpClient.Do with headroom FFI compression.
+// Falls back to the original body on compression failure or when disabled.
+// Safe for nil/empty bodies and non-chat endpoints (passes through).
+func HeadroomDo(httpClient *http.Client, req *http.Request) (*http.Response, error) {
+	if req == nil || req.Body == nil || !shouldCompress(req) {
+		return httpClient.Do(req)
+	}
+	// Read the full body — CPA executors have already serialized JSON in
+	// memory before this point, so we are not introducing new allocations.
+	// Truncating with LimitReader would silently drop bytes when the body
+	// exceeds the size cap, producing invalid requests upstream.
+	body, err := io.ReadAll(req.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	// Always set GetBody so retries (auth refresh, transient errors) can
+	// reconstruct the request body from a stable snapshot, regardless of
+	// whether compression runs.
+	req.Body = io.NopCloser(bytes.NewReader(body))
+	req.GetBody = func() (io.ReadCloser, error) {
+		return io.NopCloser(bytes.NewReader(body)), nil
+	}
+	req.ContentLength = int64(len(body))
+
+	if len(body) > headroomMaxBodyBytes {
+		return httpClient.Do(req)
+	}
+
+	modelStr := extractModel(body)
+	result := headroom.CompressBytes(body, modelStr)
+	if result.Error != nil {
+		log.Warnf("[headroom] compress error: %v", result.Error)
+	} else if result.Modified && len(result.CompressedBody) > 0 {
+		if modelStr == "" {
+			modelStr = "unknown"
+		}
+		log.Infof("[headroom] %s: %d→%d tokens (saved %d, ratio %.2f) body %d→%d bytes",
+			modelStr, result.TokensBefore, result.TokensAfter,
+			result.TokensSaved, result.CompressionRatio,
+			len(body), len(result.CompressedBody))
+		compressed := result.CompressedBody
+		req.Body = io.NopCloser(bytes.NewReader(compressed))
+		req.GetBody = func() (io.ReadCloser, error) {
+			return io.NopCloser(bytes.NewReader(compressed)), nil
+		}
+		req.ContentLength = int64(len(compressed))
+	}
+	return httpClient.Do(req)
 }

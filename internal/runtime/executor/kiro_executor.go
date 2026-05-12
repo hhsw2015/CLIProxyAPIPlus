@@ -23,6 +23,7 @@ import (
 	"github.com/google/uuid"
 	kiroauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/kiro"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	kiroclaude "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/kiro/claude"
 	kirocommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/kiro/common"
 	kiroopenai "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/kiro/openai"
@@ -548,7 +549,7 @@ func (e *KiroExecutor) HttpRequest(ctx context.Context, auth *cliproxyauth.Auth,
 		return nil, errPrepare
 	}
 	httpClient := newKiroHTTPClientWithPooling(ctx, e.cfg, auth, 0)
-	return httpClient.Do(httpReq)
+	return helps.HeadroomDo(httpClient, httpReq)
 }
 
 // getAccountKey returns a stable account key for fingerprint lookup and rate limiting.
@@ -769,7 +770,7 @@ func (e *KiroExecutor) executeWithRetry(ctx context.Context, auth *cliproxyauth.
 			})
 
 			httpClient := newKiroHTTPClientWithPooling(ctx, e.cfg, auth, 120*time.Second)
-			httpResp, err := httpClient.Do(httpReq)
+			httpResp, err := helps.HeadroomDo(httpClient, httpReq)
 			if err != nil {
 				// Check for context cancellation first - client disconnected, not a server error
 				// Use 499 (Client Closed Request - nginx convention) instead of 500
@@ -1212,7 +1213,7 @@ func (e *KiroExecutor) executeStreamWithRetry(ctx context.Context, auth *cliprox
 			})
 
 			httpClient := newKiroHTTPClientWithPooling(ctx, e.cfg, auth, 0)
-			httpResp, err := httpClient.Do(httpReq)
+			httpResp, err := helps.HeadroomDo(httpClient, httpReq)
 			if err != nil {
 				recordAPIResponseError(ctx, e.cfg, err)
 
@@ -4095,7 +4096,7 @@ func fetchToolDescription(ctx context.Context, mcpEndpoint, authToken string, ht
 	// Reuse same headers as callMcpAPI
 	handler.setMcpHeaders(req)
 
-	resp, err := handler.httpClient.Do(req)
+	resp, err := helps.HeadroomDo(handler.httpClient, req)
 	if err != nil {
 		log.Warnf("kiro/websearch: tools/list request failed: %v", err)
 		return
@@ -4224,7 +4225,7 @@ func (h *webSearchHandler) callMcpAPI(request *kiroclaude.McpRequest) (*kiroclau
 
 		h.setMcpHeaders(req)
 
-		resp, err := h.httpClient.Do(req)
+		resp, err := helps.HeadroomDo(h.httpClient, req)
 		if err != nil {
 			lastErr = fmt.Errorf("MCP API request failed: %w", err)
 			continue // network error → retry

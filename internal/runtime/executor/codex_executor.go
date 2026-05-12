@@ -152,7 +152,7 @@ func (e *CodexExecutor) HttpRequest(ctx context.Context, auth *cliproxyauth.Auth
 		return nil, err
 	}
 	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
-	return httpClient.Do(httpReq)
+	return helps.HeadroomDo(httpClient, httpReq)
 }
 
 func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
@@ -222,7 +222,7 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 		AuthValue: authValue,
 	})
 	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
-	httpResp, err := httpClient.Do(httpReq)
+	httpResp, err := helps.HeadroomDo(httpClient, httpReq)
 	if err != nil {
 		helps.RecordAPIResponseError(ctx, e.cfg, err)
 		return resp, err
@@ -373,7 +373,7 @@ func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.A
 		AuthValue: authValue,
 	})
 	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
-	httpResp, err := httpClient.Do(httpReq)
+	httpResp, err := helps.HeadroomDo(httpClient, httpReq)
 	if err != nil {
 		helps.RecordAPIResponseError(ctx, e.cfg, err)
 		return resp, err
@@ -483,7 +483,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	} else {
 		httpClient = helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
 	}
-	httpResp, err := httpClient.Do(httpReq)
+	httpResp, err := helps.HeadroomDo(httpClient, httpReq)
 	if err != nil {
 		helps.RecordAPIResponseError(ctx, e.cfg, err)
 		return nil, err
@@ -888,7 +888,7 @@ func (e *CodexExecutor) codexAccessTokenUsable(ctx context.Context, auth *clipro
 	req.Header.Set("User-Agent", codexUserAgent)
 
 	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 30*time.Second)
-	resp, err := httpClient.Do(req)
+	resp, err := helps.HeadroomDo(httpClient, req)
 	if err != nil {
 		return false, err
 	}

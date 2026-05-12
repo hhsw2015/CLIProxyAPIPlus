@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/headroom"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
@@ -856,6 +857,16 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 		}
 		chunks := streamResult.Chunks
 
+		// CCR marker expansion runs across all chunk boundaries. The expander
+		// is a no-op on streams without `<<ccr:HASH>>` patterns aside from a
+		// regex scan and a tiny trailing buffer.
+		expander := headroom.NewStreamExpander()
+		defer func() {
+			if tail := expander.Flush(); len(tail) > 0 {
+				sendData(tail)
+			}
+		}()
+
 	outer:
 		for {
 			for {
@@ -923,10 +934,14 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 							return
 						}
 					}
-					sentPayload = true
-					if okSendData := sendData(cloneBytes(chunk.Payload)); !okSendData {
+					expanded := expander.Write(chunk.Payload)
+					if len(expanded) == 0 {
+						continue
+					}
+					if okSendData := sendData(expanded); !okSendData {
 						return
 					}
+					sentPayload = true
 				}
 			}
 		}
