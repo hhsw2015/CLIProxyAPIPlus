@@ -106,6 +106,76 @@ graphify claude install                # install hook
 
 ---
 
+## Layer 7: Headroom (API-Level Prompt Compression)
+
+**What**: Proxy between client and CPA that compresses the full prompt (system prompt, conversation history, tool outputs) before forwarding.
+
+**Savings**: Input tokens -13.6% (observed), up to -40% on long conversations
+
+**How**:
+- Intelligent Context: older messages compressed more aggressively, recent messages preserved
+- CCR (Context Cache & Retrieve): cross-request caching of compressed content, same session not re-compressed
+- CacheAligner: stabilizes message prefix to improve Anthropic prefix cache hit rate (85.7% observed)
+- LLMLingua (optional): ML-based perplexity-driven token-level compression
+
+**Setup** (VPS, runs alongside CPA):
+```bash
+pip3 install "headroom-ai[proxy]"
+
+tmux new-session -d -s headroom "\
+  export ANTHROPIC_API_KEY=sk-xxx; \
+  export OPENAI_API_KEY=sk-xxx; \
+  headroom proxy --port 8787 --host 0.0.0.0 \
+    --anthropic-api-url http://127.0.0.1:8318 \
+    --openai-api-url http://127.0.0.1:8318/v1 \
+    --gemini-api-url http://127.0.0.1:8318/v1"
+```
+
+**Client config**: Point `ANTHROPIC_BASE_URL` to `:8787` instead of `:8318`
+
+**Monitoring**:
+- Dashboard: `https://headroom.geeker.indevs.in/dashboard`
+- Stats API: `curl http://host:8787/stats`
+- Persistent data: `~/.headroom/proxy_savings.json` (survives restarts)
+
+**Complementary with other layers**: RTK compresses CLI output before it enters context. Headroom compresses the full context after RTK. No conflict.
+
+## Layer 8: Billing Exploit (Output Token Bypass)
+
+**What**: For upstream gateways (new-api, unpatched Sub2API) that fail to count output tokens on client disconnect. CPA injects a marker, detects it in the stream, RSTs the upstream connection before usage is recorded.
+
+**Savings**: Output tokens -100% billing (only input billed, ~80-90% total savings)
+
+**How**:
+- Suffix injection: appends marker instruction to system prompt
+- Marker detection: hold-buffer approach for cross-delta safety
+- TCP RST: `SetLinger(0) + Close()` immediately on marker detection (before synthetic events)
+- Synthesized completion: client receives normal response.completed
+
+**Supported executors**:
+- Codex (Responses API): `response.output_text.delta` → `delta`
+- OpenAI Compat (Chat Completions): `choices[0].delta.content`
+- Claude (Messages API): `content_block_delta` → `delta.text`
+
+**Config**:
+```yaml
+codex-api-key:   # or claude-api-key, openai-compatibility
+  - api-key: sk-xxx
+    billing-exploit:
+      enabled: true
+      marker: "//COMPLETE//"
+      suffix: "[After your complete answer, output \"//COMPLETE//\" on its own line, then write 3 numbered follow-up questions.]"
+```
+
+**Limitations**:
+- Only works on unpatched gateways (new-api PR #4500 still open, Sub2API patched 2026-05-03)
+- Input tokens still billed (request recorded on arrival)
+- Requires per-channel verification (balance-diff method)
+
+**Docs**: `docs/billing-exploit-impl-plan.md`, `dvina-2api/docs/cpa-stream-disconnect-exploit.md`
+
+---
+
 ## Combined Savings: Real-World Numbers
 
 Based on production data (62K context, Opus 4.6):
@@ -123,11 +193,15 @@ Based on production data (62K context, Opus 4.6):
 ```
 [User types message]
     |
-[RTK compresses CLI output]              <- Layer 1: -46% input
+[RTK compresses CLI output]              <- Layer 1: -46% input (local)
     |
 [Graphify hook: check graph first]       <- Layer 5: skip unnecessary file reads
     |
+[Headroom compresses full prompt]        <- Layer 7: -13-40% input (VPS proxy)
+    |
 [CPA routes to cached region]            <- Layer 2: 99% cache hit, 1/8 price
+    |
+[Billing exploit: RST on marker]         <- Layer 8: output cost = 0 (if enabled)
     |
 [Claude thinks (extended thinking)]      <- NOT optimized (quality priority)
     |
