@@ -14,6 +14,7 @@ type ProxyPoolConfig struct {
 	IncludeDirect bool              `yaml:"include-direct,omitempty" json:"include-direct,omitempty"`
 	WeightECH     int               `yaml:"weight-ech,omitempty" json:"weight-ech,omitempty"`
 	WeightDirect  int               `yaml:"weight-direct,omitempty" json:"weight-direct,omitempty"`
+	WarmupHosts   []string          `yaml:"warmup-hosts,omitempty" json:"warmup-hosts,omitempty"`
 }
 
 // ECHWorkerConfig defines a single ECH worker instance.
