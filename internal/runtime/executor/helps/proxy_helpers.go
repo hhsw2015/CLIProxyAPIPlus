@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/proxypool"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/proxyutil"
 	log "github.com/sirupsen/logrus"
@@ -57,6 +58,17 @@ func NewProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *clip
 			return cachedClient
 		}
 		httpClientCacheMutex.RUnlock()
+	}
+
+	// Priority 2: proxy pool (when enabled, replaces global proxy)
+	if proxyURL == "" {
+		if transport := proxypool.GetTransport(); transport != nil {
+			client := &http.Client{Transport: transport}
+			if timeout > 0 {
+				client.Timeout = timeout
+			}
+			return client
+		}
 	}
 
 	// Create new client

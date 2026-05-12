@@ -5,9 +5,34 @@
 package config
 
 // SDKConfig represents the application's configuration, loaded from a YAML file.
+// ProxyPoolConfig controls the embedded ECH worker proxy pool.
+// When enabled, CPA manages ECH worker processes directly and routes requests
+// through persistent per-worker connections, eliminating the external warp-pool hop.
+type ProxyPoolConfig struct {
+	Enabled       bool              `yaml:"enabled" json:"enabled"`
+	ECHBin        string            `yaml:"ech-bin,omitempty" json:"ech-bin,omitempty"`
+	Workers       []ECHWorkerConfig `yaml:"workers" json:"workers"`
+	IncludeDirect bool              `yaml:"include-direct,omitempty" json:"include-direct,omitempty"`
+	WeightECH     int               `yaml:"weight-ech,omitempty" json:"weight-ech,omitempty"`
+	WeightDirect  int               `yaml:"weight-direct,omitempty" json:"weight-direct,omitempty"`
+}
+
+// ECHWorkerConfig defines a single ECH worker instance.
+type ECHWorkerConfig struct {
+	Name   string `yaml:"name" json:"name"`
+	Domain string `yaml:"domain" json:"domain"`
+	IP     string `yaml:"ip,omitempty" json:"ip,omitempty"`
+	Token  string `yaml:"token" json:"token"`
+	Port   int    `yaml:"port" json:"port"`
+}
+
 type SDKConfig struct {
 	// ProxyURL is the URL of an optional proxy server to use for outbound requests.
 	ProxyURL string `yaml:"proxy-url" json:"proxy-url"`
+
+	// ProxyPool embeds ECH worker management with per-worker connection pools.
+	// Priority: per-auth proxy-url > proxy-pool > global proxy-url.
+	ProxyPool ProxyPoolConfig `yaml:"proxy-pool" json:"proxy-pool"`
 
 	// DisableImageGeneration controls whether the built-in image_generation tool is injected/allowed.
 	//
