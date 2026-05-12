@@ -17,7 +17,7 @@ import (
 // Pool manages persistent HTTP transports for each ECH worker,
 // selecting them via weighted round-robin.
 type Pool struct {
-	entries []entry
+	entries []*entry
 	weights []int
 	total   int
 	counter atomic.Uint64
@@ -51,7 +51,7 @@ func NewPool(workerAddrs []string, cfg config.ProxyPoolConfig) *Pool {
 		}
 
 		t := buildSOCKS5Transport(addr)
-		e := entry{
+		e := &entry{
 			name:      name,
 			addr:      addr,
 			proxyURL:  fmt.Sprintf("socks5://127.0.0.1:%s", portFromAddr(addr)),
@@ -70,7 +70,7 @@ func NewPool(workerAddrs []string, cfg config.ProxyPoolConfig) *Pool {
 			IdleConnTimeout:     90 * time.Second,
 			TLSClientConfig:    &tls.Config{},
 		}
-		e := entry{
+		e := &entry{
 			name:      "direct",
 			addr:      "",
 			proxyURL:  "",
