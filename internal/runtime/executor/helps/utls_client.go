@@ -198,8 +198,9 @@ func NewUtlsHTTPClient(cfg *config.Config, auth *cliproxyauth.Auth, timeout time
 // buildUtlsClientWithDialer creates an HTTP client using the pool's ECH DialContext.
 // The ECH tunnel provides the connection; TLS is handled within the tunnel.
 func buildUtlsClientWithDialer(dialCtx func(ctx context.Context, network, addr string) (net.Conn, error), timeout time.Duration) *http.Client {
-	transport := buildProxyTransport("")
-	transport.DialContext = dialCtx
+	transport := &http.Transport{
+		DialContext: dialCtx,
+	}
 	client := &http.Client{Transport: transport}
 	if timeout > 0 {
 		client.Timeout = timeout
