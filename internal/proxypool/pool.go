@@ -127,8 +127,9 @@ func (p *Pool) hostIndex(host string) int {
 	return int(h % uint64(len(p.entries)))
 }
 
-// Warmup pre-establishes connections to common upstream hosts.
-// This ensures first real request hits a warm tunnel.
+// Warmup pre-establishes connections to common upstream hosts by sending
+// a real HTTP HEAD request through each transport. The idle connection
+// remains in http.Transport's pool for the first real request to reuse.
 func (p *Pool) Warmup(hosts []string) {
 	var wg sync.WaitGroup
 	for _, host := range hosts {
@@ -137,16 +138,24 @@ func (p *Pool) Warmup(hosts []string) {
 				continue
 			}
 			wg.Add(1)
-			go func(d *ECHDialer, target string) {
+			go func(ent *entry, target string) {
 				defer wg.Done()
-				conn, err := d.Dial(target)
+				// Use the entry's transport to make a real HTTP request.
+				// After resp.Body.Close(), the connection stays in idle pool.
+				url := "https://" + target + "/"
+				req, err := http.NewRequest("HEAD", url, nil)
 				if err != nil {
-					log.Debugf("[proxypool] warmup %s->%s failed: %v", d.name, target, err)
 					return
 				}
-				conn.Close()
-				log.Debugf("[proxypool] warmup %s->%s OK", d.name, target)
-			}(e.dialer, host)
+				req.Close = false // keep-alive
+				resp, err := ent.transport.RoundTrip(req)
+				if err != nil {
+					log.Debugf("[proxypool] warmup %s->%s: %v", ent.name, target, err)
+					return
+				}
+				resp.Body.Close() // connection returns to idle pool
+				log.Debugf("[proxypool] warmup %s->%s OK (idle conn cached)", ent.name, target)
+			}(e, host)
 		}
 	}
 	wg.Wait()
