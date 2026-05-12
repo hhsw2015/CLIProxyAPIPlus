@@ -48,17 +48,13 @@ func Init(ctx context.Context, cfg config.ProxyPoolConfig) error {
 
 	log.Infof("[proxypool] ready with %d in-process ECH dialers (zero IPC)", len(dialers))
 
-	// Warmup: pre-establish tunnels to common upstream hosts
-	warmupHosts := []string{
-		"bedrock-runtime.us-east-1.amazonaws.com:443",
-		"bedrock-runtime.us-west-2.amazonaws.com:443",
-		"bedrock-runtime.ap-northeast-1.amazonaws.com:443",
-		"api.anthropic.com:443",
+	// Warmup: pre-establish tunnels to configured upstream hosts
+	if len(cfg.WarmupHosts) > 0 {
+		go func() {
+			pool.Warmup(cfg.WarmupHosts)
+			log.Infof("[proxypool] warmup complete (%d hosts)", len(cfg.WarmupHosts))
+		}()
 	}
-	go func() {
-		pool.Warmup(warmupHosts)
-		log.Infof("[proxypool] warmup complete")
-	}()
 
 	return nil
 }
