@@ -59,6 +59,9 @@ func (d *ECHDialer) Dial(target string) (net.Conn, error) {
 		return nil, fmt.Errorf("ws dial for %s: %w", target, err)
 	}
 
+	// Set read deadline for CONNECT handshake (prevent infinite block)
+	wsConn.SetReadDeadline(time.Now().Add(15 * time.Second))
+
 	// Send CONNECT request
 	msg := fmt.Sprintf("CONNECT:%s|", target)
 	if err := wsConn.WriteMessage(websocket.TextMessage, []byte(msg)); err != nil {
@@ -76,6 +79,9 @@ func (d *ECHDialer) Dial(target string) (net.Conn, error) {
 		wsConn.Close()
 		return nil, fmt.Errorf("tunnel rejected: %s", string(resp))
 	}
+
+	// Clear deadline for data transfer phase
+	wsConn.SetReadDeadline(time.Time{})
 
 	return newWSConn(wsConn, d.name, target), nil
 }
