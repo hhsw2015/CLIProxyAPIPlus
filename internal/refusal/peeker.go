@@ -6,7 +6,7 @@ import (
 	"encoding/json"
 	"strings"
 
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 )
 
 // ErrRefusalDetected is returned when the stream peeker detects a refusal

@@ -13,9 +13,9 @@ import (
 
 	sub2apiEmbed "github.com/Wei-Shaw/sub2api/pkg/embed"
 	sub2api "github.com/Wei-Shaw/sub2api/pkg/types"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
-	coreusage "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	coreusage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 )
 
 // Layer represents the commercial layer lifecycle.
