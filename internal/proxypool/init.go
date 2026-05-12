@@ -2,6 +2,7 @@ package proxypool
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"sync"
 
@@ -18,23 +19,38 @@ var (
 
 // Init starts ECH workers and creates the connection pool.
 // Safe to call even if cfg.Enabled is false (no-op).
+// If ECHBin is "none" or empty and workers are already running externally,
+// the pool connects to existing worker ports without starting new processes.
 func Init(ctx context.Context, cfg config.ProxyPoolConfig) error {
 	if !cfg.Enabled || len(cfg.Workers) == 0 {
 		return nil
 	}
 
-	manager := NewECHManager(cfg)
-	addrs := manager.Start(ctx)
-	if len(addrs) == 0 {
-		log.Warn("[proxypool] no ECH workers started successfully")
-		return nil
+	var addrs []string
+	skipStart := cfg.ECHBin == "none" || cfg.ECHBin == ""
+
+	if skipStart {
+		// Workers managed externally (e.g. by warp-pool), just use their ports
+		for _, w := range cfg.Workers {
+			addrs = append(addrs, fmt.Sprintf("127.0.0.1:%d", w.Port))
+		}
+		log.Infof("[proxypool] using %d externally managed workers", len(addrs))
+	} else {
+		manager := NewECHManager(cfg)
+		addrs = manager.Start(ctx)
+		if len(addrs) == 0 {
+			log.Warn("[proxypool] no ECH workers started successfully")
+			return nil
+		}
+		mu.Lock()
+		globalManager = manager
+		mu.Unlock()
 	}
 
 	pool := NewPool(addrs, cfg)
 	pool.StartHealthCheck(ctx)
 
 	mu.Lock()
-	globalManager = manager
 	globalPool = pool
 	initialized = true
 	mu.Unlock()
