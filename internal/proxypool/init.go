@@ -47,15 +47,6 @@ func Init(ctx context.Context, cfg config.ProxyPoolConfig) error {
 	mu.Unlock()
 
 	log.Infof("[proxypool] ready with %d in-process ECH dialers (zero IPC)", len(dialers))
-
-	// Warmup: pre-establish tunnels to configured upstream hosts
-	if len(cfg.WarmupHosts) > 0 {
-		go func() {
-			pool.Warmup(cfg.WarmupHosts)
-			log.Infof("[proxypool] warmup complete (%d hosts)", len(cfg.WarmupHosts))
-		}()
-	}
-
 	return nil
 }
 
@@ -69,16 +60,6 @@ func GetTransport() *http.Transport {
 	return globalPool.NextTransport()
 }
 
-// GetTransportForHost returns a sticky transport for the given host.
-// Same host always maps to same ECH worker → maximizes connection reuse.
-func GetTransportForHost(host string) *http.Transport {
-	mu.RLock()
-	defer mu.RUnlock()
-	if !initialized || globalPool == nil {
-		return nil
-	}
-	return globalPool.TransportForHost(host)
-}
 
 // GetDialContext returns a DialContext function for the pool (used by utls client).
 func GetDialContext() func(ctx context.Context, network, addr string) (net.Conn, error) {

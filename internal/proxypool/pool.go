@@ -5,7 +5,6 @@ import (
 	"crypto/tls"
 	"net"
 	"net/http"
-	"sync"
 	"sync/atomic"
 	"time"
 
@@ -102,64 +101,6 @@ func (p *Pool) NextTransport() *http.Transport {
 	return p.entries[0].transport
 }
 
-// TransportForHost returns a sticky transport for the given host.
-// Same host always maps to same worker → maximizes connection reuse.
-func (p *Pool) TransportForHost(host string) *http.Transport {
-	if len(p.entries) == 0 {
-		return nil
-	}
-	idx := p.hostIndex(host)
-	// Try sticky entry first, fall through if unhealthy
-	if p.entries[idx].healthy.Load() {
-		return p.entries[idx].transport
-	}
-	// Fallback to round-robin
-	return p.NextTransport()
-}
-
-func (p *Pool) hostIndex(host string) int {
-	// FNV-1a hash for consistent mapping
-	var h uint64 = 14695981039346656037
-	for i := 0; i < len(host); i++ {
-		h ^= uint64(host[i])
-		h *= 1099511628211
-	}
-	return int(h % uint64(len(p.entries)))
-}
-
-// Warmup pre-establishes connections to common upstream hosts by sending
-// a real HTTP HEAD request through each transport. The idle connection
-// remains in http.Transport's pool for the first real request to reuse.
-func (p *Pool) Warmup(hosts []string) {
-	var wg sync.WaitGroup
-	for _, host := range hosts {
-		for _, e := range p.entries {
-			if e.dialer == nil || !e.healthy.Load() {
-				continue
-			}
-			wg.Add(1)
-			go func(ent *entry, target string) {
-				defer wg.Done()
-				// Use the entry's transport to make a real HTTP request.
-				// After resp.Body.Close(), the connection stays in idle pool.
-				url := "https://" + target + "/"
-				req, err := http.NewRequest("HEAD", url, nil)
-				if err != nil {
-					return
-				}
-				req.Close = false // keep-alive
-				resp, err := ent.transport.RoundTrip(req)
-				if err != nil {
-					log.Debugf("[proxypool] warmup %s->%s: %v", ent.name, target, err)
-					return
-				}
-				resp.Body.Close() // connection returns to idle pool
-				log.Debugf("[proxypool] warmup %s->%s OK (idle conn cached)", ent.name, target)
-			}(e, host)
-		}
-	}
-	wg.Wait()
-}
 
 // DialContext dials target through the next ECH tunnel (for utls client).
 func (p *Pool) DialContext(ctx context.Context, network, addr string) (net.Conn, error) {
