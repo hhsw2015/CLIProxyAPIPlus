@@ -148,17 +148,28 @@ func markSessionNeedsThinkingStrip(ctx context.Context) {
 	}
 }
 
-// isThinkingSignatureError returns true if the Bedrock error is about thinking.signature.
-// This covers both "Invalid signature" (cross-provider history) and "Field required"
-// (signature missing from an existing thinking block). In both cases, stripping
-// thinking blocks from history and retrying is safe -- thinking outputs from
-// previous turns don't affect the model's reasoning for the current turn.
+// isThinkingSignatureError returns true if the Bedrock error is about a
+// thinking / redacted_thinking block in the conversation history. Covers:
+//   - "Invalid signature in thinking block"     (cross-provider signature mismatch)
+//   - "Field required: signature"               (signature missing on a thinking block)
+//   - "Invalid `data` in `redacted_thinking`"   (cross-provider redacted_thinking blob)
+//
+// In all three cases, stripping thinking-type blocks from history and
+// retrying is safe -- previous-turn thinking outputs don't affect the
+// model's reasoning for the current turn.
 func isThinkingSignatureError(err error) bool {
 	if err == nil {
 		return false
 	}
 	msg := err.Error()
-	return strings.Contains(msg, "thinking") && strings.Contains(msg, "signature")
+	hasThinking := strings.Contains(msg, "thinking") || strings.Contains(msg, "redacted_thinking")
+	if !hasThinking {
+		return false
+	}
+	return strings.Contains(msg, "signature") ||
+		strings.Contains(msg, "Invalid `data`") ||
+		strings.Contains(msg, "Invalid data") ||
+		strings.Contains(msg, "Field required")
 }
 
 // stripThinkingBlocksFromHistory removes thinking-type content blocks from
