@@ -831,8 +831,21 @@ func (m *scheduledAuthMeta) supportsModel(modelKey string) bool {
 	if len(m.supportedModelSet) == 0 {
 		return false
 	}
-	_, ok := m.supportedModelSet[modelKey]
-	return ok
+	if _, ok := m.supportedModelSet[modelKey]; ok {
+		return true
+	}
+	// Tolerate dot/dash orthographic variants of the same Claude model
+	// (claude-opus-4.7 ↔ claude-opus-4-7). Different upstreams register
+	// different forms; routing should treat them as equivalent.
+	for _, alt := range registry.ClaudeModelEquivalents(modelKey) {
+		if alt == modelKey {
+			continue
+		}
+		if _, ok := m.supportedModelSet[alt]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 // upsertEntryLocked updates or inserts one auth entry and rebuilds indexes when ordering changes.
