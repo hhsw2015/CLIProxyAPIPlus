@@ -206,6 +206,13 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	extraBetas, body = extractAndRemoveBetas(body)
 	bodyForTranslation := body
 	bodyForUpstream := body
+	// Proactive strip: if a prior request on this session already hit the
+	// thinking/redacted_thinking validation error (Bedrock or third-party
+	// proxies fronting Bedrock), drop those blocks before they reach upstream
+	// so we don't pay another 400 + retry round-trip.
+	if shouldStripThinkingForSession(ctx) {
+		bodyForUpstream = stripThinkingBlocksFromHistory(bodyForUpstream)
+	}
 	oauthToken := isClaudeOAuthToken(apiKey)
 	var oauthToolNamesReverseMap map[string]string
 	if oauthToken {
@@ -294,6 +301,16 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 			b = []byte(msg)
 		}
 		helps.AppendAPIResponseChunk(ctx, e.cfg, b)
+		// Mark the session so subsequent requests proactively strip thinking
+		// blocks. We don't retry the current request inline — body signing,
+		// cache_control invariants, and exploit suffix have all been baked in
+		// already, and reconstructing them safely is expensive. Surfacing the
+		// 400 to the client (who will resend) lets the proactive path in the
+		// next round handle it cleanly, mirroring how the bedrock executor's
+		// session cache works on the second call.
+		if httpResp.StatusCode == http.StatusBadRequest && isThinkingErrorMessage(string(b)) {
+			markSessionNeedsThinkingStrip(ctx)
+		}
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
 		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
 		if errClose := errBody.Close(); errClose != nil {
@@ -419,6 +436,13 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	extraBetas, body = extractAndRemoveBetas(body)
 	bodyForTranslation := body
 	bodyForUpstream := body
+	// Proactive strip: if a prior request on this session already hit the
+	// thinking/redacted_thinking validation error (Bedrock or third-party
+	// proxies fronting Bedrock), drop those blocks before they reach upstream
+	// so we don't pay another 400 + retry round-trip.
+	if shouldStripThinkingForSession(ctx) {
+		bodyForUpstream = stripThinkingBlocksFromHistory(bodyForUpstream)
+	}
 	oauthToken := isClaudeOAuthToken(apiKey)
 	var oauthToolNamesReverseMap map[string]string
 	if oauthToken {
@@ -508,6 +532,16 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			b = []byte(msg)
 		}
 		helps.AppendAPIResponseChunk(ctx, e.cfg, b)
+		// Mark the session so subsequent requests proactively strip thinking
+		// blocks. We don't retry the current request inline — body signing,
+		// cache_control invariants, and exploit suffix have all been baked in
+		// already, and reconstructing them safely is expensive. Surfacing the
+		// 400 to the client (who will resend) lets the proactive path in the
+		// next round handle it cleanly, mirroring how the bedrock executor's
+		// session cache works on the second call.
+		if httpResp.StatusCode == http.StatusBadRequest && isThinkingErrorMessage(string(b)) {
+			markSessionNeedsThinkingStrip(ctx)
+		}
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
 		if errClose := errBody.Close(); errClose != nil {
 			log.Errorf("response body close error: %v", errClose)
@@ -900,6 +934,16 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 			b = []byte(msg)
 		}
 		helps.AppendAPIResponseChunk(ctx, e.cfg, b)
+		// Mark the session so subsequent requests proactively strip thinking
+		// blocks. We don't retry the current request inline — body signing,
+		// cache_control invariants, and exploit suffix have all been baked in
+		// already, and reconstructing them safely is expensive. Surfacing the
+		// 400 to the client (who will resend) lets the proactive path in the
+		// next round handle it cleanly, mirroring how the bedrock executor's
+		// session cache works on the second call.
+		if resp.StatusCode == http.StatusBadRequest && isThinkingErrorMessage(string(b)) {
+			markSessionNeedsThinkingStrip(ctx)
+		}
 		if errClose := errBody.Close(); errClose != nil {
 			log.Errorf("response body close error: %v", errClose)
 		}

@@ -111,6 +111,14 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 		}
 	}
 
+	// Proactive strip: many openai-compat upstreams (cookie-pool, TaijiAI)
+	// front Bedrock internally and forward thinking/redacted_thinking blocks
+	// untouched. If a prior request on this session already saw the matching
+	// 400, drop those blocks here so we don't pay another round-trip.
+	if shouldStripThinkingForSession(ctx) {
+		translated = stripThinkingBlocksFromHistory(translated)
+	}
+
 	url := strings.TrimSuffix(baseURL, "/") + endpoint
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(translated))
 	if err != nil {
@@ -160,6 +168,9 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 		b, _ := io.ReadAll(httpResp.Body)
 		helps.AppendAPIResponseChunk(ctx, e.cfg, b)
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
+		if httpResp.StatusCode == http.StatusBadRequest && isThinkingErrorMessage(string(b)) {
+			markSessionNeedsThinkingStrip(ctx)
+		}
 		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
 		return resp, err
 	}
