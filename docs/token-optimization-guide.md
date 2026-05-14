@@ -118,25 +118,46 @@ graphify claude install                # install hook
 - CacheAligner: stabilizes message prefix to improve Anthropic prefix cache hit rate (85.7% observed)
 - LLMLingua (optional): ML-based perplexity-driven token-level compression
 
-**Setup** (VPS, runs alongside CPA):
-```bash
-pip3 install "headroom-ai[proxy]"
+**Architecture**: Default is the standalone **Python `headroom proxy`**
+(`:8787`, package `headroom-ai`) sitting in front of CPA. CPA itself is
+built **without FFI** (pure Go). The in-process Rust FFI path is still
+available as an opt-in build for future use:
 
-tmux new-session -d -s headroom "\
-  export ANTHROPIC_API_KEY=sk-xxx; \
-  export OPENAI_API_KEY=sk-xxx; \
-  headroom proxy --port 8787 --host 0.0.0.0 \
-    --anthropic-api-url http://127.0.0.1:8318 \
-    --openai-api-url http://127.0.0.1:8318/v1 \
-    --gemini-api-url http://127.0.0.1:8318/v1"
+```
+Client → :8787 (Python headroom, compression) → :8318 (CPA, no-FFI) → upstream
 ```
 
-**Client config**: Point `ANTHROPIC_BASE_URL` to `:8787` instead of `:8318`
+The `internal/headroom` Go package compiles to a no-op stub by default;
+only `-tags headroom_ffi` brings in `libheadroom_ffi.so/.dylib` and the
+cgo path.
+
+**Setup (default, Python proxy)**: nothing to ship next to `cpa-new-server`.
+`tools/deploy_cf_tunnel.sh` installs `headroom-ai` (pip --user) and starts
+the proxy in tmux on `:8787`. Set `headroom.enabled: false` (or omit) in
+`cpa-new-config.yaml`.
+
+**Setup (legacy, in-process FFI)**: ship `libheadroom_ffi.{so,dylib}` next
+to `cpa-new-server` (rpath=`$ORIGIN`/`@executable_path`), build CPA with
+`HEADROOM_FFI=1 bash scripts/build_cpa_linux.sh`, deploy with
+`WITH_FFI=1 bash deploy_cf_tunnel.sh`, and enable in `cpa-new-config.yaml`:
+
+```yaml
+headroom:
+  enabled: true
+  min-bytes: 0
+  ccr-sqlite-path: data/ccr.db   # or ccr-redis-url for shared backend
+  ccr-ttl-seconds: 0
+  anthropic-frozen-count: 0      # X-Headroom-Frozen-Count header overrides
+```
+
+**Client config**:
+- Default: clients point at port `:8787` (Python proxy)
+- Legacy in-process: clients point at port `:8318` (CPA direct, no extra hop)
 
 **Monitoring**:
-- Dashboard: `https://headroom.geeker.indevs.in/dashboard`
-- Stats API: `curl http://host:8787/stats`
-- Persistent data: `~/.headroom/proxy_savings.json` (survives restarts)
+- Compression stats: grep `[headroom]` in `cpa-new.log`
+  (lines like `claude-opus-4-7: 3266→1876 tokens (saved 1390, ratio 0.57)`)
+- CCR retrieval endpoint: `GET /v1/headroom/ccr/:hash` (auth required)
 
 **Complementary with other layers**: RTK compresses CLI output before it enters context. Headroom compresses the full context after RTK. No conflict.
 

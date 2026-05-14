@@ -238,6 +238,13 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	// are captured even when the upstream is an OpenAI-compatible provider.
 	translated, _ = sjson.SetBytes(translated, "stream_options.include_usage", true)
 
+	// Proactive strip (stream path): mirror the non-stream branch — third-party
+	// proxies fronting Bedrock reject thinking/redacted_thinking blobs the same
+	// way regardless of stream vs non-stream.
+	if shouldStripThinkingForSession(ctx) {
+		translated = stripThinkingBlocksFromHistory(translated)
+	}
+
 	url := strings.TrimSuffix(baseURL, "/") + "/chat/completions"
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(translated))
 	if err != nil {
@@ -330,6 +337,13 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 					continue
 				}
 				if bytes.HasPrefix(trimmedLine, []byte("{")) || bytes.HasPrefix(trimmedLine, []byte("[")) {
+					// Top-level JSON outside the SSE stream protocol = upstream
+					// served an error envelope. Safe to scan: success chunks
+					// always start with "data:", so we won't see a successful
+					// thinking block here.
+					if isThinkingErrorMessage(string(trimmedLine)) {
+						markSessionNeedsThinkingStrip(ctx)
+					}
 					streamErr := statusErr{code: http.StatusBadGateway, msg: string(trimmedLine)}
 					helps.RecordAPIResponseError(ctx, e.cfg, streamErr)
 					reporter.PublishFailure(ctx, streamErr)

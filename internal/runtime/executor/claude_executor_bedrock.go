@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/credentials"
@@ -124,9 +125,16 @@ func prepareBedrockBody(body []byte) []byte {
 }
 
 // bedrockThinkingStripCache tracks sessions that have encountered invalid
-// thinking signatures. Once a session hits this error, all subsequent Bedrock
-// requests for that session strip thinking blocks proactively.
-var bedrockThinkingStripCache sync.Map // session-id -> struct{}
+// thinking signatures. Once a session hits this error, subsequent requests
+// for that session strip thinking blocks proactively for a bounded window.
+//
+// Stripping thinking blocks is safe for correctness (model reasons fresh
+// each turn) but discards Anthropic's signed-thinking cache hint, costing
+// extra latency + tokens. The TTL prevents the mark from persisting forever
+// after a transient route to a thinking-incompatible upstream.
+var bedrockThinkingStripCache sync.Map // session-id -> time.Time (markedAt)
+
+const thinkingStripTTL = 10 * time.Minute
 
 func bedrockSessionID(ctx context.Context) string {
 	return handlers.ExecutionSessionIDFromContext(ctx)
@@ -137,15 +145,30 @@ func shouldStripThinkingForSession(ctx context.Context) bool {
 	if sid == "" {
 		return false
 	}
-	_, found := bedrockThinkingStripCache.Load(sid)
-	return found
+	v, found := bedrockThinkingStripCache.Load(sid)
+	if !found {
+		return false
+	}
+	markedAt, ok := v.(time.Time)
+	if !ok {
+		bedrockThinkingStripCache.Delete(sid)
+		return false
+	}
+	if time.Since(markedAt) > thinkingStripTTL {
+		bedrockThinkingStripCache.Delete(sid)
+		return false
+	}
+	return true
 }
 
 func markSessionNeedsThinkingStrip(ctx context.Context) {
 	sid := bedrockSessionID(ctx)
-	if sid != "" {
-		bedrockThinkingStripCache.Store(sid, struct{}{})
+	if sid == "" {
+		log.Warn("[thinking-strip] error matched but session-id empty, cannot mark for next request")
+		return
 	}
+	bedrockThinkingStripCache.Store(sid, time.Now())
+	log.Infof("[thinking-strip] session %s marked (TTL %s), next request will strip thinking blocks proactively", sid, thinkingStripTTL)
 }
 
 // isThinkingErrorMessage scans a raw upstream error string for the same
@@ -234,7 +257,7 @@ func stripThinkingBlocksFromHistory(body []byte) []byte {
 		body, _ = sjson.SetRawBytes(body, path, raw)
 	}
 	if stripped > 0 {
-		log.Debugf("[bedrock] stripped %d thinking/redacted_thinking blocks from history", stripped)
+		log.Infof("[thinking-strip] removed %d thinking/redacted_thinking blocks from history", stripped)
 	}
 	return body
 }
