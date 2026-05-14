@@ -669,7 +669,8 @@ func (k ClaudeKey) GetAPIKey() string {
 	}
 	return k.AWSAccessKeyID
 }
-func (k ClaudeKey) GetBaseURL() string { return k.BaseURL }
+func (k ClaudeKey) GetBaseURL() string   { return k.BaseURL }
+func (k ClaudeKey) GetAWSRegion() string { return k.AWSRegion }
 
 // ClaudeModel describes a mapping between an alias and the actual upstream model name.
 type ClaudeModel struct {

@@ -133,6 +133,9 @@ func (s *ConfigSynthesizer) synthesizeClaudeKeys(ctx *SynthesisContext) []*corea
 			"source":  fmt.Sprintf("config:claude[%s]", token),
 			"api_key": idKey,
 		}
+		if region != "" {
+			attrs["aws_region"] = region
+		}
 		metadata := map[string]any{}
 		if ck.DisableCooling {
 			metadata["disable_cooling"] = true

@@ -1879,9 +1879,30 @@ func resolveAPIKeyConfig[T APIKeyConfigEntry](entries []T, auth *Auth) *T {
 		return nil
 	}
 	attrKey, attrBase := "", ""
+	attrRegion := ""
 	if auth.Attributes != nil {
 		attrKey = strings.TrimSpace(auth.Attributes["api_key"])
 		attrBase = strings.TrimSpace(auth.Attributes["base_url"])
+		attrRegion = strings.TrimSpace(auth.Attributes["aws_region"])
+	}
+	// Region-aware match first: when the auth carries an AWS region (Bedrock
+	// path) we must pick the entry that matches both AK *and* region, otherwise
+	// we'll fall through to a different region's ExcludedModels and reject a
+	// model that this region actually serves. The previous logic stopped at the
+	// first AK match, which silently routed e.g. us-west-2 requests to the
+	// ap-northeast-1 entry (with claude-opus-4-7 excluded).
+	if attrRegion != "" && attrKey != "" {
+		for i := range entries {
+			entry := &entries[i]
+			if !strings.EqualFold(strings.TrimSpace((*entry).GetAPIKey()), attrKey) {
+				continue
+			}
+			if regionalEntry, ok := any(*entry).(interface{ GetAWSRegion() string }); ok {
+				if strings.EqualFold(strings.TrimSpace(regionalEntry.GetAWSRegion()), attrRegion) {
+					return entry
+				}
+			}
+		}
 	}
 	for i := range entries {
 		entry := &entries[i]
