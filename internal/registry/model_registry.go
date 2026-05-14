@@ -6,6 +6,7 @@ package registry
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -727,6 +728,40 @@ func (r *ModelRegistry) ResumeClientModel(clientID, modelID string) {
 }
 
 // ClientSupportsModel reports whether the client registered support for modelID.
+func ClaudeModelEquivalents(modelID string) []string {
+	trimmed := strings.TrimSpace(modelID)
+	if trimmed == "" {
+		return nil
+	}
+	out := []string{trimmed}
+	// Some Claude model names ship in two interchangeable orthographies on the
+	// upstream catalog: dot form ("claude-opus-4.7") and dash form
+	// ("claude-opus-4-7"). Different providers (Bedrock direct vs OAuth vs
+	// third-party proxies) register different forms in their own configs, but
+	// for routing purposes they refer to the exact same model. Compute a
+	// version flipped at the trailing -X-Y / -X.Y boundary.
+	flipped := flipClaudeVersionSeparator(trimmed)
+	if flipped != "" && flipped != trimmed {
+		out = append(out, flipped)
+	}
+	return out
+}
+
+func flipClaudeVersionSeparator(s string) string {
+	// Match -<digit>-<digit> or -<digit>.<digit> at either the end of the name
+	// or just before a "-YYYYMMDD" date suffix (Anthropic's snapshot suffix).
+	re := regexp.MustCompile(`(?i)-(\d+)([-\.])(\d+)((?:-\d{8})?)$`)
+	m := re.FindStringSubmatch(s)
+	if m == nil {
+		return ""
+	}
+	sep := "-"
+	if m[2] == "-" {
+		sep = "."
+	}
+	return s[:len(s)-len(m[0])] + "-" + m[1] + sep + m[3] + m[4]
+}
+
 func (r *ModelRegistry) ClientSupportsModel(clientID, modelID string) bool {
 	clientID = strings.TrimSpace(clientID)
 	modelID = strings.TrimSpace(modelID)
@@ -742,9 +777,13 @@ func (r *ModelRegistry) ClientSupportsModel(clientID, modelID string) bool {
 		return false
 	}
 
+	candidates := ClaudeModelEquivalents(modelID)
 	for _, id := range models {
-		if strings.EqualFold(strings.TrimSpace(id), modelID) {
-			return true
+		idTrim := strings.TrimSpace(id)
+		for _, want := range candidates {
+			if strings.EqualFold(idTrim, want) {
+				return true
+			}
 		}
 	}
 
