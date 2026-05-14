@@ -4,11 +4,15 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
@@ -18,6 +22,24 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/proxyutil"
 	log "github.com/sirupsen/logrus"
 )
+
+var headroomDebugCounter atomic.Uint64
+
+func dumpHeadroomDebug(format string, body []byte) {
+	dir := os.Getenv("HEADROOM_DEBUG_DIR")
+	if dir == "" {
+		return
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return
+	}
+	n := headroomDebugCounter.Add(1)
+	if n > 5 {
+		return
+	}
+	name := fmt.Sprintf("%s_%d_%d.json", format, time.Now().Unix(), n)
+	_ = os.WriteFile(filepath.Join(dir, name), body, 0o644)
+}
 
 // httpClientCache caches HTTP clients by proxy URL to enable connection reuse
 var (
@@ -225,6 +247,20 @@ func HeadroomDo(httpClient *http.Client, req *http.Request) (*http.Response, err
 			if v, err := strconv.Atoi(hdr); err == nil && v >= 0 {
 				userFloor = v
 			}
+		}
+		dumpHeadroomDebug("anthropic", body)
+		// PR-E1/E2: normalize tool definitions (sort + schema-key sort) BEFORE
+		// compression. Stabilizes the tools-prefix bytes so upstream prompt
+		// cache survives across reorderings. PAYG-only safe; FFI internally
+		// gates on auth mode and passes through for OAuth/Subscription.
+		if norm := headroom.NormalizeAnthropicTools(body, authMode); norm != nil && norm.Modified {
+			body = norm.Body
+			req.Body = io.NopCloser(bytes.NewReader(body))
+			req.GetBody = func() (io.ReadCloser, error) {
+				return io.NopCloser(bytes.NewReader(body)), nil
+			}
+			req.ContentLength = int64(len(body))
+			log.Infof("[headroom] normalize anthropic tools: e1=%v e2=%v", norm.E1Applied, norm.E2Applied)
 		}
 		result = headroom.CompressAnthropicBytes(body, modelStr, userFloor, authMode)
 	case formatOpenAIResponses:

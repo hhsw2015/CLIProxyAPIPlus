@@ -36,6 +36,39 @@ char* headroom_compress_anthropic(
     uint8_t auth_mode
 );
 
+// Compress OpenAI /v1/chat/completions body — full-history mode.
+// Walks every message and crushes role=tool string content + nested
+// tool_result blocks. Mirrors headroom-py SmartCrusher.apply.
+char* headroom_compress_openai_full(
+    const uint8_t* body,
+    size_t body_len,
+    const char* model,
+    uint8_t auth_mode
+);
+
+// Compress OpenAI /v1/responses body — full-history mode.
+// Walks every input item and crushes function_call_output / local_shell_call_output /
+// apply_patch_call_output. Skips items whose call_id matches a headroom_retrieve
+// function_call (those must reach the model byte-for-byte).
+char* headroom_compress_openai_responses_full(
+    const uint8_t* body,
+    size_t body_len,
+    const char* model,
+    uint8_t auth_mode
+);
+
+// Compress Anthropic /v1/messages body in full-history mode.
+// Walks every message past frozen_count and crushes every tool_result block
+// individually (mirrors headroom-py SmartCrusher.apply, not Phase B
+// live-zone semantics). Prefer this for Claude Code / agent traffic.
+char* headroom_compress_anthropic_full(
+    const uint8_t* body,
+    size_t body_len,
+    size_t frozen_count,
+    const char* model,
+    uint8_t auth_mode
+);
+
 // Compress OpenAI /v1/responses body (Responses API — Codex format).
 char* headroom_compress_openai_responses(
     const uint8_t* body,
@@ -43,6 +76,22 @@ char* headroom_compress_openai_responses(
     const char* model,
     uint8_t auth_mode
 );
+
+// Normalize Anthropic /v1/messages tool definitions in place (PR-E1 + PR-E2).
+//   PR-E1: sort tools[] alphabetically by name (skipped when any tool already
+//          carries cache_control — preserves customer-intentional order).
+//   PR-E2: recursively sort tool.input_schema object keys (always runs when
+//          tools exist; safe under cache_control because it never moves the
+//          marker).
+// auth_mode: must be HEADROOM_AUTH_PAYG; other modes pass through unchanged
+//            (mutating bytes under OAuth/Subscription can look like
+//            cache-evasion to upstreams).
+// Returns: heap-allocated JSON {modified, body, e1_applied, e2_applied, error}.
+// Caller MUST free with headroom_result_free().
+char* headroom_normalize_anthropic_tools(
+    const uint8_t* body,
+    size_t body_len,
+    uint8_t auth_mode);
 
 // Retrieve original content from CCR store by hash.
 // Returns: heap-allocated JSON of shape {found, content, error}.

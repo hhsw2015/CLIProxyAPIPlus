@@ -78,7 +78,7 @@ fi
 
 CGO_LDFLAGS="${CGO_LDFLAGS_VAL}" \
 CGO_LDFLAGS_ALLOW='-Wl,-rpath,.*|-Wl,-z,origin|.*libglibc_shim\.a' \
-  go build -o "${OUT}" ./cmd/server/
+  go build ${BUILD_FLAGS:-} -o "${OUT}" ./cmd/server/
 
 # Stage the lib next to the binary so @rpath/$ORIGIN resolves at runtime.
 # Remove stale copies first; macOS kernel can pin the previous build's mmap.
