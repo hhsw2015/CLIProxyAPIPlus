@@ -148,6 +148,24 @@ func markSessionNeedsThinkingStrip(ctx context.Context) {
 	}
 }
 
+// isThinkingErrorMessage scans a raw upstream error string for the same
+// symptoms isThinkingSignatureError handles. Used by non-Bedrock executors
+// (claude direct, openai-compat cookie-pool) that surface upstream 4xx as
+// statusErr.msg rather than as a typed AWS error.
+func isThinkingErrorMessage(msg string) bool {
+	if msg == "" {
+		return false
+	}
+	hasThinking := strings.Contains(msg, "thinking") || strings.Contains(msg, "redacted_thinking")
+	if !hasThinking {
+		return false
+	}
+	return strings.Contains(msg, "signature") ||
+		strings.Contains(msg, "Invalid `data`") ||
+		strings.Contains(msg, "Invalid data") ||
+		strings.Contains(msg, "Field required")
+}
+
 // isThinkingSignatureError returns true if the Bedrock error is about a
 // thinking / redacted_thinking block in the conversation history. Covers:
 //   - "Invalid signature in thinking block"     (cross-provider signature mismatch)
@@ -161,20 +179,18 @@ func isThinkingSignatureError(err error) bool {
 	if err == nil {
 		return false
 	}
-	msg := err.Error()
-	hasThinking := strings.Contains(msg, "thinking") || strings.Contains(msg, "redacted_thinking")
-	if !hasThinking {
-		return false
-	}
-	return strings.Contains(msg, "signature") ||
-		strings.Contains(msg, "Invalid `data`") ||
-		strings.Contains(msg, "Invalid data") ||
-		strings.Contains(msg, "Field required")
+	return isThinkingErrorMessage(err.Error())
 }
 
 // stripThinkingBlocksFromHistory removes thinking-type content blocks from
 // assistant messages in the conversation history. The last assistant message
 // is preserved as-is since it may be a prefill or the current turn.
+// stripThinkingBlocksFromHistory removes thinking and redacted_thinking
+// content blocks from EVERY message in the conversation, regardless of role.
+// Cross-provider sessions can stash these blocks anywhere (assistant messages,
+// tool_result content arrays, even system-injected wrappers); Bedrock only
+// validates structure, not provenance, so removing them everywhere is safe
+// and matches headroom's behavior.
 func stripThinkingBlocksFromHistory(body []byte) []byte {
 	messages := gjson.GetBytes(body, "messages")
 	if !messages.IsArray() {
@@ -184,11 +200,8 @@ func stripThinkingBlocksFromHistory(body []byte) []byte {
 	if len(arr) == 0 {
 		return body
 	}
-	changed := false
+	stripped := 0
 	for i, msg := range arr {
-		if msg.Get("role").String() != "assistant" {
-			continue
-		}
 		content := msg.Get("content")
 		if !content.IsArray() {
 			continue
@@ -198,7 +211,7 @@ func stripThinkingBlocksFromHistory(body []byte) []byte {
 		for _, block := range blocks {
 			bt := block.Get("type").String()
 			if bt == "thinking" || bt == "redacted_thinking" {
-				changed = true
+				stripped++
 				continue
 			}
 			kept = append(kept, block)
@@ -220,8 +233,8 @@ func stripThinkingBlocksFromHistory(body []byte) []byte {
 		path := fmt.Sprintf("messages.%d.content", i)
 		body, _ = sjson.SetRawBytes(body, path, raw)
 	}
-	if !changed {
-		return body
+	if stripped > 0 {
+		log.Debugf("[bedrock] stripped %d thinking/redacted_thinking blocks from history", stripped)
 	}
 	return body
 }
