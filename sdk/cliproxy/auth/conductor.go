@@ -2466,6 +2466,16 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	if m.scheduler != nil && result.Latency > 0 {
 		m.scheduler.recordLatency(result.AuthID, result.Latency)
 	}
+
+	// On failure (any kind, including client-cancel during a long retry chain),
+	// drop the session-affinity binding for this auth so the next request goes
+	// through fresh priority-aware selection instead of the stale cache binding
+	// that may have been written during the retry storm.
+	if !result.Success && m.selector != nil {
+		if invalidator, ok := m.selector.(interface{ InvalidateAuth(string) }); ok {
+			invalidator.InvalidateAuth(result.AuthID)
+		}
+	}
 }
 
 func ensureModelState(auth *Auth, model string) *ModelState {
