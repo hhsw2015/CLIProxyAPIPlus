@@ -504,12 +504,19 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 				return auth, nil
 			}
 		}
-		// Cached auth not available, reselect via fallback selector for even distribution
+		// Cached auth not available, reselect via fallback selector for even
+		// distribution. Do NOT overwrite the cache with the reselected auth: a
+		// session under conductor-driven retry can call Pick many times in a
+		// row and each call would shift cacheKey to whatever the round-robin
+		// happened to land on. If an outer P10 auth was temporarily blocked,
+		// we'd permanently rebind the session to a much lower-priority pool.
+		// Instead, drop the cache entry so the next request takes the fresh
+		// "cache miss" path and rebinds to the best currently-available auth.
+		s.cache.Invalidate(cacheKey)
 		auth, err := s.fallback.Pick(ctx, provider, model, opts, auths)
 		if err != nil {
 			return nil, err
 		}
-		s.cache.Set(cacheKey, auth.ID)
 		entry.Infof("session-affinity: cache hit but auth unavailable, reselected | session=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), authLabel(auth), provider, model)
 		return auth, nil
 	}
