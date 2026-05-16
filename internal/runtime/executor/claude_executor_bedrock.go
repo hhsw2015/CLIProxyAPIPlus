@@ -5,9 +5,12 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/credentials"
@@ -74,33 +77,64 @@ func (e *ClaudeExecutor) resolveBedrockModelID(auth *cliproxyauth.Auth, clientMo
 		attrKey = auth.Attributes["api_key"]
 		attrRegion = strings.TrimSpace(auth.Attributes["aws_region"])
 	}
+	// Try exact AK + region match first; if not found, accept dot/dash variants
+	// of the model name. Same-AK / same-region uniquely identifies a config entry.
+	candidates := []string{strings.ToLower(strings.TrimSpace(clientModel))}
+	if alt := flipClaudeOrthography(clientModel); alt != "" && alt != candidates[0] {
+		candidates = append(candidates, alt)
+	}
 	for i := range e.cfg.ClaudeKey {
 		ck := &e.cfg.ClaudeKey[i]
 		if ck.AWSAccessKeyID == "" {
 			continue
 		}
-		// Match by AK (stored as api_key in attributes).
 		if strings.TrimSpace(ck.AWSAccessKeyID) != attrKey {
 			continue
 		}
-		// When multiple entries share the same AK (different regions), also match by region
-		// to ensure the ARN corresponds to the correct regional endpoint.
 		if attrRegion != "" && strings.TrimSpace(ck.AWSRegion) != "" && strings.TrimSpace(ck.AWSRegion) != attrRegion {
 			continue
 		}
 		for j := range ck.Models {
 			m := &ck.Models[j]
-			if strings.EqualFold(strings.TrimSpace(m.Name), clientModel) ||
-				strings.EqualFold(strings.TrimSpace(m.Alias), clientModel) {
-				if mid := strings.TrimSpace(m.ModelID); mid != "" {
-					return mid
+			name := strings.ToLower(strings.TrimSpace(m.Name))
+			alias := strings.ToLower(strings.TrimSpace(m.Alias))
+			for _, want := range candidates {
+				if name == want || alias == want {
+					if mid := strings.TrimSpace(m.ModelID); mid != "" {
+						return mid
+					}
+					return m.Name
 				}
-				return m.Name
 			}
 		}
 	}
+	log.Warnf("[bedrock-modelid] no ARN match: ak=%s region=%s client_model=%s -> falling back to raw name (will likely 400)",
+		attrKey, attrRegion, clientModel)
 	return clientModel
 }
+
+// flipClaudeOrthography swaps "-X.Y" <-> "-X-Y" in the version segment of a
+// Claude model name (claude-opus-4.6 <-> claude-opus-4-6) so a registered name
+// in either orthography can resolve to its config entry. Empty when no match.
+func flipClaudeOrthography(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return ""
+	}
+	// Match -X.Y or -X-Y just before optional -YYYYMMDD snapshot suffix.
+	re := claudeVersionRe
+	m := re.FindStringSubmatch(s)
+	if m == nil {
+		return ""
+	}
+	sep := "-"
+	if m[2] == "-" {
+		sep = "."
+	}
+	return strings.ToLower(s[:len(s)-len(m[0])] + "-" + m[1] + sep + m[3] + m[4])
+}
+
+var claudeVersionRe = regexp.MustCompile(`(?i)-(\d+)([-\.])(\d+)((?:-\d{8})?)$`)
 
 // prepareBedrockBody adapts an Anthropic Messages API body for Bedrock:
 // removes "model", "stream" and any OpenAI-only fields not supported by Bedrock.
@@ -136,8 +170,27 @@ var bedrockThinkingStripCache sync.Map // session-id -> time.Time (markedAt)
 
 const thinkingStripTTL = 10 * time.Minute
 
+// thinkingStripCacheKey returns a stable cache key for the strip mark.
+// Prefers the conductor-propagated session id (extracted from the request body
+// or headers, shared across calls in the same client chat session); falls back
+// to the Anthropic execution-session id, then to the per-request id so even an
+// anonymous request still benefits from the inline strip shortcut. The TTL
+// bounds any over-pessimism.
+func thinkingStripCacheKey(ctx context.Context) string {
+	if sid := cliproxyauth.ExecutorSessionIDFromContext(ctx); sid != "" {
+		return "sess:" + sid
+	}
+	if sid := handlers.ExecutionSessionIDFromContext(ctx); sid != "" {
+		return "sess:" + sid
+	}
+	if rid := logging.GetRequestID(ctx); rid != "" {
+		return "req:" + rid
+	}
+	return ""
+}
+
 func bedrockSessionID(ctx context.Context) string {
-	return handlers.ExecutionSessionIDFromContext(ctx)
+	return thinkingStripCacheKey(ctx)
 }
 
 func shouldStripThinkingForSession(ctx context.Context) bool {
@@ -313,7 +366,8 @@ func (e *ClaudeExecutor) executeBedrock(ctx context.Context, auth *cliproxyauth.
 		})
 	}
 	if err != nil {
-		log.Errorf("bedrock InvokeModel error for model %s (modelID=%s, region=%s): %v", baseModel, modelID, region, err)
+		helps.LogWithRequestID(ctx).Errorf("bedrock InvokeModel error model=%s modelID=%s region=%s body_bytes=%d: %v",
+			baseModel, modelID, region, len(body), err)
 		return resp, statusErr{code: http.StatusBadGateway, msg: fmt.Sprintf("bedrock invoke error: %v", err)}
 	}
 
@@ -380,7 +434,8 @@ func (e *ClaudeExecutor) executeStreamBedrock(ctx context.Context, auth *cliprox
 		})
 	}
 	if err != nil {
-		log.Errorf("bedrock InvokeModelWithResponseStream error for model %s (modelID=%s, region=%s): %v", baseModel, modelID, region, err)
+		helps.LogWithRequestID(ctx).Errorf("bedrock InvokeModelWithResponseStream error model=%s modelID=%s region=%s body_bytes=%d: %v",
+			baseModel, modelID, region, len(body), err)
 		return nil, statusErr{code: http.StatusBadGateway, msg: fmt.Sprintf("bedrock stream error: %v", err)}
 	}
 
