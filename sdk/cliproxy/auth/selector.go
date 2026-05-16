@@ -554,6 +554,33 @@ func truncateSessionID(id string) string {
 	return id[:8] + "..."
 }
 
+// executorSessionContextKey carries the session id extracted from
+// extractSessionIDs into executor contexts. Lets executors (Bedrock, etc.)
+// share session-scoped state across calls without depending on the api/handlers
+// package (which would create an import cycle).
+type executorSessionContextKey struct{}
+
+// WithExecutorSessionID returns a child context tagged with the session id.
+func WithExecutorSessionID(ctx context.Context, sessionID string) context.Context {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return ctx
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, executorSessionContextKey{}, sessionID)
+}
+
+// ExecutorSessionIDFromContext retrieves the session id stored by WithExecutorSessionID.
+func ExecutorSessionIDFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	v, _ := ctx.Value(executorSessionContextKey{}).(string)
+	return v
+}
+
 // authLabel returns a short human-readable label for an auth so log lines
 // don't force operators to reverse a sha256-truncated ID back to AK + region.
 // Falls back to the raw ID when no useful attributes are present.

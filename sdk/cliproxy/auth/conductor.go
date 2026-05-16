@@ -1424,9 +1424,19 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			execCtx = context.WithValue(execCtx, "cliproxy.roundtripper", rt)
 		}
 		execCtx = contextWithRequestedModelAlias(execCtx, opts, routeModel)
+		// Propagate the session ID extracted from the request body / headers
+		// down to executors. Bedrock executor's thinking-strip cache keys on
+		// it; without this, the session always falls back to per-request id
+		// and the proactive strip can never amortize across calls.
+		if sid, _ := extractSessionIDs(opts.Headers, opts.OriginalRequest, opts.Metadata); sid != "" {
+			execCtx = WithExecutorSessionID(execCtx, sid)
+		}
 
 		models, pooled := m.preparedExecutionModels(auth, routeModel)
 		if len(models) == 0 {
+			candidates := m.executionModelCandidates(auth, routeModel)
+			entry.Warnf("[exec-skip] auth=%s provider=%s route_model=%s candidates=%v -> filtered to 0 (excluded? blocked?)",
+				auth.ID, provider, routeModel, candidates)
 			continue
 		}
 		attempted[auth.ID] = struct{}{}
@@ -1521,9 +1531,19 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 			execCtx = context.WithValue(execCtx, "cliproxy.roundtripper", rt)
 		}
 		execCtx = contextWithRequestedModelAlias(execCtx, opts, routeModel)
+		// Propagate the session ID extracted from the request body / headers
+		// down to executors. Bedrock executor's thinking-strip cache keys on
+		// it; without this, the session always falls back to per-request id
+		// and the proactive strip can never amortize across calls.
+		if sid, _ := extractSessionIDs(opts.Headers, opts.OriginalRequest, opts.Metadata); sid != "" {
+			execCtx = WithExecutorSessionID(execCtx, sid)
+		}
 
 		models, pooled := m.preparedExecutionModels(auth, routeModel)
 		if len(models) == 0 {
+			candidates := m.executionModelCandidates(auth, routeModel)
+			entry.Warnf("[exec-skip] auth=%s provider=%s route_model=%s candidates=%v -> filtered to 0 (excluded? blocked?)",
+				auth.ID, provider, routeModel, candidates)
 			continue
 		}
 		attempted[auth.ID] = struct{}{}
@@ -1610,8 +1630,15 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			execCtx = context.WithValue(execCtx, roundTripperContextKey{}, rt)
 			execCtx = context.WithValue(execCtx, "cliproxy.roundtripper", rt)
 		}
+		// Propagate session id (same rationale as the non-stream branch).
+		if sid, _ := extractSessionIDs(opts.Headers, opts.OriginalRequest, opts.Metadata); sid != "" {
+			execCtx = WithExecutorSessionID(execCtx, sid)
+		}
 		models, pooled := m.preparedExecutionModels(auth, routeModel)
 		if len(models) == 0 {
+			candidates := m.executionModelCandidates(auth, routeModel)
+			entry.Warnf("[exec-skip] auth=%s provider=%s route_model=%s candidates=%v -> filtered to 0 (excluded? blocked?)",
+				auth.ID, provider, routeModel, candidates)
 			continue
 		}
 		attempted[auth.ID] = struct{}{}
@@ -2710,6 +2737,16 @@ func isModelSupportErrorMessage(message string) bool {
 		"model unavailable",
 		"not available for your plan",
 		"not available for your account",
+		// AWS Bedrock specific: ARN/inference-profile not deployed in region.
+		// Triggered by misconfigured Nacos entries that pair an AK with a region
+		// where the model has no application-inference-profile. We want a long
+		// cooldown so we don't keep retrying the same dead (ak, region, model).
+		"resourcenotfoundexception",
+		"could not find inference profile",
+		"isn't supported in region",
+		"is not supported in region",
+		"the provided model identifier is invalid",
+		"invalid model identifier",
 	}
 	for _, pattern := range patterns {
 		if strings.Contains(lower, pattern) {
