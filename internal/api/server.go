@@ -460,6 +460,13 @@ func (s *Server) setupRoutes() {
 		v1.GET("/models", s.unifiedModelsHandler(openaiHandlers, claudeCodeHandlers))
 		v1.POST("/chat/completions", openaiHandlers.ChatCompletions)
 		v1.POST("/completions", openaiHandlers.Completions)
+		v1.POST("/images/generations", openaiHandlers.ImagesGenerations)
+		v1.POST("/images/edits", openaiHandlers.ImagesEdits)
+		v1.POST("/videos", openaiHandlers.VideosCreate)
+		v1.POST("/videos/generations", openaiHandlers.XAIVideosGenerations)
+		v1.POST("/videos/edits", openaiHandlers.XAIVideosEdits)
+		v1.POST("/videos/extensions", openaiHandlers.XAIVideosExtensions)
+		v1.GET("/videos/:request_id", openaiHandlers.XAIVideosRetrieve)
 		v1.POST("/messages", claudeCodeHandlers.ClaudeMessages)
 		v1.POST("/messages/count_tokens", claudeCodeHandlers.ClaudeCountTokens)
 		v1.GET("/responses", openaiResponsesHandlers.ResponsesWebsocket)
@@ -983,6 +990,15 @@ func (s *Server) watchKeepAlive() {
 // otherwise it routes to OpenAI handler.
 func (s *Server) unifiedModelsHandler(openaiHandler *openai.OpenAIAPIHandler, claudeHandler *claude.ClaudeCodeAPIHandler) gin.HandlerFunc {
 	return func(c *gin.Context) {
+		if _, ok := c.Request.URL.Query()["client_version"]; ok {
+			if s != nil && s.cfg != nil && s.cfg.Home.Enabled {
+				s.handleHomeCodexClientModels(c)
+				return
+			}
+			openaiHandler.OpenAIModels(c)
+			return
+		}
+
 		if s != nil && s.cfg != nil && s.cfg.Home.Enabled {
 			s.handleHomeModels(c)
 			return
@@ -999,6 +1015,34 @@ func (s *Server) unifiedModelsHandler(openaiHandler *openai.OpenAIAPIHandler, cl
 			openaiHandler.OpenAIModels(c)
 		}
 	}
+}
+
+func (s *Server) handleHomeCodexClientModels(c *gin.Context) {
+	entries, ok := s.loadHomeModelEntries(c)
+	if !ok {
+		return
+	}
+
+	models := make([]map[string]any, 0, len(entries))
+	for _, entry := range entries {
+		model := map[string]any{
+			"id":     entry.id,
+			"object": "model",
+		}
+		if entry.created > 0 {
+			model["created"] = entry.created
+		}
+		if entry.ownedBy != "" {
+			model["owned_by"] = entry.ownedBy
+		}
+		if entry.displayName != "" {
+			model["display_name"] = entry.displayName
+			model["description"] = entry.displayName
+		}
+		models = append(models, model)
+	}
+
+	c.JSON(http.StatusOK, openai.CodexClientModelsResponse(models))
 }
 
 func (s *Server) geminiModelsHandler(geminiHandler *gemini.GeminiAPIHandler) gin.HandlerFunc {
