@@ -19,6 +19,13 @@ package config
 // style names match each segment explicitly (e.g. "vendor/*"). The empty
 // model string (no "model" field in body) is treated as "unknown" for
 // matching, so deny: ["unknown"] suppresses unrecognised payloads.
+// WebSearchConfig controls gateway-level web search interception.
+type WebSearchConfig struct {
+	Enabled  bool     `yaml:"enabled" json:"enabled"`
+	Provider string   `yaml:"provider,omitempty" json:"provider,omitempty"` // tinyfish | bing-rss (default: tinyfish)
+	APIKeys  []string `yaml:"api-keys" json:"api-keys"`
+}
+
 type HeadroomConfig struct {
 	Enabled  bool     `yaml:"enabled" json:"enabled"`
 	MinBytes int      `yaml:"min-bytes,omitempty" json:"min-bytes,omitempty"`
@@ -74,6 +81,12 @@ type SDKConfig struct {
 
 	// Headroom enables in-process compression via headroom-core FFI.
 	Headroom HeadroomConfig `yaml:"headroom" json:"headroom"`
+
+	// WebSearch enables gateway-level web search interception for providers
+	// that don't support web_search tool natively (e.g. Bedrock). When
+	// enabled, CPA intercepts the tool call, executes the search via the
+	// configured provider, and injects results back into the conversation.
+	WebSearch WebSearchConfig `yaml:"web-search" json:"web-search"`
 
 	// DisableImageGeneration controls whether the built-in image_generation tool is injected/allowed.
 	//

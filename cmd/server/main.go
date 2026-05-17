@@ -27,6 +27,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/managementasset"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/headroom"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/proxypool"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/redisqueue"
@@ -653,6 +654,12 @@ func main() {
 	redisqueue.SetEnabled(cfg.UsageStatisticsEnabled)
 	redisqueue.SetRetentionSeconds(cfg.RedisUsageQueueRetentionSeconds)
 	coreauth.SetQuotaCooldownDisabled(cfg.DisableCooling)
+
+	// Web search interception (gateway-level search for Bedrock)
+	executor.InitWebSearchPool(&cfg.WebSearch)
+	if cfg.WebSearch.Enabled {
+		log.Infof("[web-search] enabled, provider=%s, keys=%d", cfg.WebSearch.Provider, len(cfg.WebSearch.APIKeys))
+	}
 
 	// Headroom FFI compression (default disabled)
 	headroom.SetConfig(headroom.Config{
