@@ -297,6 +297,33 @@ func prepareBedrockBody(body []byte) []byte {
 	// Force Bedrock-specific anthropic_version. Client-supplied values may contain
 	// beta identifiers that the Bedrock model version doesn't support.
 	body, _ = sjson.SetBytes(body, "anthropic_version", "bedrock-2023-05-31")
+	// Bedrock rejects empty text content blocks (ValidationException: text
+	// content blocks must be non-empty). Claude Code and thinking-strip both
+	// produce these. Replace empty text with "..." in all messages.
+	body = fixEmptyTextBlocks(body)
+	return body
+}
+
+func fixEmptyTextBlocks(body []byte) []byte {
+	messages := gjson.GetBytes(body, "messages")
+	if !messages.IsArray() {
+		return body
+	}
+	changed := false
+	for i, msg := range messages.Array() {
+		content := msg.Get("content")
+		if !content.IsArray() {
+			continue
+		}
+		for j, block := range content.Array() {
+			if block.Get("type").String() == "text" && strings.TrimSpace(block.Get("text").String()) == "" {
+				path := fmt.Sprintf("messages.%d.content.%d.text", i, j)
+				body, _ = sjson.SetBytes(body, path, "...")
+				changed = true
+			}
+		}
+	}
+	_ = changed
 	return body
 }
 
