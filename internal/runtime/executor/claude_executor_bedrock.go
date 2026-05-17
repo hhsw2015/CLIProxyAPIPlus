@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
+	kiroclaude "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/kiro/claude"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/credentials"
@@ -138,6 +139,87 @@ var claudeVersionRe = regexp.MustCompile(`(?i)-(\d+)([-\.])(\d+)((?:-\d{8})?)$`)
 
 // prepareBedrockBody adapts an Anthropic Messages API body for Bedrock:
 // removes "model", "stream" and any OpenAI-only fields not supported by Bedrock.
+// bedrockSupportedToolTypes lists the tool type tags that Bedrock inference
+// profiles currently accept. Any tool whose "type" field is not in this set
+// will cause a 400 ValidationException. Updated from the actual Bedrock error
+// messages as new tool types ship.
+var bedrockSupportedToolTypes = map[string]struct{}{
+	"bash_20250124":                    {},
+	"custom":                           {},
+	"memory_20250818":                  {},
+	"text_editor_20250124":             {},
+	"text_editor_20250429":             {},
+	"text_editor_20250728":             {},
+	"tool_search_tool_bm25":            {},
+	"tool_search_tool_bm25_20251119":   {},
+	"tool_search_tool_regex":           {},
+	"tool_search_tool_regex_20251119":  {},
+	"computer_20250124":                {},
+	"mcp":                              {},
+	// web_search_20250305 deliberately absent — Bedrock rejects it.
+}
+
+// bodyHasUnsupportedBedrockTools returns true if the request body contains
+// tools whose type tag Bedrock doesn't recognize. Callers should skip the
+// Bedrock path entirely (return a typed error so the conductor falls through
+// to Anthropic-API providers that support the full tool catalog).
+func (e *ClaudeExecutor) bodyHasUnsupportedBedrockTools(body []byte) (bool, string) {
+	tools := gjson.GetBytes(body, "tools")
+	if !tools.IsArray() {
+		return false, ""
+	}
+	for _, tool := range tools.Array() {
+		tt := tool.Get("type").String()
+		if tt == "" {
+			continue
+		}
+		// When web-search interception is enabled, web_search tools will be
+		// handled by CPA before reaching Bedrock — not unsupported.
+		if e.cfg != nil && e.cfg.WebSearch.Enabled && strings.HasPrefix(tt, "web_search") {
+			continue
+		}
+		if _, ok := bedrockSupportedToolTypes[tt]; !ok {
+			return true, tt
+		}
+	}
+	return false, ""
+}
+
+// handleBedrockWebSearchStream intercepts web_search tool requests: executes
+// the search via the configured provider (TinyFish/Bing), injects results back
+// into the conversation, strips the web_search tool definition, then re-enters
+// executeStreamBedrock with the modified payload (HasWebSearchTool will return
+// false after ReplaceWebSearchToolDescription).
+func (e *ClaudeExecutor) handleBedrockWebSearchStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+	query := kiroclaude.ExtractSearchQuery(req.Payload)
+	if query == "" {
+		query = "latest information"
+	}
+
+	log.Infof("[web-search] intercepting for bedrock, query=%q", query)
+
+	results, err := dispatchWebSearch(ctx, e.cfg, query)
+	if err != nil {
+		log.Warnf("[web-search] dispatch failed: %v, proceeding without search results", err)
+		// Strip web_search tool and proceed — model won't have search results
+		// but at least won't 400 on Bedrock.
+		req.Payload, _ = kiroclaude.ReplaceWebSearchToolDescription(req.Payload)
+		return e.executeStreamBedrock(ctx, auth, req, opts)
+	}
+
+	toolUseID := "srvtoolu_websearch_bedrock"
+	modifiedPayload, err := kiroclaude.InjectToolResultsClaude(req.Payload, toolUseID, query, results)
+	if err != nil {
+		log.Warnf("[web-search] inject failed: %v, stripping tool", err)
+		req.Payload, _ = kiroclaude.ReplaceWebSearchToolDescription(req.Payload)
+		return e.executeStreamBedrock(ctx, auth, req, opts)
+	}
+
+	modifiedPayload, _ = kiroclaude.ReplaceWebSearchToolDescription(modifiedPayload)
+	req.Payload = modifiedPayload
+	return e.executeStreamBedrock(ctx, auth, req, opts)
+}
+
 func prepareBedrockBody(body []byte) []byte {
 	body, _ = sjson.DeleteBytes(body, "model")
 	body, _ = sjson.DeleteBytes(body, "stream")
@@ -317,6 +399,9 @@ func stripThinkingBlocksFromHistory(body []byte) []byte {
 
 // executeBedrock handles non-streaming Bedrock requests.
 func (e *ClaudeExecutor) executeBedrock(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
+	if unsupported, tag := e.bodyHasUnsupportedBedrockTools(req.Payload); unsupported {
+		return resp, statusErr{code: http.StatusBadRequest, msg: fmt.Sprintf("bedrock: unsupported tool type %q, skipping", tag)}
+	}
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 	if isNovaModel(baseModel) {
 		return e.executeBedrockNova(ctx, auth, req.Payload, baseModel)
@@ -383,6 +468,13 @@ func (e *ClaudeExecutor) executeBedrock(ctx context.Context, auth *cliproxyauth.
 // executeStreamBedrock handles streaming Bedrock requests, bridging
 // AWS EventStream events to SSE format on the StreamChunk channel.
 func (e *ClaudeExecutor) executeStreamBedrock(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (_ *cliproxyexecutor.StreamResult, err error) {
+	// Web search interception: if the request contains web_search tools and
+	// gateway-level search is enabled, handle via CPA's search dispatch
+	// so the tools array sent to Bedrock won't include web_search.
+	if e.cfg != nil && e.cfg.WebSearch.Enabled && kiroclaude.HasWebSearchTool(req.Payload) {
+		return e.handleBedrockWebSearchStream(ctx, auth, req, opts)
+	}
+
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 	if isNovaModel(baseModel) {
 		ch, err := e.executeBedrockNovaStream(ctx, auth, req.Payload, baseModel)
