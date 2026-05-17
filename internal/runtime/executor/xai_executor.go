@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"sort"
 	"strings"
 	"time"
@@ -29,9 +30,21 @@ var xaiDataTag = []byte("data:")
 
 const (
 	xaiImageHandlerType         = "openai-image"
+	xaiVideoHandlerType         = "openai-video"
+	xaiCustomToolType           = "custom"
+	xaiFunctionToolType         = "function"
+	xaiImageGenerationToolType  = "image_generation"
+	xaiNamespaceToolType        = "namespace"
+	xaiToolSearchType           = "tool_search"
+	xaiWebSearchToolType        = "web_search"
 	xaiImagesGenerationsPath    = "/images/generations"
 	xaiImagesEditsPath          = "/images/edits"
 	xaiDefaultImageEndpointPath = xaiImagesGenerationsPath
+	xaiVideosGenerationsPath    = "/videos/generations"
+	xaiVideosEditsPath          = "/videos/edits"
+	xaiVideosExtensionsPath     = "/videos/extensions"
+	xaiVideosPath               = "/videos"
+	xaiIdempotencyKeyMetaKey    = "idempotency_key"
 )
 
 // XAIExecutor is a stateless executor for xAI Grok's Responses API.
@@ -85,6 +98,9 @@ func (e *XAIExecutor) HttpRequest(ctx context.Context, auth *cliproxyauth.Auth, 
 func (e *XAIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
 	if endpointPath := xaiImageEndpointPath(opts); endpointPath != "" {
 		return e.executeImages(ctx, auth, req, endpointPath)
+	}
+	if xaiIsVideoRequest(opts) {
+		return e.executeVideos(ctx, auth, req, opts)
 	}
 
 	token, baseURL := xaiCreds(auth)
@@ -178,6 +194,71 @@ func (e *XAIExecutor) executeImages(ctx context.Context, auth *cliproxyauth.Auth
 	}
 	applyXAIHeaders(httpReq, auth, token, false, "")
 	e.recordXAIRequest(ctx, auth, url, httpReq.Header.Clone(), req.Payload)
+
+	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
+	httpResp, err := httpClient.Do(httpReq)
+	if err != nil {
+		helps.RecordAPIResponseError(ctx, e.cfg, err)
+		return resp, err
+	}
+	defer func() {
+		if errClose := httpResp.Body.Close(); errClose != nil {
+			log.Errorf("xai executor: close response body error: %v", errClose)
+		}
+	}()
+	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+
+	data, err := io.ReadAll(httpResp.Body)
+	if err != nil {
+		helps.RecordAPIResponseError(ctx, e.cfg, err)
+		return resp, err
+	}
+	helps.AppendAPIResponseChunk(ctx, e.cfg, data)
+
+	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
+		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
+		return resp, statusErr{code: httpResp.StatusCode, msg: string(data)}
+	}
+
+	return cliproxyexecutor.Response{Payload: data, Headers: httpResp.Header.Clone()}, nil
+}
+
+func (e *XAIExecutor) executeVideos(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
+	token, baseURL := xaiCreds(auth)
+	if baseURL == "" {
+		baseURL = xaiauth.DefaultAPIBaseURL
+	}
+
+	method := http.MethodPost
+	endpointPath := xaiVideosGenerationsPath
+	var body io.Reader = bytes.NewReader(req.Payload)
+
+	switch path := xaiVideoEndpointPath(opts); path {
+	case xaiVideosGenerationsPath, xaiVideosEditsPath, xaiVideosExtensionsPath:
+		endpointPath = path
+	default:
+		if requestID := strings.TrimSpace(gjson.GetBytes(req.Payload, "request_id").String()); requestID != "" {
+			method = http.MethodGet
+			endpointPath = xaiVideosPath + "/" + url.PathEscape(requestID)
+			body = nil
+		}
+	}
+	requestURL := strings.TrimSuffix(baseURL, "/") + endpointPath
+	httpReq, err := http.NewRequestWithContext(ctx, method, requestURL, body)
+	if err != nil {
+		return resp, err
+	}
+	applyXAIHeaders(httpReq, auth, token, false, "")
+	if method == http.MethodPost {
+		key := xaiMetadataString(opts.Metadata, xaiIdempotencyKeyMetaKey)
+		if key == "" && opts.Headers != nil {
+			key = strings.TrimSpace(opts.Headers.Get("x-idempotency-key"))
+		}
+		if key != "" {
+			httpReq.Header.Set("x-idempotency-key", key)
+		}
+	}
+	e.recordXAIRequest(ctx, auth, requestURL, httpReq.Header.Clone(), req.Payload)
 
 	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
 	httpResp, err := httpClient.Do(httpReq)
@@ -419,6 +500,8 @@ func (e *XAIExecutor) prepareResponsesRequest(ctx context.Context, req cliproxye
 	body, _ = sjson.DeleteBytes(body, "prompt_cache_retention")
 	body, _ = sjson.DeleteBytes(body, "safety_identifier")
 	body, _ = sjson.DeleteBytes(body, "stream_options")
+	body = normalizeXAITools(body)
+	body = normalizeXAIInputReasoningItems(body)
 	body = normalizeCodexInstructions(body)
 	body = sanitizeXAIResponsesBody(body, baseModel)
 
@@ -525,6 +608,27 @@ func xaiImageEndpointPath(opts cliproxyexecutor.Options) string {
 	return xaiDefaultImageEndpointPath
 }
 
+func xaiIsVideoRequest(opts cliproxyexecutor.Options) bool {
+	return opts.SourceFormat.String() == xaiVideoHandlerType
+}
+
+func xaiVideoEndpointPath(opts cliproxyexecutor.Options) string {
+	if !xaiIsVideoRequest(opts) {
+		return ""
+	}
+	path := xaiMetadataString(opts.Metadata, cliproxyexecutor.RequestPathMetadataKey)
+	if strings.HasSuffix(path, "/videos/edits") {
+		return xaiVideosEditsPath
+	}
+	if strings.HasSuffix(path, "/videos/extensions") {
+		return xaiVideosExtensionsPath
+	}
+	if strings.HasSuffix(path, "/videos/generations") {
+		return xaiVideosGenerationsPath
+	}
+	return ""
+}
+
 func xaiMetadataString(meta map[string]any, key string) string {
 	if len(meta) == 0 || key == "" {
 		return ""
@@ -549,6 +653,121 @@ func sanitizeXAIResponsesBody(body []byte, model string) []byte {
 		body, _ = sjson.DeleteBytes(body, "reasoning")
 	}
 	return body
+}
+
+func normalizeXAITools(body []byte) []byte {
+	tools := gjson.GetBytes(body, "tools")
+	if !tools.Exists() || !tools.IsArray() {
+		return body
+	}
+
+	changed := false
+	filtered := []byte(`[]`)
+	for _, tool := range tools.Array() {
+		toolType := tool.Get("type").String()
+		if toolType == xaiNamespaceToolType {
+			changed = true
+			if namespaceTools := tool.Get("tools"); namespaceTools.IsArray() {
+				for _, nestedTool := range namespaceTools.Array() {
+					nestedRaw, nestedChanged, ok := normalizeXAITool(nestedTool)
+					if !ok {
+						return body
+					}
+					changed = changed || nestedChanged
+					if len(nestedRaw) == 0 {
+						continue
+					}
+					updated, errSet := sjson.SetRawBytes(filtered, "-1", nestedRaw)
+					if errSet != nil {
+						return body
+					}
+					filtered = updated
+				}
+			}
+			continue
+		}
+		raw, toolChanged, ok := normalizeXAITool(tool)
+		if !ok {
+			return body
+		}
+		changed = changed || toolChanged
+		if len(raw) == 0 {
+			continue
+		}
+		updated, errSet := sjson.SetRawBytes(filtered, "-1", raw)
+		if errSet != nil {
+			return body
+		}
+		filtered = updated
+	}
+	if !changed {
+		return body
+	}
+	updated, errSet := sjson.SetRawBytes(body, "tools", filtered)
+	if errSet != nil {
+		return body
+	}
+	return updated
+}
+
+func normalizeXAITool(tool gjson.Result) ([]byte, bool, bool) {
+	toolType := tool.Get("type").String()
+	changed := false
+	if toolType == xaiToolSearchType || toolType == xaiImageGenerationToolType {
+		return nil, true, true
+	}
+	raw := []byte(tool.Raw)
+	if toolType == xaiCustomToolType {
+		if tool.Get("name").String() == "apply_patch" {
+			return nil, true, true
+		}
+		updatedTool, errSet := sjson.SetBytes(raw, "type", xaiFunctionToolType)
+		if errSet != nil {
+			return nil, false, false
+		}
+		raw = updatedTool
+		changed = true
+	}
+	if toolType == xaiWebSearchToolType && tool.Get("external_web_access").Exists() {
+		updatedTool, errDel := sjson.DeleteBytes(raw, "external_web_access")
+		if errDel != nil {
+			return nil, false, false
+		}
+		raw = updatedTool
+		changed = true
+	}
+	return raw, changed, true
+}
+
+func normalizeXAIInputReasoningItems(body []byte) []byte {
+	input := gjson.GetBytes(body, "input")
+	if !input.Exists() || !input.IsArray() {
+		return body
+	}
+
+	updated := body
+	for i, item := range input.Array() {
+		if item.Get("type").String() != "reasoning" {
+			continue
+		}
+		contentPath := fmt.Sprintf("input.%d.content", i)
+		if content := gjson.GetBytes(updated, contentPath); content.Exists() && content.Type == gjson.Null {
+			updatedBody, errDel := sjson.DeleteBytes(updated, contentPath)
+			if errDel != nil {
+				return body
+			}
+			updated = updatedBody
+		}
+		encryptedContentPath := fmt.Sprintf("input.%d.encrypted_content", i)
+		if encryptedContent := gjson.GetBytes(updated, encryptedContentPath); encryptedContent.Exists() && encryptedContent.Type == gjson.Null {
+			updatedBody, errDel := sjson.DeleteBytes(updated, encryptedContentPath)
+			if errDel != nil {
+				return body
+			}
+			updated = updatedBody
+		}
+	}
+	return updated
 }
 
 func removeXAIEncryptedReasoningInclude(body []byte) []byte {
