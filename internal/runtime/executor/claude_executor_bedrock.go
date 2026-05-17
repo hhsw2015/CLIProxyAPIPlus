@@ -438,7 +438,7 @@ func stripThinkingBlocksFromHistory(body []byte) []byte {
 			continue
 		}
 		if len(kept) == 0 {
-			kept = append(kept, gjson.Parse(`{"type":"text","text":""}`))
+			kept = append(kept, gjson.Parse(`{"type":"text","text":"..."}`))
 		}
 		raw := []byte("[")
 		for j, k := range kept {
