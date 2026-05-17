@@ -185,39 +185,99 @@ func (e *ClaudeExecutor) bodyHasUnsupportedBedrockTools(body []byte) (bool, stri
 	return false, ""
 }
 
-// handleBedrockWebSearchStream intercepts web_search tool requests: executes
-// the search via the configured provider (TinyFish/Bing), injects results back
-// into the conversation, strips the web_search tool definition, then re-enters
-// executeStreamBedrock with the modified payload (HasWebSearchTool will return
-// false after ReplaceWebSearchToolDescription).
+// handleBedrockWebSearch intercepts web_search for non-streaming requests.
+func (e *ClaudeExecutor) handleBedrockWebSearch(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	query := kiroclaude.ExtractSearchQuery(req.Payload)
+	if query == "" {
+		query = "latest information"
+	}
+	log.Infof("[web-search] intercepting non-stream for bedrock, query=%q", query)
+
+	// Remove web_search tool from tools array entirely so Bedrock won't reject it.
+	// This must happen before any recursive call to executeBedrock to prevent infinite loop.
+	strippedPayload := removeWebSearchTool(req.Payload)
+
+	results, err := dispatchWebSearch(ctx, e.cfg, query)
+	if err != nil {
+		log.Warnf("[web-search] dispatch failed: %v, proceeding without search", err)
+		req.Payload = strippedPayload
+		return e.executeBedrock(ctx, auth, req, opts)
+	}
+
+	toolUseID := "srvtoolu_websearch_bedrock"
+	modifiedPayload, err := kiroclaude.InjectToolResultsClaude(strippedPayload, toolUseID, query, results)
+	if err != nil {
+		log.Warnf("[web-search] inject failed: %v, proceeding without search", err)
+		req.Payload = strippedPayload
+		return e.executeBedrock(ctx, auth, req, opts)
+	}
+
+	req.Payload = modifiedPayload
+	return e.executeBedrock(ctx, auth, req, opts)
+}
+
+// handleBedrockWebSearchStream intercepts web_search for streaming requests.
 func (e *ClaudeExecutor) handleBedrockWebSearchStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
 	query := kiroclaude.ExtractSearchQuery(req.Payload)
 	if query == "" {
 		query = "latest information"
 	}
 
-	log.Infof("[web-search] intercepting for bedrock, query=%q", query)
+	log.Infof("[web-search] intercepting stream for bedrock, query=%q", query)
+
+	// Remove web_search tool entirely to prevent infinite loop on re-entry.
+	strippedPayload := removeWebSearchTool(req.Payload)
 
 	results, err := dispatchWebSearch(ctx, e.cfg, query)
 	if err != nil {
-		log.Warnf("[web-search] dispatch failed: %v, proceeding without search results", err)
-		// Strip web_search tool and proceed — model won't have search results
-		// but at least won't 400 on Bedrock.
-		req.Payload, _ = kiroclaude.ReplaceWebSearchToolDescription(req.Payload)
+		log.Warnf("[web-search] stream dispatch failed: %v, proceeding without search", err)
+		req.Payload = strippedPayload
 		return e.executeStreamBedrock(ctx, auth, req, opts)
 	}
 
 	toolUseID := "srvtoolu_websearch_bedrock"
-	modifiedPayload, err := kiroclaude.InjectToolResultsClaude(req.Payload, toolUseID, query, results)
+	modifiedPayload, err := kiroclaude.InjectToolResultsClaude(strippedPayload, toolUseID, query, results)
 	if err != nil {
-		log.Warnf("[web-search] inject failed: %v, stripping tool", err)
-		req.Payload, _ = kiroclaude.ReplaceWebSearchToolDescription(req.Payload)
+		log.Warnf("[web-search] stream inject failed: %v, proceeding without search", err)
+		req.Payload = strippedPayload
 		return e.executeStreamBedrock(ctx, auth, req, opts)
 	}
 
-	modifiedPayload, _ = kiroclaude.ReplaceWebSearchToolDescription(modifiedPayload)
 	req.Payload = modifiedPayload
 	return e.executeStreamBedrock(ctx, auth, req, opts)
+}
+
+// removeWebSearchTool removes all web_search-type tools from the tools array
+// so Bedrock doesn't reject the request. Unlike ReplaceWebSearchToolDescription
+// (which renames them), this fully removes — preventing HasWebSearchTool from
+// returning true on re-entry and causing infinite recursion.
+func removeWebSearchTool(body []byte) []byte {
+	tools := gjson.GetBytes(body, "tools")
+	if !tools.IsArray() {
+		return body
+	}
+	var kept []gjson.Result
+	for _, tool := range tools.Array() {
+		tt := strings.ToLower(tool.Get("type").String())
+		name := strings.ToLower(tool.Get("name").String())
+		if strings.HasPrefix(tt, "web_search") || name == "web_search" {
+			continue
+		}
+		kept = append(kept, tool)
+	}
+	if len(kept) == len(tools.Array()) {
+		return body
+	}
+	raw := []byte("[")
+	for i, k := range kept {
+		if i > 0 {
+			raw = append(raw, ',')
+		}
+		raw = append(raw, []byte(k.Raw)...)
+	}
+	raw = append(raw, ']')
+	body, _ = sjson.SetRawBytes(body, "tools", raw)
+	return body
 }
 
 func prepareBedrockBody(body []byte) []byte {
@@ -401,6 +461,10 @@ func stripThinkingBlocksFromHistory(body []byte) []byte {
 func (e *ClaudeExecutor) executeBedrock(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
 	if unsupported, tag := e.bodyHasUnsupportedBedrockTools(req.Payload); unsupported {
 		return resp, statusErr{code: http.StatusBadRequest, msg: fmt.Sprintf("bedrock: unsupported tool type %q, skipping", tag)}
+	}
+	// Web search interception (non-stream path)
+	if e.cfg != nil && e.cfg.WebSearch.Enabled && kiroclaude.HasWebSearchTool(req.Payload) {
+		return e.handleBedrockWebSearch(ctx, auth, req, opts)
 	}
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 	if isNovaModel(baseModel) {
