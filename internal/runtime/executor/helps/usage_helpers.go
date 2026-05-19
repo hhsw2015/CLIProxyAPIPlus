@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	internallogging "github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 	"github.com/tidwall/gjson"
@@ -78,7 +79,7 @@ func (r *UsageReporter) PublishAdditionalModel(ctx context.Context, model string
 	if !ok {
 		return
 	}
-	usage.PublishRecord(ctx, record)
+	r.publishRecord(ctx, record)
 }
 
 func (r *UsageReporter) buildAdditionalModelRecord(model string, detail usage.Detail) (usage.Record, bool) {
@@ -115,7 +116,7 @@ func (r *UsageReporter) publishWithOutcome(ctx context.Context, detail usage.Det
 	}
 	detail = normalizeUsageDetailTotal(detail)
 	r.once.Do(func() {
-		usage.PublishRecord(ctx, r.buildRecord(detail, failed, fail))
+		r.publishRecord(ctx, r.buildRecord(detail, failed, fail))
 	})
 }
 
@@ -148,8 +149,13 @@ func (r *UsageReporter) EnsurePublished(ctx context.Context) {
 		return
 	}
 	r.once.Do(func() {
-		usage.PublishRecord(ctx, r.buildRecord(usage.Detail{}, false, usage.Failure{}))
+		r.publishRecord(ctx, r.buildRecord(usage.Detail{}, false, usage.Failure{}))
 	})
+}
+
+func (r *UsageReporter) publishRecord(ctx context.Context, record usage.Record) {
+	record.ResponseHeaders = internallogging.GetResponseHeaders(ctx)
+	usage.PublishRecord(ctx, record)
 }
 
 func (r *UsageReporter) buildRecord(detail usage.Detail, failed bool, failures ...usage.Failure) usage.Record {
