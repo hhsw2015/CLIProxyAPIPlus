@@ -38,8 +38,8 @@ type Config struct {
 	// TLS config controls HTTPS server settings.
 	TLS TLSConfig `yaml:"tls" json:"tls"`
 
-	// Home config enables the Redis-based control plane integration.
-	Home HomeConfig `yaml:"home" json:"-"`
+	// Home config is runtime-only and is populated from -home-jwt.
+	Home HomeConfig `yaml:"-" json:"-"`
 
 	// RemoteManagement nests management-related options under 'remote-management'.
 	RemoteManagement RemoteManagement `yaml:"remote-management" json:"-"`
@@ -77,8 +77,8 @@ type Config struct {
 	// UsagePersistence controls SQLite-based persistent storage of admin usage data.
 	UsagePersistence UsagePersistenceConfig `yaml:"usage-persistence" json:"usage-persistence"`
 
-	// RedisUsageQueueRetentionSeconds controls how long (in seconds) usage queue items
-	// are retained in memory for the Redis RESP interface (LPOP/RPOP).
+	// RedisUsageQueueRetentionSeconds controls how long usage queue items are retained
+	// in memory for Management API consumers.
 	// Default: 60. Max: 3600.
 	RedisUsageQueueRetentionSeconds int `yaml:"redis-usage-queue-retention-seconds" json:"redis-usage-queue-retention-seconds"`
 
@@ -961,6 +961,9 @@ type OpenAICompatibilityModel struct {
 
 	// Alias is the model name alias that clients will use to reference this model.
 	Alias string `yaml:"alias" json:"alias"`
+
+	// Image marks this model as callable through /v1/images/generations and /v1/images/edits.
+	Image bool `yaml:"image,omitempty" json:"image,omitempty"`
 
 	// Thinking configures the thinking/reasoning capability for this model.
 	// If nil, the model defaults to level-based reasoning with levels ["low", "medium", "high"].
