@@ -26,6 +26,16 @@ type WebSearchConfig struct {
 	APIKeys  []string `yaml:"api-keys" json:"api-keys"`
 }
 
+// RTKConfig controls in-process tool_result compression. See RTK field doc on
+// SDKConfig for behavior.
+type RTKConfig struct {
+	Enabled bool `yaml:"enabled" json:"enabled"`
+	// MinSavingsPct is the minimum percentage reduction required to keep the
+	// compressed output. Below this threshold the original is preserved.
+	// Default 5 (i.e. compression must save at least 5%).
+	MinSavingsPct int `yaml:"min-savings-pct,omitempty" json:"min-savings-pct,omitempty"`
+}
+
 type HeadroomConfig struct {
 	Enabled  bool     `yaml:"enabled" json:"enabled"`
 	MinBytes int      `yaml:"min-bytes,omitempty" json:"min-bytes,omitempty"`
@@ -87,6 +97,16 @@ type SDKConfig struct {
 	// enabled, CPA intercepts the tool call, executes the search via the
 	// configured provider, and injects results back into the conversation.
 	WebSearch WebSearchConfig `yaml:"web-search" json:"web-search"`
+
+	// RTK controls in-process tool_result compression using the vendored RTK port
+	// (internal/rtk). When enabled, verbose tool outputs (git diff, grep, ls, tree,
+	// build logs, etc.) are compressed before being forwarded upstream, saving
+	// 30-90% tokens on common dev operations.
+	//
+	// Disabled by default because clients running RTK CLI locally (PreToolUse hook)
+	// already compress output; enabling this would re-process already-compressed
+	// content and waste CPU.
+	RTK RTKConfig `yaml:"rtk" json:"rtk"`
 
 	// DisableImageGeneration controls whether the built-in image_generation tool is injected/allowed.
 	//
