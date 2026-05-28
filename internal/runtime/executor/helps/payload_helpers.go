@@ -31,6 +31,10 @@ func ApplyPayloadConfigWithRequest(cfg *config.Config, model, protocol, fromProt
 	}
 	out := payload
 
+	// Apply RTK tool_result compression first so downstream payload rules see
+	// the (possibly shortened) body. Disabled by default; see SDKConfig.RTK.
+	out = applyRTKToolResultCompression(cfg, out)
+
 	// Apply disable-image-generation filtering before payload rules so config payload
 	// overrides can explicitly re-enable image_generation when desired.
 	if cfg.DisableImageGeneration != config.DisableImageGenerationOff {
