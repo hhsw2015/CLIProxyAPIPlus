@@ -233,6 +233,17 @@ func EnsureLatestManagementHTML(ctx context.Context, staticDir string, proxyURL 
 		}
 
 		asset, remoteHash, err := fetchLatestAsset(ctx, client, releaseURL)
+		if err != nil && strings.TrimSpace(proxyURL) != "" {
+			// Startup race: SOCKS/HTTP proxy is configured but not yet up.
+			// Retry once with a direct (no-proxy) client so the panel can be
+			// fetched on first boot before the proxy supervisor finishes.
+			log.WithError(err).Debug("management asset fetch via proxy failed, retrying without proxy")
+			directClient := newHTTPClient("")
+			asset, remoteHash, err = fetchLatestAsset(ctx, directClient, releaseURL)
+			if err == nil {
+				client = directClient
+			}
+		}
 		if err != nil {
 			if localFileMissing {
 				log.WithError(err).Warn("failed to fetch latest management release information, trying fallback page")
