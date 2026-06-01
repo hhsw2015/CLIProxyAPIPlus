@@ -455,6 +455,16 @@ func (s *Server) setupRoutes() {
 
 	// OpenAI compatible API routes
 	v1 := s.engine.Group("/v1")
+	if s.cfg.MaxRequestBodyMB > 0 {
+		v1.Use(middleware.MaxBodySize(s.cfg.MaxRequestBodyMB))
+	}
+	if s.cfg.Throttle.MaxConcurrency > 0 {
+		timeout := time.Duration(s.cfg.Throttle.TimeoutSeconds) * time.Second
+		if timeout <= 0 {
+			timeout = 5 * time.Second
+		}
+		v1.Use(middleware.ThrottleBacklog(s.cfg.Throttle.MaxConcurrency, s.cfg.Throttle.Backlog, timeout))
+	}
 	v1.Use(s.proxyAuthMiddleware())
 	{
 		v1.GET("/models", s.unifiedModelsHandler(openaiHandlers, claudeCodeHandlers))
@@ -481,6 +491,13 @@ func (s *Server) setupRoutes() {
 
 	// Codex CLI direct route aliases (chatgpt_base_url compatible)
 	codexDirect := s.engine.Group("/backend-api/codex")
+	if s.cfg.Throttle.MaxConcurrency > 0 {
+		timeout := time.Duration(s.cfg.Throttle.TimeoutSeconds) * time.Second
+		if timeout <= 0 {
+			timeout = 5 * time.Second
+		}
+		codexDirect.Use(middleware.ThrottleBacklog(s.cfg.Throttle.MaxConcurrency, s.cfg.Throttle.Backlog, timeout))
+	}
 	codexDirect.Use(s.proxyAuthMiddleware())
 	{
 		codexDirect.GET("/responses", openaiResponsesHandlers.ResponsesWebsocket)

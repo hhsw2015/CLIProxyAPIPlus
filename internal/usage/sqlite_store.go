@@ -31,7 +31,10 @@ type UsageRecord struct {
 	CachedTokens    int64
 	TotalTokens     int64
 	CostUSD         float64
-	CreatedAt       time.Time
+	// Status tracks two-phase commit lifecycle: "pending" on request start,
+	// "success" or "failed" on completion. Crash orphans remain "pending".
+	Status    string `gorm:"index:idx_status;default:success"`
+	CreatedAt time.Time
 }
 
 // ModelPrice stores per-model pricing for cost calculation.
@@ -101,6 +104,34 @@ func NewSQLiteStore(dbPath string, adminAPIKeys []string, retentionDays int) (*S
 // IsAdminKey checks if the given API key is a CPA admin key.
 func (s *SQLiteStore) IsAdminKey(apiKey string) bool {
 	return s.adminKeys[apiKey]
+}
+
+// RecordPending inserts a usage record with status="pending". Call
+// CompletePending once the request finishes to flip to success/failed.
+func (s *SQLiteStore) RecordPending(r UsageRecord) {
+	r.Status = "pending"
+	if r.EventKey == "" {
+		return
+	}
+	s.db.Clauses(clause.OnConflict{DoNothing: true}).Create(&r)
+}
+
+// CompletePending updates a pending record to success or failed with final token counts.
+func (s *SQLiteStore) CompletePending(eventKey string, failed bool, inputTokens, outputTokens, reasoningTokens, cachedTokens int64, latencyMS int64) {
+	status := "success"
+	if failed {
+		status = "failed"
+	}
+	s.db.Model(&UsageRecord{}).Where("event_key = ? AND status = ?", eventKey, "pending").Updates(map[string]interface{}{
+		"status":           status,
+		"failed":           failed,
+		"input_tokens":     inputTokens,
+		"output_tokens":    outputTokens,
+		"reasoning_tokens": reasoningTokens,
+		"cached_tokens":    cachedTokens,
+		"total_tokens":     inputTokens + outputTokens + reasoningTokens,
+		"latency_ms":       latencyMS,
+	})
 }
 
 // Record persists a single usage event to SQLite with cost calculation.
