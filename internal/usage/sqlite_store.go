@@ -109,20 +109,51 @@ func (s *SQLiteStore) IsAdminKey(apiKey string) bool {
 // RecordPending inserts a usage record with status="pending". Call
 // CompletePending once the request finishes to flip to success/failed.
 func (s *SQLiteStore) RecordPending(r UsageRecord) {
-	r.Status = "pending"
 	if r.EventKey == "" {
 		return
 	}
-	s.db.Clauses(clause.OnConflict{DoNothing: true}).Create(&r)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	r.Status = "pending"
+	if r.CreatedAt.IsZero() {
+		r.CreatedAt = time.Now()
+	}
+	if r.Timestamp.IsZero() {
+		r.Timestamp = r.CreatedAt
+	}
+
+	if result := s.db.Clauses(clause.OnConflict{DoNothing: true}).Create(&r); result.Error != nil {
+		log.Debugf("[usage-sqlite] pending write failed: %v", result.Error)
+	}
 }
 
 // CompletePending updates a pending record to success or failed with final token counts.
 func (s *SQLiteStore) CompletePending(eventKey string, failed bool, inputTokens, outputTokens, reasoningTokens, cachedTokens int64, latencyMS int64) {
+	if eventKey == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	status := "success"
 	if failed {
 		status = "failed"
 	}
-	s.db.Model(&UsageRecord{}).Where("event_key = ? AND status = ?", eventKey, "pending").Updates(map[string]interface{}{
+
+	// Recompute cost using the existing record's model + fresh token counts.
+	var existing UsageRecord
+	if err := s.db.Where("event_key = ? AND status = ?", eventKey, "pending").First(&existing).Error; err != nil {
+		log.Debugf("[usage-sqlite] complete: pending row not found for %s: %v", eventKey, err)
+		return
+	}
+	existing.InputTokens = inputTokens
+	existing.OutputTokens = outputTokens
+	existing.ReasoningTokens = reasoningTokens
+	existing.CachedTokens = cachedTokens
+	cost := s.calculateCost(existing)
+
+	updates := map[string]interface{}{
 		"status":           status,
 		"failed":           failed,
 		"input_tokens":     inputTokens,
@@ -131,7 +162,11 @@ func (s *SQLiteStore) CompletePending(eventKey string, failed bool, inputTokens,
 		"cached_tokens":    cachedTokens,
 		"total_tokens":     inputTokens + outputTokens + reasoningTokens,
 		"latency_ms":       latencyMS,
-	})
+		"cost_usd":         cost,
+	}
+	if result := s.db.Model(&UsageRecord{}).Where("event_key = ? AND status = ?", eventKey, "pending").Updates(updates); result.Error != nil {
+		log.Debugf("[usage-sqlite] complete update failed: %v", result.Error)
+	}
 }
 
 // Record persists a single usage event to SQLite with cost calculation.

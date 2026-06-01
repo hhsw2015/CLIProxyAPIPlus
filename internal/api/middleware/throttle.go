@@ -33,9 +33,11 @@ func ThrottleBacklog(maxConcurrency, backlog int, timeout time.Duration) gin.Han
 		}
 		defer func() { <-queue }()
 
+		timer := time.NewTimer(timeout)
 		select {
 		case sem <- struct{}{}:
-		case <-time.After(timeout):
+			timer.Stop()
+		case <-timer.C:
 			c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{
 				"type": "error",
 				"error": gin.H{
@@ -45,6 +47,7 @@ func ThrottleBacklog(maxConcurrency, backlog int, timeout time.Duration) gin.Han
 			})
 			return
 		case <-c.Request.Context().Done():
+			timer.Stop()
 			c.Abort()
 			return
 		}

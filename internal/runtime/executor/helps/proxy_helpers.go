@@ -70,17 +70,26 @@ func ttfbTimeout(cfg *config.Config) time.Duration {
 	return 0
 }
 
-func applyResponseHeaderTimeout(client *http.Client, d time.Duration) {
+// applyResponseHeaderTimeout returns a new *http.Client whose transport carries
+// the given ResponseHeaderTimeout, without mutating the source transport. The
+// transport is shallow-cloned so cached/shared transports stay untouched.
+// If d <= 0 or the underlying transport is not *http.Transport (e.g. utls),
+// the original client is returned unchanged.
+func applyResponseHeaderTimeout(client *http.Client, d time.Duration) *http.Client {
 	if d <= 0 || client == nil {
-		return
+		return client
 	}
-	if t, ok := client.Transport.(*http.Transport); ok && t != nil {
-		t.ResponseHeaderTimeout = d
+	t, ok := client.Transport.(*http.Transport)
+	if !ok || t == nil {
+		return client
 	}
+	cloned := t.Clone()
+	cloned.ResponseHeaderTimeout = d
+	return &http.Client{Transport: cloned, Timeout: client.Timeout}
 }
 
 func NewProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, timeout time.Duration) (result *http.Client) {
-	defer func() { applyResponseHeaderTimeout(result, ttfbTimeout(cfg)) }()
+	defer func() { result = applyResponseHeaderTimeout(result, ttfbTimeout(cfg)) }()
 	// Priority 1: Use auth.ProxyURL if configured
 	var proxyURL string
 	if auth != nil {
