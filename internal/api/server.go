@@ -453,17 +453,24 @@ func (s *Server) setupRoutes() {
 	claudeCodeHandlers := claude.NewClaudeCodeAPIHandler(s.handlers)
 	openaiResponsesHandlers := openai.NewOpenAIResponsesAPIHandler(s.handlers)
 
-	// OpenAI compatible API routes
-	v1 := s.engine.Group("/v1")
-	if s.cfg.MaxRequestBodyMB > 0 {
-		v1.Use(middleware.MaxBodySize(s.cfg.MaxRequestBodyMB))
-	}
+	// Single shared throttle so v1, codexDirect, and v1beta enforce one global
+	// concurrency ceiling instead of N×ceiling (one per group).
+	var throttleMW gin.HandlerFunc
 	if s.cfg.Throttle.MaxConcurrency > 0 {
 		timeout := time.Duration(s.cfg.Throttle.TimeoutSeconds) * time.Second
 		if timeout <= 0 {
 			timeout = 5 * time.Second
 		}
-		v1.Use(middleware.ThrottleBacklog(s.cfg.Throttle.MaxConcurrency, s.cfg.Throttle.Backlog, timeout))
+		throttleMW = middleware.ThrottleBacklog(s.cfg.Throttle.MaxConcurrency, s.cfg.Throttle.Backlog, timeout)
+	}
+
+	// OpenAI compatible API routes
+	v1 := s.engine.Group("/v1")
+	if s.cfg.MaxRequestBodyMB > 0 {
+		v1.Use(middleware.MaxBodySize(s.cfg.MaxRequestBodyMB))
+	}
+	if throttleMW != nil {
+		v1.Use(throttleMW)
 	}
 	v1.Use(s.proxyAuthMiddleware())
 	{
@@ -491,12 +498,11 @@ func (s *Server) setupRoutes() {
 
 	// Codex CLI direct route aliases (chatgpt_base_url compatible)
 	codexDirect := s.engine.Group("/backend-api/codex")
-	if s.cfg.Throttle.MaxConcurrency > 0 {
-		timeout := time.Duration(s.cfg.Throttle.TimeoutSeconds) * time.Second
-		if timeout <= 0 {
-			timeout = 5 * time.Second
-		}
-		codexDirect.Use(middleware.ThrottleBacklog(s.cfg.Throttle.MaxConcurrency, s.cfg.Throttle.Backlog, timeout))
+	if s.cfg.MaxRequestBodyMB > 0 {
+		codexDirect.Use(middleware.MaxBodySize(s.cfg.MaxRequestBodyMB))
+	}
+	if throttleMW != nil {
+		codexDirect.Use(throttleMW)
 	}
 	codexDirect.Use(s.proxyAuthMiddleware())
 	{
@@ -507,6 +513,12 @@ func (s *Server) setupRoutes() {
 
 	// Gemini compatible API routes
 	v1beta := s.engine.Group("/v1beta")
+	if s.cfg.MaxRequestBodyMB > 0 {
+		v1beta.Use(middleware.MaxBodySize(s.cfg.MaxRequestBodyMB))
+	}
+	if throttleMW != nil {
+		v1beta.Use(throttleMW)
+	}
 	v1beta.Use(s.proxyAuthMiddleware())
 	{
 		v1beta.GET("/models", s.geminiModelsHandler(geminiHandlers))
