@@ -26,6 +26,22 @@ type WebSearchConfig struct {
 	APIKeys  []string `yaml:"api-keys" json:"api-keys"`
 }
 
+// ThrottleConfig controls concurrent request limiting with backpressure.
+type ThrottleConfig struct {
+	MaxConcurrency int `yaml:"max-concurrency,omitempty" json:"max-concurrency,omitempty"`
+	Backlog        int `yaml:"backlog,omitempty" json:"backlog,omitempty"`
+	TimeoutSeconds int `yaml:"timeout-seconds,omitempty" json:"timeout-seconds,omitempty"`
+}
+
+// RecoveryProbeConfig controls periodic probing of disabled auth entries.
+type RecoveryProbeConfig struct {
+	Enabled         bool `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+	IntervalSeconds int  `yaml:"interval-seconds,omitempty" json:"interval-seconds,omitempty"`
+	BackoffBaseMin  int  `yaml:"backoff-base-min,omitempty" json:"backoff-base-min,omitempty"`
+	BackoffMaxMin   int  `yaml:"backoff-max-min,omitempty" json:"backoff-max-min,omitempty"`
+	Concurrency     int  `yaml:"concurrency,omitempty" json:"concurrency,omitempty"`
+}
+
 // RTKConfig controls in-process tool_result compression. See RTK field doc on
 // SDKConfig for behavior.
 type RTKConfig struct {
@@ -97,6 +113,18 @@ type SDKConfig struct {
 	// enabled, CPA intercepts the tool call, executes the search via the
 	// configured provider, and injects results back into the conversation.
 	WebSearch WebSearchConfig `yaml:"web-search" json:"web-search"`
+
+	// Throttle controls concurrent request limiting with backpressure. When the
+	// proxy goroutine count exceeds MaxConcurrency, additional requests queue (up
+	// to Backlog); if they wait longer than TimeoutSeconds they get 503.
+	Throttle ThrottleConfig `yaml:"throttle" json:"throttle"`
+
+	// MaxRequestBodyMB limits incoming request body size. 0 disables the limit.
+	MaxRequestBodyMB int `yaml:"max-request-body-mb,omitempty" json:"max-request-body-mb,omitempty"`
+
+	// RecoveryProbe controls periodic probing of disabled/cooldown auth entries
+	// to detect early recovery without waiting the full cooldown timer.
+	RecoveryProbe RecoveryProbeConfig `yaml:"recovery-probe" json:"recovery-probe"`
 
 	// RTK controls in-process tool_result compression using the vendored RTK port
 	// (internal/rtk). When enabled, verbose tool outputs (git diff, grep, ls, tree,

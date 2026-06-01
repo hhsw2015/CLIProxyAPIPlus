@@ -63,7 +63,24 @@ var (
 //
 // Returns:
 //   - *http.Client: An HTTP client with configured proxy or transport
-func NewProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, timeout time.Duration) *http.Client {
+func ttfbTimeout(cfg *config.Config) time.Duration {
+	if cfg != nil && cfg.Streaming.TTFBTimeoutSeconds > 0 {
+		return time.Duration(cfg.Streaming.TTFBTimeoutSeconds) * time.Second
+	}
+	return 0
+}
+
+func applyResponseHeaderTimeout(client *http.Client, d time.Duration) {
+	if d <= 0 || client == nil {
+		return
+	}
+	if t, ok := client.Transport.(*http.Transport); ok && t != nil {
+		t.ResponseHeaderTimeout = d
+	}
+}
+
+func NewProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, timeout time.Duration) (result *http.Client) {
+	defer func() { applyResponseHeaderTimeout(result, ttfbTimeout(cfg)) }()
 	// Priority 1: Use auth.ProxyURL if configured
 	var proxyURL string
 	if auth != nil {
