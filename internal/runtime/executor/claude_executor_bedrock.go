@@ -185,66 +185,266 @@ func (e *ClaudeExecutor) bodyHasUnsupportedBedrockTools(body []byte) (bool, stri
 	return false, ""
 }
 
-// handleBedrockWebSearch intercepts web_search for non-streaming requests.
+const maxBedrockWebSearchIterations = 5
+
+// handleBedrockWebSearch handles web_search for non-streaming Bedrock requests.
+//
+// Loop:
+//
+//  1. extract query, dispatch search, inject tool_use+tool_result with fresh
+//     toolUseId
+//  2. call Bedrock buffered, parse stop_reason + any new web_search tool_use
+//  3. if model wants another search and budget remains: continue with new query
+//  4. otherwise: forward final assistant message to caller
+//
+// We use ReplaceWebSearchToolDescription (not removeWebSearchTool) so the model
+// can request additional searches across iterations. Recursion is bounded by
+// maxBedrockWebSearchIterations.
 func (e *ClaudeExecutor) handleBedrockWebSearch(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
 	query := kiroclaude.ExtractSearchQuery(req.Payload)
 	if query == "" {
-		query = "latest information"
-	}
-	log.Infof("[web-search] intercepting non-stream for bedrock, query=%q", query)
-
-	// Remove web_search tool from tools array entirely so Bedrock won't reject it.
-	// This must happen before any recursive call to executeBedrock to prevent infinite loop.
-	strippedPayload := removeWebSearchTool(req.Payload)
-
-	results, err := dispatchWebSearch(ctx, e.cfg, query)
-	if err != nil {
-		log.Warnf("[web-search] dispatch failed: %v, proceeding without search", err)
-		req.Payload = strippedPayload
+		log.Warnf("[web-search/bedrock] failed to extract query, proceeding without search")
+		req.Payload = removeWebSearchTool(req.Payload)
 		return e.executeBedrock(ctx, auth, req, opts)
 	}
 
-	toolUseID := "srvtoolu_websearch_bedrock"
-	modifiedPayload, err := kiroclaude.InjectToolResultsClaude(strippedPayload, toolUseID, query, results)
-	if err != nil {
-		log.Warnf("[web-search] inject failed: %v, proceeding without search", err)
-		req.Payload = strippedPayload
-		return e.executeBedrock(ctx, auth, req, opts)
+	simplified, errSimplify := kiroclaude.ReplaceWebSearchToolDescription(bytes.Clone(req.Payload))
+	if errSimplify != nil {
+		log.Warnf("[web-search/bedrock] simplify tools failed: %v, falling back to remove", errSimplify)
+		simplified = removeWebSearchTool(bytes.Clone(req.Payload))
 	}
 
-	req.Payload = modifiedPayload
+	currentPayload := simplified
+	currentQuery := query
+	currentToolUseID := fmt.Sprintf("srvtoolu_%s", kiroclaude.GenerateToolUseID())
+
+	for iteration := 0; iteration < maxBedrockWebSearchIterations; iteration++ {
+		log.Infof("[web-search/bedrock] non-stream iteration %d/%d query=%q", iteration+1, maxBedrockWebSearchIterations, currentQuery)
+
+		results, errSearch := dispatchWebSearch(ctx, e.cfg, currentQuery)
+		if errSearch != nil {
+			log.Warnf("[web-search/bedrock] dispatch failed at iter %d: %v, ending loop", iteration+1, errSearch)
+		}
+
+		injected, errInject := kiroclaude.InjectToolResultsClaude(currentPayload, currentToolUseID, currentQuery, results)
+		if errInject != nil {
+			log.Warnf("[web-search/bedrock] inject failed at iter %d: %v, falling back", iteration+1, errInject)
+			req.Payload = removeWebSearchTool(req.Payload)
+			return e.executeBedrock(ctx, auth, req, opts)
+		}
+		currentPayload = injected
+
+		// On the last iteration, we cannot search further, so dispatch
+		// directly to Bedrock and let the model produce its final response.
+		if iteration+1 >= maxBedrockWebSearchIterations {
+			log.Warnf("[web-search/bedrock] max iterations reached, returning final answer")
+			break
+		}
+
+		// Issue a buffered call to see whether the model wants another search.
+		modifiedReq := req
+		modifiedReq.Payload = currentPayload
+		respBody, errCall := e.callBedrockAndParse(ctx, auth, modifiedReq, opts)
+		if errCall != nil {
+			log.Warnf("[web-search/bedrock] bedrock call failed at iter %d: %v", iteration+1, errCall)
+			req.Payload = currentPayload
+			return e.executeBedrock(ctx, auth, req, opts)
+		}
+
+		nextQuery, nextID, ok := nextWebSearchFromBedrockResponse(respBody)
+		if !ok {
+			// Model produced final answer; return it directly.
+			return cliproxyexecutor.Response{Payload: respBody}, nil
+		}
+		currentQuery = nextQuery
+		currentToolUseID = nextID
+	}
+
+	req.Payload = currentPayload
 	return e.executeBedrock(ctx, auth, req, opts)
 }
 
-// handleBedrockWebSearchStream intercepts web_search for streaming requests.
+// handleBedrockWebSearchStream handles web_search for streaming Bedrock requests.
+//
+// Mirrors the non-stream loop but emits SSE search-indicator events between
+// iterations and forwards the final iteration's SSE chunks (rebased to the
+// correct content_block_index) to the caller.
 func (e *ClaudeExecutor) handleBedrockWebSearchStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
 	query := kiroclaude.ExtractSearchQuery(req.Payload)
 	if query == "" {
-		query = "latest information"
-	}
-
-	log.Infof("[web-search] intercepting stream for bedrock, query=%q", query)
-
-	// Remove web_search tool entirely to prevent infinite loop on re-entry.
-	strippedPayload := removeWebSearchTool(req.Payload)
-
-	results, err := dispatchWebSearch(ctx, e.cfg, query)
-	if err != nil {
-		log.Warnf("[web-search] stream dispatch failed: %v, proceeding without search", err)
-		req.Payload = strippedPayload
+		log.Warnf("[web-search/bedrock] stream: failed to extract query, proceeding without search")
+		req.Payload = removeWebSearchTool(req.Payload)
 		return e.executeStreamBedrock(ctx, auth, req, opts)
 	}
 
-	toolUseID := "srvtoolu_websearch_bedrock"
-	modifiedPayload, err := kiroclaude.InjectToolResultsClaude(strippedPayload, toolUseID, query, results)
-	if err != nil {
-		log.Warnf("[web-search] stream inject failed: %v, proceeding without search", err)
-		req.Payload = strippedPayload
-		return e.executeStreamBedrock(ctx, auth, req, opts)
+	simplified, errSimplify := kiroclaude.ReplaceWebSearchToolDescription(bytes.Clone(req.Payload))
+	if errSimplify != nil {
+		log.Warnf("[web-search/bedrock] stream simplify tools failed: %v, falling back to remove", errSimplify)
+		simplified = removeWebSearchTool(bytes.Clone(req.Payload))
 	}
 
-	req.Payload = modifiedPayload
-	return e.executeStreamBedrock(ctx, auth, req, opts)
+	out := make(chan cliproxyexecutor.StreamChunk)
+
+	go func() {
+		defer close(out)
+
+		// Outer loop owns message_start; FilterChunksForClient + AdjustSSEChunk
+		// strip message_start/message_delta/message_stop from each iteration's
+		// buffered chunks so we send exactly one of each across the whole loop.
+		msgStart := kiroclaude.BuildClaudeMessageStartEvent(payloadRequestedModel(opts, req.Model), int64(len(req.Payload)/4))
+		select {
+		case <-ctx.Done():
+			return
+		case out <- cliproxyexecutor.StreamChunk{Payload: append(msgStart, '\n', '\n')}:
+		}
+
+		currentPayload := simplified
+		currentQuery := query
+		currentToolUseID := fmt.Sprintf("srvtoolu_%s", kiroclaude.GenerateToolUseID())
+		contentBlockIndex := 0
+
+		for iteration := 0; iteration < maxBedrockWebSearchIterations; iteration++ {
+			log.Infof("[web-search/bedrock] stream iteration %d/%d query=%q", iteration+1, maxBedrockWebSearchIterations, currentQuery)
+
+			results, errSearch := dispatchWebSearch(ctx, e.cfg, currentQuery)
+			if errSearch != nil {
+				log.Warnf("[web-search/bedrock] stream dispatch failed at iter %d: %v, continuing with empty results", iteration+1, errSearch)
+			}
+
+			// Send search indicator events to client.
+			indicatorEvents := kiroclaude.GenerateSearchIndicatorEvents(currentQuery, currentToolUseID, results, contentBlockIndex)
+			for _, evt := range indicatorEvents {
+				select {
+				case <-ctx.Done():
+					return
+				case out <- cliproxyexecutor.StreamChunk{Payload: evt}:
+				}
+			}
+			contentBlockIndex += 2
+
+			injected, errInject := kiroclaude.InjectToolResultsClaude(currentPayload, currentToolUseID, currentQuery, results)
+			if errInject != nil {
+				log.Warnf("[web-search/bedrock] stream inject failed at iter %d: %v, ending loop", iteration+1, errInject)
+				return
+			}
+			currentPayload = injected
+
+			// Buffered call so we can decide whether to continue searching.
+			modifiedReq := req
+			modifiedReq.Payload = currentPayload
+			chunks, errBuf := e.callBedrockStreamAndBuffer(ctx, auth, modifiedReq, opts)
+			if errBuf != nil {
+				log.Warnf("[web-search/bedrock] stream buffered call failed at iter %d: %v", iteration+1, errBuf)
+				select {
+				case out <- cliproxyexecutor.StreamChunk{Err: errBuf}:
+				case <-ctx.Done():
+				}
+				return
+			}
+
+			analysis := kiroclaude.AnalyzeBufferedStream(chunks)
+			log.Infof("[web-search/bedrock] iter %d stop_reason=%s has_tool_use=%v", iteration+1, analysis.StopReason, analysis.HasWebSearchToolUse)
+
+			if analysis.HasWebSearchToolUse && analysis.WebSearchQuery != "" && iteration+1 < maxBedrockWebSearchIterations {
+				// Forward chunks before the new tool_use, then loop.
+				filtered := kiroclaude.FilterChunksForClient(chunks, analysis.WebSearchToolUseIndex, contentBlockIndex)
+				for _, chunk := range filtered {
+					select {
+					case <-ctx.Done():
+						return
+					case out <- cliproxyexecutor.StreamChunk{Payload: chunk}:
+					}
+				}
+				currentQuery = analysis.WebSearchQuery
+				currentToolUseID = analysis.WebSearchToolUseId
+				continue
+			}
+
+			// Final answer. Forward chunks with content-block-index rebased
+			// AND with message_start/delta/stop stripped (we own those).
+			for _, chunk := range chunks {
+				adjusted, ok := kiroclaude.AdjustSSEChunk(chunk, contentBlockIndex)
+				if !ok {
+					continue
+				}
+				select {
+				case <-ctx.Done():
+					return
+				case out <- cliproxyexecutor.StreamChunk{Payload: adjusted}:
+				}
+			}
+			return
+		}
+
+		log.Warnf("[web-search/bedrock] stream reached max iterations")
+	}()
+
+	return &cliproxyexecutor.StreamResult{
+		Headers: http.Header{"Content-Type": {"text/event-stream"}},
+		Chunks:  out,
+	}, nil
+}
+
+// callBedrockAndParse performs a non-streaming Bedrock call and returns the raw
+// Claude-format response body. Used by the web-search loop to inspect the
+// model's output between iterations.
+func (e *ClaudeExecutor) callBedrockAndParse(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) ([]byte, error) {
+	resp, err := e.executeBedrock(ctx, auth, req, opts)
+	if err != nil {
+		return nil, err
+	}
+	return resp.Payload, nil
+}
+
+// nextWebSearchFromBedrockResponse extracts a (query, toolUseId) pair from a
+// Claude-format response body if the model invoked web_search. Returns ok=false
+// when no follow-up search is requested.
+func nextWebSearchFromBedrockResponse(body []byte) (string, string, bool) {
+	contentArr := gjson.GetBytes(body, "content")
+	if !contentArr.IsArray() {
+		return "", "", false
+	}
+	for _, block := range contentArr.Array() {
+		if block.Get("type").String() != "tool_use" {
+			continue
+		}
+		name := block.Get("name").String()
+		if name != "web_search" {
+			continue
+		}
+		query := block.Get("input.query").String()
+		if query == "" {
+			continue
+		}
+		id := block.Get("id").String()
+		if id == "" {
+			id = fmt.Sprintf("srvtoolu_%s", kiroclaude.GenerateToolUseID())
+		}
+		return query, id, true
+	}
+	return "", "", false
+}
+
+// callBedrockStreamAndBuffer runs an SSE stream against Bedrock and returns the
+// full chunk slice. Used by the web-search loop to call AnalyzeBufferedStream
+// and decide whether to continue searching.
+func (e *ClaudeExecutor) callBedrockStreamAndBuffer(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) ([][]byte, error) {
+	streamResult, err := e.executeStreamBedrock(ctx, auth, req, opts)
+	if err != nil {
+		return nil, err
+	}
+	var chunks [][]byte
+	for chunk := range streamResult.Chunks {
+		if chunk.Err != nil {
+			return chunks, chunk.Err
+		}
+		if len(chunk.Payload) > 0 {
+			b := make([]byte, len(chunk.Payload))
+			copy(b, chunk.Payload)
+			chunks = append(chunks, b)
+		}
+	}
+	return chunks, nil
 }
 
 // removeWebSearchTool removes all web_search-type tools from the tools array
