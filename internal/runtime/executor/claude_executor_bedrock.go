@@ -187,6 +187,46 @@ func (e *ClaudeExecutor) bodyHasUnsupportedBedrockTools(body []byte) (bool, stri
 
 const maxBedrockWebSearchIterations = 5
 
+// bedrockWebSearchInProgressKey marks contexts already inside the web-search
+// loop so re-entrant executeBedrock calls (made by callBedrockAndParse and
+// callBedrockStreamAndBuffer) skip the interception entry condition. Without
+// this flag, ReplaceWebSearchToolDescription leaves a web_search tool in the
+// payload and bedrockHasWebSearchTool would loop forever.
+type bedrockWebSearchCtxKey struct{}
+
+func bedrockWebSearchInProgress(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
+	v, _ := ctx.Value(bedrockWebSearchCtxKey{}).(bool)
+	return v
+}
+
+func withBedrockWebSearchInProgress(ctx context.Context) context.Context {
+	return context.WithValue(ctx, bedrockWebSearchCtxKey{}, true)
+}
+
+// bedrockHasWebSearchTool reports whether the request contains a web_search
+// tool of any kind, regardless of how many other tools are alongside it.
+// Cannot reuse kiroclaude.HasWebSearchTool because that one returns true only
+// when web_search is the *sole* tool (Kiro's MCP-only path); Claude Code
+// always sends web_search alongside Bash/Read/Edit/etc., which would fall
+// through to Bedrock and fail with "web_search_20250305 not supported".
+func bedrockHasWebSearchTool(body []byte) bool {
+	tools := gjson.GetBytes(body, "tools")
+	if !tools.IsArray() {
+		return false
+	}
+	for _, tool := range tools.Array() {
+		name := strings.ToLower(tool.Get("name").String())
+		toolType := strings.ToLower(tool.Get("type").String())
+		if name == "web_search" || strings.HasPrefix(toolType, "web_search") {
+			return true
+		}
+	}
+	return false
+}
+
 // handleBedrockWebSearch handles web_search for non-streaming Bedrock requests.
 //
 // Loop:
@@ -247,8 +287,7 @@ func (e *ClaudeExecutor) handleBedrockWebSearch(ctx context.Context, auth *clipr
 		respBody, errCall := e.callBedrockAndParse(ctx, auth, modifiedReq, opts)
 		if errCall != nil {
 			log.Warnf("[web-search/bedrock] bedrock call failed at iter %d: %v", iteration+1, errCall)
-			req.Payload = currentPayload
-			return e.executeBedrock(ctx, auth, req, opts)
+			return cliproxyexecutor.Response{}, errCall
 		}
 
 		nextQuery, nextID, ok := nextWebSearchFromBedrockResponse(respBody)
@@ -261,7 +300,7 @@ func (e *ClaudeExecutor) handleBedrockWebSearch(ctx context.Context, auth *clipr
 	}
 
 	req.Payload = currentPayload
-	return e.executeBedrock(ctx, auth, req, opts)
+	return e.executeBedrock(withBedrockWebSearchInProgress(ctx), auth, req, opts)
 }
 
 // handleBedrockWebSearchStream handles web_search for streaming Bedrock requests.
@@ -289,14 +328,28 @@ func (e *ClaudeExecutor) handleBedrockWebSearchStream(ctx context.Context, auth 
 		defer close(out)
 
 		// Outer loop owns message_start; FilterChunksForClient + AdjustSSEChunk
-		// strip message_start/message_delta/message_stop from each iteration's
-		// buffered chunks so we send exactly one of each across the whole loop.
+		// strip message_start from each iteration's buffered chunks. The final
+		// iteration's chunks carry message_delta + message_stop; if we exit
+		// before reaching that, fallbackStopSent ensures the client still gets
+		// a terminator so it doesn't hang on a half-open stream.
 		msgStart := kiroclaude.BuildClaudeMessageStartEvent(payloadRequestedModel(opts, req.Model), int64(len(req.Payload)/4))
 		select {
 		case <-ctx.Done():
 			return
 		case out <- cliproxyexecutor.StreamChunk{Payload: append(msgStart, '\n', '\n')}:
 		}
+
+		streamCompleted := false
+		defer func() {
+			if streamCompleted {
+				return
+			}
+			stop := []byte("event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
+			select {
+			case out <- cliproxyexecutor.StreamChunk{Payload: stop}:
+			case <-ctx.Done():
+			}
+		}()
 
 		currentPayload := simplified
 		currentQuery := query
@@ -361,7 +414,8 @@ func (e *ClaudeExecutor) handleBedrockWebSearchStream(ctx context.Context, auth 
 			}
 
 			// Final answer. Forward chunks with content-block-index rebased
-			// AND with message_start/delta/stop stripped (we own those).
+			// (AdjustSSEChunk strips message_start; message_delta and
+			// message_stop pass through to terminate the client stream.)
 			for _, chunk := range chunks {
 				adjusted, ok := kiroclaude.AdjustSSEChunk(chunk, contentBlockIndex)
 				if !ok {
@@ -373,6 +427,7 @@ func (e *ClaudeExecutor) handleBedrockWebSearchStream(ctx context.Context, auth 
 				case out <- cliproxyexecutor.StreamChunk{Payload: adjusted}:
 				}
 			}
+			streamCompleted = true
 			return
 		}
 
@@ -387,9 +442,10 @@ func (e *ClaudeExecutor) handleBedrockWebSearchStream(ctx context.Context, auth 
 
 // callBedrockAndParse performs a non-streaming Bedrock call and returns the raw
 // Claude-format response body. Used by the web-search loop to inspect the
-// model's output between iterations.
+// model's output between iterations. Marks ctx so the entry guard skips
+// re-interception (the simplified payload still carries a web_search tool).
 func (e *ClaudeExecutor) callBedrockAndParse(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) ([]byte, error) {
-	resp, err := e.executeBedrock(ctx, auth, req, opts)
+	resp, err := e.executeBedrock(withBedrockWebSearchInProgress(ctx), auth, req, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -427,9 +483,10 @@ func nextWebSearchFromBedrockResponse(body []byte) (string, string, bool) {
 
 // callBedrockStreamAndBuffer runs an SSE stream against Bedrock and returns the
 // full chunk slice. Used by the web-search loop to call AnalyzeBufferedStream
-// and decide whether to continue searching.
+// and decide whether to continue searching. Marks ctx so the entry guard skips
+// re-interception (the simplified payload still carries a web_search tool).
 func (e *ClaudeExecutor) callBedrockStreamAndBuffer(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) ([][]byte, error) {
-	streamResult, err := e.executeStreamBedrock(ctx, auth, req, opts)
+	streamResult, err := e.executeStreamBedrock(withBedrockWebSearchInProgress(ctx), auth, req, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -690,7 +747,7 @@ func (e *ClaudeExecutor) executeBedrock(ctx context.Context, auth *cliproxyauth.
 		return resp, statusErr{code: http.StatusBadRequest, msg: fmt.Sprintf("bedrock: unsupported tool type %q, skipping", tag)}
 	}
 	// Web search interception (non-stream path)
-	if e.cfg != nil && e.cfg.WebSearch.Enabled && kiroclaude.HasWebSearchTool(req.Payload) {
+	if !bedrockWebSearchInProgress(ctx) && e.cfg != nil && e.cfg.WebSearch.Enabled && bedrockHasWebSearchTool(req.Payload) {
 		return e.handleBedrockWebSearch(ctx, auth, req, opts)
 	}
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
@@ -762,7 +819,7 @@ func (e *ClaudeExecutor) executeStreamBedrock(ctx context.Context, auth *cliprox
 	// Web search interception: if the request contains web_search tools and
 	// gateway-level search is enabled, handle via CPA's search dispatch
 	// so the tools array sent to Bedrock won't include web_search.
-	if e.cfg != nil && e.cfg.WebSearch.Enabled && kiroclaude.HasWebSearchTool(req.Payload) {
+	if !bedrockWebSearchInProgress(ctx) && e.cfg != nil && e.cfg.WebSearch.Enabled && bedrockHasWebSearchTool(req.Payload) {
 		return e.handleBedrockWebSearchStream(ctx, auth, req, opts)
 	}
 
