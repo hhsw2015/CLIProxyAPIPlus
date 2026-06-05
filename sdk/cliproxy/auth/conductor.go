@@ -2699,6 +2699,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 		m.scheduler.recordLatency(result.AuthID, result.Latency)
 	}
 
+	m.publishErrorEvent(result, authSnapshot)
 }
 
 func ensureModelState(auth *Auth, model string) *ModelState {
