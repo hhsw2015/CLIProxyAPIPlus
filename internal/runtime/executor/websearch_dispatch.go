@@ -20,9 +20,39 @@ func InitWebSearchPool(cfg *config.WebSearchConfig) {
 	wsPool = newWSKeyPool(cfg.APIKeys)
 }
 
+// sanitizeWebSearchQuery clips a search query to a length the upstream
+// providers will accept and strips Claude Code's noisy "Proactive Context
+// Expansion" appendage.
+//
+// TinyFish rejects queries > 2000 chars. Claude Code sometimes glues
+// compressed conversation history onto the query as a context-expansion
+// block, which inflates the field by 5-20 KB and makes the search useless
+// even when accepted. Truncate at the first marker, then bound length.
+func sanitizeWebSearchQuery(query string) string {
+	const maxQueryLen = 1900
+	if i := strings.Index(query, "[Proactive Context Expansion"); i >= 0 {
+		query = query[:i]
+	}
+	if i := strings.Index(query, "\n\n"); i >= 0 && len(query) > maxQueryLen {
+		// Prefer cutting at a paragraph break before falling back to hard cut.
+		if i < maxQueryLen {
+			query = query[:i]
+		}
+	}
+	query = strings.TrimSpace(query)
+	if len(query) > maxQueryLen {
+		query = query[:maxQueryLen]
+	}
+	return query
+}
+
 func dispatchWebSearch(ctx context.Context, cfg *config.Config, query string) (*kiroclaude.WebSearchResults, error) {
 	if cfg == nil || !cfg.WebSearch.Enabled {
 		return nil, fmt.Errorf("web search disabled")
+	}
+	query = sanitizeWebSearchQuery(query)
+	if query == "" {
+		return nil, fmt.Errorf("empty query after sanitize")
 	}
 
 	provider := strings.ToLower(strings.TrimSpace(cfg.WebSearch.Provider))
