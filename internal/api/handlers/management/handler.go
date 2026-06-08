@@ -16,6 +16,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/buildinfo"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/integration"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/pluginhost"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/usage"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
@@ -53,6 +54,8 @@ type Handler struct {
 	integrationMgr      *integration.Manager
 	// commercialJWTValidator validates a Sub2API JWT token and returns true if admin.
 	commercialJWTValidator func(token string) bool
+	postAuthPersistHook coreauth.PostAuthHook
+	pluginHost          *pluginhost.Host
 }
 
 // NewHandler creates a new management handler instance.
@@ -142,6 +145,16 @@ func (h *Handler) SetUsageStatistics(stats *usage.RequestStatistics) { h.usageSt
 
 // SetPoolStatisticsProvider registers an optional runtime pool metrics provider.
 func (h *Handler) SetPoolStatisticsProvider(provider func() any) { h.poolStatsProvider = provider }
+
+// SetPluginHost updates the plugin host used by plugin-backed management endpoints.
+func (h *Handler) SetPluginHost(host *pluginhost.Host) {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	h.pluginHost = host
+	h.mu.Unlock()
+}
 // SetLocalPassword configures the runtime-local password accepted for localhost requests.
 func (h *Handler) SetLocalPassword(password string) { h.localPassword = password }
 
@@ -167,6 +180,11 @@ func (h *Handler) SetPostAuthHook(hook coreauth.PostAuthHook) {
 // When set, management endpoints accept valid admin JWTs as authentication.
 func (h *Handler) SetCommercialJWTValidator(fn func(token string) bool) {
 	h.commercialJWTValidator = fn
+}
+
+// SetPostAuthPersistHook registers a hook to be called after auth persistence.
+func (h *Handler) SetPostAuthPersistHook(hook coreauth.PostAuthHook) {
+	h.postAuthPersistHook = hook
 }
 
 // Middleware enforces access control for management endpoints.
