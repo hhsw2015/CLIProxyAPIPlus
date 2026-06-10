@@ -105,6 +105,11 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 		to = sdktranslator.FromString("openai-response")
 		endpoint = "/responses/compact"
 	}
+	// Honor provider's endpoint-path override (e.g. relays that mount the
+	// OpenAI API under /v1/chat/completions instead of /chat/completions).
+	if compat := e.resolveCompatConfig(auth); compat != nil && strings.TrimSpace(compat.EndpointPath) != "" {
+		endpoint = compat.EndpointPath
+	}
 	originalPayloadSource := req.Payload
 	if len(opts.OriginalRequest) > 0 {
 		originalPayloadSource = opts.OriginalRequest
@@ -358,7 +363,16 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		translated = stripThinkingBlocksFromHistory(translated)
 	}
 
-	url := strings.TrimSuffix(baseURL, "/") + "/chat/completions"
+	streamEndpoint := "/chat/completions"
+	if responsesFormat {
+		// Stream path doesn't currently support responses/compact, but mirror
+		// non-stream's path resolution for consistency if a relay overrides it.
+		streamEndpoint = "/responses"
+	}
+	if compat := e.resolveCompatConfig(auth); compat != nil && strings.TrimSpace(compat.EndpointPath) != "" {
+		streamEndpoint = compat.EndpointPath
+	}
+	url := strings.TrimSuffix(baseURL, "/") + streamEndpoint
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(translated))
 	if err != nil {
 		return nil, err

@@ -894,6 +894,13 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	if isVertexClaudeAuth(auth) {
 		return cliproxyexecutor.Response{}, statusErr{code: http.StatusNotImplemented, msg: "count_tokens not supported on Vertex AI Anthropic endpoint"}
 	}
+	// Some third-party Anthropic-compatible relays do not implement count_tokens
+	// (e.g. qinghuaapi). Returning a hard error here marks the entire auth as
+	// unavailable, killing real /v1/messages traffic too. Treat 404 as
+	// not-implemented rather than as a credential failure.
+	if _, baseURL := claudeCreds(auth); baseURL != "" && relayLacksCountTokens(baseURL) {
+		return cliproxyexecutor.Response{}, statusErr{code: http.StatusNotImplemented, msg: "count_tokens not supported by upstream relay"}
+	}
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 
 	apiKey, baseURL := claudeCreds(auth)
@@ -1523,6 +1530,16 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 	if stream {
 		r.Header.Set("Accept-Encoding", "identity")
 	}
+}
+
+// relayLacksCountTokens reports whether the upstream Anthropic-compatible
+// relay at baseURL is known to NOT implement /v1/messages/count_tokens.
+// Hitting count_tokens on these returns 404 which would otherwise be classified
+// as an auth failure and disable the channel for legitimate /v1/messages
+// traffic too.
+func relayLacksCountTokens(baseURL string) bool {
+	const knownNoCountTokens = "qinghuaapi.com"
+	return strings.Contains(baseURL, knownNoCountTokens)
 }
 
 func claudeCreds(a *cliproxyauth.Auth) (apiKey, baseURL string) {
