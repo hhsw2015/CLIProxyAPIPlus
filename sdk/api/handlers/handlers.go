@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"reflect"
 	"strings"
 	"sync"
 	"time"
@@ -23,6 +24,7 @@ import (
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	coreusage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 	"github.com/tidwall/gjson"
 	"golang.org/x/net/context"
@@ -53,6 +55,9 @@ const idempotencyKeyMetadataKey = "idempotency_key"
 const (
 	defaultStreamingKeepAliveSeconds = 0
 	defaultStreamingBootstrapRetries = 0
+	// Stream interceptor history is intentionally bounded and not configurable in the first SDK surface.
+	maxStreamInterceptorHistoryChunks = 64
+	maxStreamInterceptorHistoryBytes  = 1 << 20
 )
 
 type pinnedAuthContextKey struct{}
@@ -62,6 +67,17 @@ type disallowFreeAuthContextKey struct{}
 
 // SelectedAuthObserver receives the auth selected by the scheduler for a request.
 type SelectedAuthObserver func(context.Context, string)
+
+// PluginInterceptorHost applies plugin interceptors around handler execution.
+type PluginInterceptorHost interface {
+	InterceptRequest(context.Context, pluginapi.RequestInterceptRequest) pluginapi.RequestInterceptResponse
+	InterceptResponse(context.Context, pluginapi.ResponseInterceptRequest) pluginapi.ResponseInterceptResponse
+	InterceptStreamChunk(context.Context, pluginapi.StreamChunkInterceptRequest) pluginapi.StreamChunkInterceptResponse
+}
+
+type streamInterceptorDetector interface {
+	HasStreamInterceptors() bool
+}
 
 // WithPinnedAuthID returns a child context that requests execution on a specific auth ID.
 func WithPinnedAuthID(ctx context.Context, authID string) context.Context {
@@ -365,6 +381,9 @@ type BaseAPIHandler struct {
 
 	// SelectedAuthObserver receives selected auth IDs for request-level side effects.
 	SelectedAuthObserver SelectedAuthObserver
+
+	// PluginHost optionally applies plugin interceptors around upstream execution.
+	PluginHost PluginInterceptorHost
 }
 
 // NewBaseAPIHandlers creates a new API handlers instance.
@@ -398,6 +417,32 @@ func (h *BaseAPIHandler) SetSelectedAuthObserver(observer SelectedAuthObserver) 
 		return
 	}
 	h.SelectedAuthObserver = observer
+}
+
+// SetPluginHost configures the optional plugin interceptor host.
+func (h *BaseAPIHandler) SetPluginHost(host PluginInterceptorHost) {
+	if h == nil {
+		return
+	}
+	if isNilPluginInterceptorHost(host) {
+		h.PluginHost = nil
+		return
+	}
+	h.PluginHost = host
+}
+
+func isNilPluginInterceptorHost(host PluginInterceptorHost) bool {
+	if host == nil {
+		return true
+	}
+	// A typed nil pointer stored in an interface is not equal to nil.
+	value := reflect.ValueOf(host)
+	switch value.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return value.IsNil()
+	default:
+		return false
+	}
 }
 
 // GetAlt extracts the 'alt' parameter from the request query string.
@@ -649,6 +694,7 @@ func (h *BaseAPIHandler) executeWithAuthManager(ctx context.Context, handlerType
 		Headers:         headersFromContext(ctx),
 	}
 	opts.Metadata = reqMeta
+	req, opts = h.applyRequestInterceptors(ctx, handlerType, modelName, req, opts)
 	resp, err := h.AuthManager.Execute(ctx, providers, req, opts)
 	if err != nil {
 		err = enrichAuthSelectionError(err, providers, normalizedModel)
@@ -666,10 +712,10 @@ func (h *BaseAPIHandler) executeWithAuthManager(ctx context.Context, handlerType
 		}
 		return nil, nil, &interfaces.ErrorMessage{StatusCode: status, Error: err, Addon: addon}
 	}
-	if !PassthroughHeadersEnabled(h.Cfg) {
-		return resp.Payload, nil, nil
-	}
-	return resp.Payload, FilterUpstreamHeaders(resp.Headers), nil
+	rawResponseHeaders := cloneHeader(resp.Headers)
+	responseHeaders := downstreamHeadersFromExecutor(rawResponseHeaders, PassthroughHeadersEnabled(h.Cfg))
+	body, responseHeaders := h.applyResponseInterceptors(ctx, handlerType, normalizedModel, modelName, opts, rawResponseHeaders, responseHeaders, opts.OriginalRequest, req.Payload, resp.Payload, http.StatusOK)
+	return body, responseHeaders, nil
 }
 
 // ExecuteCountWithAuthManager executes a non-streaming request via the core auth manager.
@@ -702,6 +748,7 @@ func (h *BaseAPIHandler) ExecuteCountWithAuthManager(ctx context.Context, handle
 		Headers:         headersFromContext(ctx),
 	}
 	opts.Metadata = reqMeta
+	req, opts = h.applyRequestInterceptors(ctx, handlerType, modelName, req, opts)
 	resp, err := h.AuthManager.ExecuteCount(ctx, providers, req, opts)
 	if err != nil {
 		err = enrichAuthSelectionError(err, providers, normalizedModel)
@@ -719,10 +766,10 @@ func (h *BaseAPIHandler) ExecuteCountWithAuthManager(ctx context.Context, handle
 		}
 		return nil, nil, &interfaces.ErrorMessage{StatusCode: status, Error: err, Addon: addon}
 	}
-	if !PassthroughHeadersEnabled(h.Cfg) {
-		return resp.Payload, nil, nil
-	}
-	return resp.Payload, FilterUpstreamHeaders(resp.Headers), nil
+	rawResponseHeaders := cloneHeader(resp.Headers)
+	responseHeaders := downstreamHeadersFromExecutor(rawResponseHeaders, PassthroughHeadersEnabled(h.Cfg))
+	body, responseHeaders := h.applyResponseInterceptors(ctx, handlerType, normalizedModel, modelName, opts, rawResponseHeaders, responseHeaders, opts.OriginalRequest, req.Payload, resp.Payload, http.StatusOK)
+	return body, responseHeaders, nil
 }
 
 // ExecuteStreamWithAuthManager executes a streaming request via the core auth manager.
@@ -768,12 +815,18 @@ func (h *BaseAPIHandler) executeStreamWithAuthManager(ctx context.Context, handl
 		Headers:         headersFromContext(ctx),
 	}
 	opts.Metadata = reqMeta
+	req, opts = h.applyRequestInterceptors(ctx, handlerType, modelName, req, opts)
 	passthroughHeadersEnabled := PassthroughHeadersEnabled(h.Cfg)
+	interceptorHost := h.interceptorHost()
+	streamInterceptorsActive := streamInterceptorsEnabled(interceptorHost)
 	// Initialize upstream headers as empty; populated once ExecuteStream returns.
 	var upstreamHeaders http.Header
-	if passthroughHeadersEnabled {
+	if passthroughHeadersEnabled || streamInterceptorsActive {
 		upstreamHeaders = make(http.Header)
 	}
+	// Mutable raw/base header maps (populated when ExecuteStream returns inside the goroutine).
+	var rawStreamHeaders http.Header
+	var baseStreamHeaders http.Header
 	dataChan := make(chan []byte)
 	errChan := make(chan *interfaces.ErrorMessage, 1)
 
@@ -783,11 +836,49 @@ func (h *BaseAPIHandler) executeStreamWithAuthManager(ctx context.Context, handl
 		err    error
 	}
 
+	streamHeaderInitialized := false
+	streamHeadersCommitted := false
+
+	applyStreamHeaders := func(headers http.Header) {
+		rawStreamHeaders = finalInterceptorHeaders(rawStreamHeaders, headers)
+		if streamHeadersCommitted {
+			return
+		}
+		nextHeaders := downstreamHeadersAfterInterceptors(baseStreamHeaders, rawStreamHeaders, passthroughHeadersEnabled)
+		replaceHeader(upstreamHeaders, nextHeaders)
+	}
+
+	applyStreamHeaderInit := func() {
+		if !streamInterceptorsActive || streamHeaderInitialized {
+			return
+		}
+		intercepted := interceptorHost.InterceptStreamChunk(ctx, pluginapi.StreamChunkInterceptRequest{
+			SourceFormat:    handlerType,
+			Model:           normalizedModel,
+			RequestedModel:  modelName,
+			RequestHeaders:  cloneHeader(opts.Headers),
+			ResponseHeaders: cloneHeader(rawStreamHeaders),
+			OriginalRequest: cloneBytes(opts.OriginalRequest),
+			RequestBody:     cloneBytes(req.Payload),
+			ChunkIndex:      pluginapi.StreamChunkHeaderInitIndex,
+			Metadata:        opts.Metadata,
+		})
+		applyStreamHeaders(intercepted.Headers)
+		streamHeaderInitialized = true
+	}
+
+	// pendingChunks/streamClosedBeforeRead are used by nextStreamChunk (upstream pattern).
+	// They are set up after ExecuteStream returns inside the goroutine.
+	pendingChunks := make([]coreexecutor.StreamChunk, 0, 1)
+	streamClosedBeforeRead := false
+
 	go func() {
 		defer close(dataChan)
 		defer close(errChan)
 		sentPayload := false
 		bootstrapRetries := 0
+		chunkIndex := 0
+		var historyChunks [][]byte
 		maxBootstrapRetries := StreamingBootstrapRetries(h.Cfg)
 		bootstrapKeepAlive := StreamingKeepAliveInterval(h.Cfg)
 
@@ -911,8 +1002,10 @@ func (h *BaseAPIHandler) executeStreamWithAuthManager(ctx context.Context, handl
 		}
 
 		// --- Phase 2: ExecuteStream succeeded; populate upstream headers and process chunks ---
-		if passthroughHeadersEnabled {
-			replaceHeader(upstreamHeaders, FilterUpstreamHeaders(streamResult.Headers))
+		rawStreamHeaders = cloneHeader(streamResult.Headers)
+		baseStreamHeaders = cloneHeader(streamResult.Headers)
+		if passthroughHeadersEnabled || streamInterceptorsActive {
+			replaceHeader(upstreamHeaders, downstreamHeadersFromExecutor(rawStreamHeaders, passthroughHeadersEnabled))
 		}
 		chunks := streamResult.Chunks
 
@@ -931,7 +1024,14 @@ func (h *BaseAPIHandler) executeStreamWithAuthManager(ctx context.Context, handl
 			for {
 				var chunk coreexecutor.StreamChunk
 				var ok bool
-				if ctx != nil && heartbeatC != nil {
+				// Drain any pending chunks read upfront for stream interceptor header init.
+				if len(pendingChunks) > 0 {
+					chunk = pendingChunks[0]
+					pendingChunks = pendingChunks[1:]
+					ok = true
+				} else if streamClosedBeforeRead {
+					ok = false
+				} else if ctx != nil && heartbeatC != nil {
 					select {
 					case <-ctx.Done():
 						return
@@ -950,6 +1050,7 @@ func (h *BaseAPIHandler) executeStreamWithAuthManager(ctx context.Context, handl
 					chunk, ok = <-chunks
 				}
 				if !ok {
+					applyStreamHeaderInit()
 					return
 				}
 				if chunk.Err != nil {
@@ -961,9 +1062,13 @@ func (h *BaseAPIHandler) executeStreamWithAuthManager(ctx context.Context, handl
 							bootstrapRetries++
 							retryResult, retryErr := h.AuthManager.ExecuteStream(ctx, providers, req, opts)
 							if retryErr == nil {
-								if passthroughHeadersEnabled {
-									replaceHeader(upstreamHeaders, FilterUpstreamHeaders(retryResult.Headers))
-								}
+								rawStreamHeaders = cloneHeader(retryResult.Headers)
+								baseStreamHeaders = cloneHeader(retryResult.Headers)
+								replaceHeader(upstreamHeaders, downstreamHeadersFromExecutor(rawStreamHeaders, passthroughHeadersEnabled))
+								streamHeaderInitialized = false
+								streamHeadersCommitted = false
+								pendingChunks = nil
+								streamClosedBeforeRead = false
 								chunks = retryResult.Chunks
 								continue outer
 							}
@@ -987,22 +1092,56 @@ func (h *BaseAPIHandler) executeStreamWithAuthManager(ctx context.Context, handl
 					return
 				}
 				if len(chunk.Payload) > 0 {
+					applyStreamHeaderInit()
+					payload := cloneBytes(chunk.Payload)
+					if streamInterceptorsActive {
+						intercepted := interceptorHost.InterceptStreamChunk(ctx, pluginapi.StreamChunkInterceptRequest{
+							SourceFormat:    handlerType,
+							Model:           normalizedModel,
+							RequestedModel:  modelName,
+							RequestHeaders:  cloneHeader(opts.Headers),
+							ResponseHeaders: cloneHeader(rawStreamHeaders),
+							OriginalRequest: cloneBytes(opts.OriginalRequest),
+							RequestBody:     cloneBytes(req.Payload),
+							Body:            payload,
+							HistoryChunks:   cloneByteSlices(historyChunks),
+							ChunkIndex:      chunkIndex,
+							Metadata:        opts.Metadata,
+						})
+						applyStreamHeaders(intercepted.Headers)
+						if len(intercepted.Body) > 0 {
+							payload = cloneBytes(intercepted.Body)
+						}
+						chunkIndex++
+						if intercepted.DropChunk {
+							continue
+						}
+					} else {
+						chunkIndex++
+					}
 					if handlerType == "openai-response" {
-						if err := validateSSEDataJSON(chunk.Payload); err != nil {
-							_ = sendErr(&interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: err})
+						if errValidate := validateSSEDataJSON(payload); errValidate != nil {
+							_ = sendErr(&interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: errValidate})
 							return
 						}
 					}
-					expanded := expander.Write(chunk.Payload)
+					// Apply expander to (possibly intercepted) payload for CCR marker expansion.
+					expanded := expander.Write(payload)
 					if len(expanded) == 0 {
 						continue
 					}
+					sentPayload = true
+					streamHeadersCommitted = true
 					if okSendData := sendData(expanded); !okSendData {
 						return
 					}
-					sentPayload = true
+					if streamInterceptorsActive {
+						historyChunks = appendStreamInterceptorHistory(historyChunks, payload)
+					}
 				}
 			}
+			applyStreamHeaderInit()
+			return
 		}
 	}()
 	return dataChan, upstreamHeaders, errChan
@@ -1136,6 +1275,67 @@ func cloneHeader(src http.Header) http.Header {
 	return dst
 }
 
+func cloneByteSlices(src [][]byte) [][]byte {
+	if len(src) == 0 {
+		return nil
+	}
+	dst := make([][]byte, 0, len(src))
+	for _, item := range src {
+		dst = append(dst, cloneBytes(item))
+	}
+	return dst
+}
+
+func nextStreamChunk(ctx context.Context, pending *[]coreexecutor.StreamChunk, closed *bool, chunks <-chan coreexecutor.StreamChunk) (coreexecutor.StreamChunk, bool, bool) {
+	if pending != nil && len(*pending) > 0 {
+		chunk := (*pending)[0]
+		(*pending)[0] = coreexecutor.StreamChunk{}
+		*pending = (*pending)[1:]
+		return chunk, true, false
+	}
+	if closed != nil && *closed {
+		return coreexecutor.StreamChunk{}, false, false
+	}
+	var chunk coreexecutor.StreamChunk
+	var ok bool
+	if ctx != nil {
+		select {
+		case <-ctx.Done():
+			return coreexecutor.StreamChunk{}, false, true
+		case chunk, ok = <-chunks:
+		}
+	} else {
+		chunk, ok = <-chunks
+	}
+	if !ok && closed != nil {
+		*closed = true
+	}
+	return chunk, ok, false
+}
+
+func appendStreamInterceptorHistory(history [][]byte, chunk []byte) [][]byte {
+	if len(chunk) == 0 {
+		return history
+	}
+	history = append(history, cloneBytes(chunk))
+	for len(history) > maxStreamInterceptorHistoryChunks || byteSlicesSize(history) > maxStreamInterceptorHistoryBytes {
+		history[0] = nil
+		history = history[1:]
+	}
+	if len(history) == 0 {
+		return nil
+	}
+	return history
+}
+
+func byteSlicesSize(items [][]byte) int {
+	total := 0
+	for _, item := range items {
+		total += len(item)
+	}
+	return total
+}
+
 func replaceHeader(dst http.Header, src http.Header) {
 	for key := range dst {
 		delete(dst, key)
@@ -1143,6 +1343,128 @@ func replaceHeader(dst http.Header, src http.Header) {
 	for key, values := range src {
 		dst[key] = append([]string(nil), values...)
 	}
+}
+
+func finalInterceptorHeaders(current, intercepted http.Header) http.Header {
+	if intercepted == nil {
+		return current
+	}
+	if len(intercepted) == 0 {
+		return nil
+	}
+	return cloneHeader(intercepted)
+}
+
+func downstreamHeadersFromExecutor(headers http.Header, passthrough bool) http.Header {
+	if !passthrough {
+		return nil
+	}
+	return FilterUpstreamHeaders(headers)
+}
+
+func downstreamHeadersAfterInterceptors(baseRaw, finalRaw http.Header, passthrough bool) http.Header {
+	if passthrough {
+		return FilterUpstreamHeaders(finalRaw)
+	}
+	return FilterUpstreamHeaders(diffHeaders(baseRaw, finalRaw))
+}
+
+func diffHeaders(base, next http.Header) http.Header {
+	if len(next) == 0 {
+		return nil
+	}
+	baseValues := make(map[string][]string, len(base))
+	for key, values := range base {
+		baseValues[http.CanonicalHeaderKey(key)] = values
+	}
+	out := make(http.Header)
+	for key, values := range next {
+		canonicalKey := http.CanonicalHeaderKey(key)
+		if stringSlicesEqual(baseValues[canonicalKey], values) {
+			continue
+		}
+		out[canonicalKey] = append([]string(nil), values...)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func stringSlicesEqual(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for i := range left {
+		if left[i] != right[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func (h *BaseAPIHandler) interceptorHost() PluginInterceptorHost {
+	if h == nil {
+		return nil
+	}
+	return h.PluginHost
+}
+
+func streamInterceptorsEnabled(host PluginInterceptorHost) bool {
+	if host == nil {
+		return false
+	}
+	if detector, ok := host.(streamInterceptorDetector); ok {
+		return detector.HasStreamInterceptors()
+	}
+	return true
+}
+
+func (h *BaseAPIHandler) applyRequestInterceptors(ctx context.Context, handlerType, requestedModel string, req coreexecutor.Request, opts coreexecutor.Options) (coreexecutor.Request, coreexecutor.Options) {
+	host := h.interceptorHost()
+	if host == nil {
+		return req, opts
+	}
+	resp := host.InterceptRequest(ctx, pluginapi.RequestInterceptRequest{
+		SourceFormat:   handlerType,
+		Model:          req.Model,
+		RequestedModel: requestedModel,
+		Stream:         opts.Stream,
+		Headers:        cloneHeader(opts.Headers),
+		Body:           cloneBytes(req.Payload),
+		Metadata:       opts.Metadata,
+	})
+	opts.Headers = finalInterceptorHeaders(opts.Headers, resp.Headers)
+	if len(resp.Body) > 0 {
+		req.Payload = cloneBytes(resp.Body)
+		opts.OriginalRequest = cloneBytes(resp.Body)
+	}
+	return req, opts
+}
+
+func (h *BaseAPIHandler) applyResponseInterceptors(ctx context.Context, handlerType, normalizedModel, requestedModel string, opts coreexecutor.Options, rawResponseHeaders, responseHeaders http.Header, originalRequest, requestBody, body []byte, statusCode int) ([]byte, http.Header) {
+	host := h.interceptorHost()
+	if host == nil {
+		return body, responseHeaders
+	}
+	resp := host.InterceptResponse(ctx, pluginapi.ResponseInterceptRequest{
+		SourceFormat:    handlerType,
+		Model:           normalizedModel,
+		RequestedModel:  requestedModel,
+		Stream:          false,
+		RequestHeaders:  cloneHeader(opts.Headers),
+		ResponseHeaders: cloneHeader(rawResponseHeaders),
+		OriginalRequest: cloneBytes(originalRequest),
+		RequestBody:     cloneBytes(requestBody),
+		Body:            cloneBytes(body),
+		StatusCode:      statusCode,
+		Metadata:        opts.Metadata,
+	})
+	responseHeaders = downstreamHeadersAfterInterceptors(rawResponseHeaders, finalInterceptorHeaders(rawResponseHeaders, resp.Headers), PassthroughHeadersEnabled(h.Cfg))
+	if len(resp.Body) > 0 {
+		body = cloneBytes(resp.Body)
+	}
+	return body, responseHeaders
 }
 
 func enrichAuthSelectionError(err error, providers []string, model string) error {
