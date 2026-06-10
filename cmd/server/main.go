@@ -566,7 +566,19 @@ func main() {
 	// Web search interception (gateway-level search for Bedrock)
 	executor.InitWebSearchPool(&cfg.WebSearch)
 	if cfg.WebSearch.Enabled {
-		log.Infof("[web-search] enabled, provider=%s, keys=%d", cfg.WebSearch.Provider, len(cfg.WebSearch.APIKeys))
+		// Resolve key count from the new providers catalog first; fall back
+		// to legacy top-level api-keys when only the old shape is configured.
+		primary := cfg.WebSearch.Provider
+		if primary == "" {
+			primary = "tinyfish"
+		}
+		keys := len(cfg.WebSearch.APIKeys)
+		if cfg.WebSearch.Providers != nil {
+			if p, ok := cfg.WebSearch.Providers[primary]; ok && len(p.APIKeys) > 0 {
+				keys = len(p.APIKeys)
+			}
+		}
+		log.Infof("[web-search] enabled, provider=%s, keys=%d, fallbacks=%v", primary, keys, cfg.WebSearch.Fallbacks)
 	}
 
 	// Headroom FFI compression (default disabled)
