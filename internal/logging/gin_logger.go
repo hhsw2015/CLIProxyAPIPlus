@@ -32,8 +32,8 @@ var aiAPIPrefixes = []string{
 	"/v1/audio/",
 	"/v1/embeddings",
 	"/v1/video/",
-	"/v1/videos",
 	"/v1/tasks/",
+	"/backend-api/codex/",
 }
 
 const (
