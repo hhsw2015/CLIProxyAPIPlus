@@ -20,10 +20,38 @@ package config
 // model string (no "model" field in body) is treated as "unknown" for
 // matching, so deny: ["unknown"] suppresses unrecognised payloads.
 // WebSearchConfig controls gateway-level web search interception.
+//
+// Two configuration shapes are supported (one OR the other, or both):
+//
+//  1. Legacy (single provider):
+//     provider: tinyfish
+//     api-keys: [sk-...]
+//
+//  2. Provider catalog + selectable primary (preferred):
+//     provider: tinyfish        # primary, just rename to switch
+//     fallbacks: [anysearch]    # optional ordered fallback names
+//     providers:
+//     tinyfish:  { api-keys: [...] }
+//     anysearch: { api-keys: [...] }
+//
+// When `providers` is set, top-level `api-keys` is treated as the keys for
+// the primary provider only if that provider has no entry in the map.
 type WebSearchConfig struct {
 	Enabled  bool     `yaml:"enabled" json:"enabled"`
-	Provider string   `yaml:"provider,omitempty" json:"provider,omitempty"` // tinyfish | bing-rss (default: tinyfish)
-	APIKeys  []string `yaml:"api-keys" json:"api-keys"`
+	Provider string   `yaml:"provider,omitempty" json:"provider,omitempty"`
+	APIKeys  []string `yaml:"api-keys,omitempty" json:"api-keys,omitempty"`
+	// Fallbacks is an ordered list of provider names from `Providers` to try
+	// after the primary fails. Names not present in the map are skipped.
+	Fallbacks []string `yaml:"fallbacks,omitempty" json:"fallbacks,omitempty"`
+	// Providers is the catalog of all configured search backends keyed by
+	// provider id (tinyfish, anysearch, bing-rss, ...). Each entry holds
+	// that backend's credentials.
+	Providers map[string]WebSearchProvider `yaml:"providers,omitempty" json:"providers,omitempty"`
+}
+
+// WebSearchProvider holds a backend's credentials.
+type WebSearchProvider struct {
+	APIKeys []string `yaml:"api-keys,omitempty" json:"api-keys,omitempty"`
 }
 
 // ThrottleConfig controls concurrent request limiting with backpressure.
