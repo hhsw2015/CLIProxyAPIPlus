@@ -108,12 +108,33 @@ type HeadroomConfig struct {
 // ProxyPoolConfig controls the embedded ECH worker proxy pool.
 // When enabled, CPA manages ECH worker processes directly and routes requests
 // through persistent per-worker connections, eliminating the external warp-pool hop.
+//
+// In addition to ECH workers, in-process Cloudflare WARP MASQUE tunnels can be
+// added via WARPInstances. Each tunnel exits at a unique Cloudflare WARP IP and
+// participates in the same weighted round-robin pool as ECH workers.
 type ProxyPoolConfig struct {
-	Enabled       bool              `yaml:"enabled" json:"enabled"`
-	Workers       []ECHWorkerConfig `yaml:"workers" json:"workers"`
-	IncludeDirect bool              `yaml:"include-direct,omitempty" json:"include-direct,omitempty"`
-	WeightECH     int               `yaml:"weight-ech,omitempty" json:"weight-ech,omitempty"`
-	WeightDirect  int               `yaml:"weight-direct,omitempty" json:"weight-direct,omitempty"`
+	Enabled        bool              `yaml:"enabled" json:"enabled"`
+	Workers        []ECHWorkerConfig `yaml:"workers" json:"workers"`
+	WARPInstances  []WARPInstance    `yaml:"warp-instances,omitempty" json:"warp-instances,omitempty"`
+	IncludeDirect  bool              `yaml:"include-direct,omitempty" json:"include-direct,omitempty"`
+	WeightECH      int               `yaml:"weight-ech,omitempty" json:"weight-ech,omitempty"`
+	WeightWARP     int               `yaml:"weight-warp,omitempty" json:"weight-warp,omitempty"`
+	WeightDirect   int               `yaml:"weight-direct,omitempty" json:"weight-direct,omitempty"`
+}
+
+// WARPInstance holds the credentials produced by `usque register` for one
+// Cloudflare WARP account. Only the four required fields must be set; ipv6 /
+// access-token / id / license are kept for future-proofing (token refresh,
+// IPv6 mode) but are not required for outbound HTTP/3 SOCKS-equivalent use.
+type WARPInstance struct {
+	Name           string `yaml:"name" json:"name"`
+	PrivateKey     string `yaml:"private-key" json:"private-key"`         // base64-DER ECDSA
+	EndpointPubKey string `yaml:"endpoint-pub-key" json:"endpoint-pub-key"` // PEM
+	EndpointV4     string `yaml:"endpoint-v4" json:"endpoint-v4"`         // 162.159.x
+	IPv4           string `yaml:"ipv4" json:"ipv4"`                       // 172.16.x assigned to us
+	IPv6           string `yaml:"ipv6,omitempty" json:"ipv6,omitempty"`
+	AccessToken    string `yaml:"access-token,omitempty" json:"access-token,omitempty"`
+	ID             string `yaml:"id,omitempty" json:"id,omitempty"`
 }
 
 // ECHWorkerConfig defines a single ECH worker instance.

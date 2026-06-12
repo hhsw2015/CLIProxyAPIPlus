@@ -24,18 +24,24 @@ type Pool struct {
 
 type entry struct {
 	name      string
-	dialer    *ECHDialer // nil for direct entry
+	dialer    *ECHDialer  // ECH WebSocket dialer; nil if entry is WARP or direct
+	warp      *WARPDialer // WARP MASQUE dialer; nil if entry is ECH or direct
 	transport *http.Transport
 	healthy   atomic.Bool
 }
 
-// NewPool creates a connection pool with in-process ECH dialers.
-func NewPool(dialers []*ECHDialer, cfg config.ProxyPoolConfig) *Pool {
+// NewPool creates a connection pool with in-process ECH and/or WARP dialers.
+// All entry types share the same weighted round-robin selector.
+func NewPool(dialers []*ECHDialer, warpDialers []*WARPDialer, cfg config.ProxyPoolConfig) *Pool {
 	p := &Pool{}
 
 	weightECH := cfg.WeightECH
 	if weightECH <= 0 {
 		weightECH = 3
+	}
+	weightWARP := cfg.WeightWARP
+	if weightWARP <= 0 {
+		weightWARP = 2
 	}
 	weightDirect := cfg.WeightDirect
 	if weightDirect <= 0 {
@@ -64,6 +70,30 @@ func NewPool(dialers []*ECHDialer, cfg config.ProxyPoolConfig) *Pool {
 		p.entries = append(p.entries, e)
 		p.weights = append(p.weights, weightECH)
 		p.total += weightECH
+	}
+
+	for _, w := range warpDialers {
+		t := &http.Transport{
+			DialContext: func(dialer *WARPDialer) func(ctx context.Context, network, addr string) (net.Conn, error) {
+				return func(ctx context.Context, network, addr string) (net.Conn, error) {
+					return dialer.DialContext(ctx, network, addr)
+				}
+			}(w),
+			MaxIdleConns:        10,
+			MaxIdleConnsPerHost: 5,
+			IdleConnTimeout:     90 * time.Second,
+			TLSHandshakeTimeout: 10 * time.Second,
+			TLSClientConfig:    &tls.Config{},
+		}
+		e := &entry{
+			name:      w.name,
+			warp:      w,
+			transport: t,
+		}
+		e.healthy.Store(true)
+		p.entries = append(p.entries, e)
+		p.weights = append(p.weights, weightWARP)
+		p.total += weightWARP
 	}
 
 	if cfg.IncludeDirect {
