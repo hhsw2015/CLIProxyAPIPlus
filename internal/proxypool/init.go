@@ -16,9 +16,13 @@ var (
 	initialized bool
 )
 
-// Init creates in-process ECH dialers and the connection pool.
+// Init creates in-process ECH and WARP dialers and the connection pool.
+// At least one ECH worker OR one WARP instance must be configured.
 func Init(ctx context.Context, cfg config.ProxyPoolConfig) error {
-	if !cfg.Enabled || len(cfg.Workers) == 0 {
+	if !cfg.Enabled {
+		return nil
+	}
+	if len(cfg.Workers) == 0 && len(cfg.WARPInstances) == 0 {
 		return nil
 	}
 
@@ -33,12 +37,23 @@ func Init(ctx context.Context, cfg config.ProxyPoolConfig) error {
 		log.Infof("[proxypool] initialized %s (domain=%s)", w.Name, w.Domain)
 	}
 
-	if len(dialers) == 0 {
-		log.Warn("[proxypool] no ECH dialers initialized")
+	var warpDialers []*WARPDialer
+	for _, inst := range cfg.WARPInstances {
+		d, err := NewWARPDialer(ctx, inst)
+		if err != nil {
+			log.Warnf("[proxypool] failed to init warp %s: %v", inst.Name, err)
+			continue
+		}
+		warpDialers = append(warpDialers, d)
+		log.Infof("[proxypool] initialized warp %s (endpoint=%s)", inst.Name, inst.EndpointV4)
+	}
+
+	if len(dialers) == 0 && len(warpDialers) == 0 {
+		log.Warn("[proxypool] no dialers initialized")
 		return nil
 	}
 
-	pool := NewPool(dialers, cfg)
+	pool := NewPool(dialers, warpDialers, cfg)
 	pool.StartHealthCheck(ctx)
 
 	mu.Lock()
@@ -46,7 +61,7 @@ func Init(ctx context.Context, cfg config.ProxyPoolConfig) error {
 	initialized = true
 	mu.Unlock()
 
-	log.Infof("[proxypool] ready with %d in-process ECH dialers (zero IPC)", len(dialers))
+	log.Infof("[proxypool] ready with %d ECH + %d WARP dialers (zero IPC)", len(dialers), len(warpDialers))
 	return nil
 }
 
