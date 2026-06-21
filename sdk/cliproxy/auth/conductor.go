@@ -20,7 +20,6 @@ import (
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/home"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/headroom"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
@@ -86,22 +85,75 @@ const (
 	refreshIneffectiveBackoff = 30 * time.Second
 	quotaBackoffBase          = time.Second
 	quotaBackoffMax           = 30 * time.Minute
+	transientErrorCooldown    = time.Minute
 )
 
 var quotaCooldownDisabled atomic.Bool
+var transientErrorCooldownSeconds atomic.Int64
 
 // SetQuotaCooldownDisabled toggles quota cooldown scheduling globally.
 func SetQuotaCooldownDisabled(disable bool) {
 	quotaCooldownDisabled.Store(disable)
 }
 
+// SetTransientErrorCooldownSeconds configures cooldowns for 408/500/502/503/504.
+// 0 keeps the legacy default; negative values disable transient error cooldowns.
+func SetTransientErrorCooldownSeconds(seconds int) {
+	transientErrorCooldownSeconds.Store(int64(seconds))
+}
+
 func quotaCooldownDisabledForAuth(auth *Auth) bool {
+	return quotaCooldownDisabledForAuthWithConfig(auth, nil)
+}
+
+func quotaCooldownDisabledForAuthWithConfig(auth *Auth, cfg *internalconfig.Config) bool {
 	if auth != nil {
 		if override, ok := auth.DisableCoolingOverride(); ok {
 			return override
 		}
+		if providerCoolingDisabledForAuth(auth, cfg) {
+			return true
+		}
+	}
+	if cfg != nil && cfg.DisableCooling {
+		return true
 	}
 	return quotaCooldownDisabled.Load()
+}
+
+func providerCoolingDisabledForAuth(auth *Auth, cfg *internalconfig.Config) bool {
+	if auth == nil || cfg == nil {
+		return false
+	}
+	provider := strings.ToLower(strings.TrimSpace(auth.Provider))
+	if provider == "" {
+		return false
+	}
+	providerKey := ""
+	compatName := ""
+	if auth.Attributes != nil {
+		providerKey = strings.TrimSpace(auth.Attributes["provider_key"])
+		compatName = strings.TrimSpace(auth.Attributes["compat_name"])
+	}
+	if providerKey == "" && compatName == "" && provider != "openai-compatibility" {
+		return false
+	}
+	if providerKey == "" {
+		providerKey = provider
+	}
+	entry := resolveOpenAICompatConfig(cfg, providerKey, compatName, provider)
+	return entry != nil && entry.DisableCooling
+}
+
+func nextTransientErrorRetryAfter(now time.Time) time.Time {
+	seconds := transientErrorCooldownSeconds.Load()
+	if seconds < 0 {
+		return time.Time{}
+	}
+	if seconds == 0 {
+		return now.Add(transientErrorCooldown)
+	}
+	return now.Add(time.Duration(seconds) * time.Second)
 }
 
 // Result captures execution outcome used to adjust auth state.
@@ -118,8 +170,6 @@ type Result struct {
 	RetryAfter *time.Duration
 	// Error describes the failure when Success is false.
 	Error *Error
-	// Latency is the observed request duration for latency-aware scheduling.
-	Latency time.Duration
 }
 
 // Selector chooses an auth candidate for execution.
@@ -166,13 +216,14 @@ func (NoopHook) OnResult(context.Context, Result) {}
 
 // Manager orchestrates auth lifecycle, selection, execution, and persistence.
 type Manager struct {
-	store     Store
-	executors map[string]ProviderExecutor
-	selector  Selector
-	hook      Hook
-	mu        sync.RWMutex
-	auths     map[string]*Auth
-	scheduler *authScheduler
+	store         Store
+	cooldownStore CooldownStateStore
+	executors     map[string]ProviderExecutor
+	selector      Selector
+	hook          Hook
+	mu            sync.RWMutex
+	auths         map[string]*Auth
+	scheduler     *authScheduler
 	// pluginScheduler runs outside m.mu before falling back to native selection.
 	pluginScheduler PluginScheduler
 	// homeRuntimeAuths caches auths returned by Home so websocket sessions can
@@ -423,18 +474,21 @@ func (m *Manager) SetSelector(selector Selector) {
 	}
 }
 
-// SetLatencyAware enables or disables latency-weighted credential selection.
-func (m *Manager) SetLatencyAware(enabled bool) {
-	if m != nil && m.scheduler != nil {
-		m.scheduler.SetLatencyAware(enabled)
-	}
-}
-
 // SetStore swaps the underlying persistence store.
 func (m *Manager) SetStore(store Store) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.store = store
+}
+
+// SetCooldownStateStore swaps the independent runtime cooldown state store.
+func (m *Manager) SetCooldownStateStore(store CooldownStateStore) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.cooldownStore = store
 }
 
 // SetRoundTripperProvider register a provider that returns a per-auth RoundTripper.
@@ -1146,47 +1200,7 @@ func (m *Manager) filterExecutionModels(auth *Auth, routeModel string, candidate
 func (m *Manager) preparedExecutionModels(auth *Auth, routeModel string) ([]string, bool) {
 	candidates := m.executionModelCandidates(auth, routeModel)
 	pooled := len(candidates) > 1
-	filtered := m.filterExecutionModels(auth, routeModel, candidates, pooled)
-	// Apply config-level excluded-models so the legacy pick path doesn't send
-	// requests to providers that explicitly exclude the requested model.
-	filtered = m.filterExcludedModels(auth, filtered)
-	return filtered, pooled
-}
-
-// filterExcludedModels removes models that appear in the auth's config-level excluded-models list.
-func (m *Manager) filterExcludedModels(auth *Auth, models []string) []string {
-	if len(models) == 0 || auth == nil {
-		return models
-	}
-	cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
-	if cfg == nil {
-		return models
-	}
-	var excluded []string
-	switch strings.ToLower(strings.TrimSpace(auth.Provider)) {
-	case "claude":
-		if entry := resolveClaudeAPIKeyConfig(cfg, auth); entry != nil {
-			excluded = entry.ExcludedModels
-		}
-	case "gemini":
-		if entry := resolveGeminiAPIKeyConfig(cfg, auth); entry != nil {
-			excluded = entry.ExcludedModels
-		}
-	}
-	if len(excluded) == 0 {
-		return models
-	}
-	excludeSet := make(map[string]struct{}, len(excluded))
-	for _, e := range excluded {
-		excludeSet[strings.ToLower(strings.TrimSpace(e))] = struct{}{}
-	}
-	out := make([]string, 0, len(models))
-	for _, mdl := range models {
-		if _, skip := excludeSet[strings.ToLower(strings.TrimSpace(mdl))]; !skip {
-			out = append(out, mdl)
-		}
-	}
-	return out
+	return m.filterExecutionModels(auth, routeModel, candidates, pooled), pooled
 }
 
 func (m *Manager) prepareExecutionModels(auth *Auth, routeModel string) []string {
@@ -1578,7 +1592,6 @@ func readStreamBootstrap(ctx context.Context, ch <-chan cliproxyexecutor.StreamC
 	}
 }
 
-
 func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, resultModel string, headers http.Header, buffered []cliproxyexecutor.StreamChunk, remaining <-chan cliproxyexecutor.StreamChunk) *cliproxyexecutor.StreamResult {
 	out := make(chan cliproxyexecutor.StreamChunk)
 	go func() {
@@ -1638,33 +1651,23 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 		resultModel := m.stateModelForExecution(auth, routeModel, execModel, pooled)
 		execReq := req
 		execReq.Model = execModel
-		execStart := time.Now()
-		if auth != nil {
-			accountType, _ := auth.AccountInfo()
-			ctx = headroom.WithAuthMode(ctx, headroom.AuthModeFromAccountType(accountType))
-		}
 		execOpts := opts
 		execReq, execOpts = applyRequestAfterAuthInterceptor(ctx, executor, provider, execReq, execOpts, requestedModelAliasFromOptions(execOpts, routeModel))
 		streamResult, errStream := executor.ExecuteStream(ctx, auth, execReq, execOpts)
 		if errStream != nil {
-			execLatency := time.Since(execStart)
 			if errCtx := ctx.Err(); errCtx != nil {
-				// Record the failure so affinity tracking can switch regions.
-				result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false,
-					Error: &Error{Message: errCtx.Error(), HTTPStatus: 504}, Latency: execLatency}
-				m.MarkResult(ctx, result)
 				return nil, errCtx
 			}
 			rerr := &Error{Message: errStream.Error()}
 			if se, ok := errors.AsType[cliproxyexecutor.StatusError](errStream); ok && se != nil {
 				rerr.HTTPStatus = se.StatusCode()
 			}
-			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: rerr, Latency: execLatency}
+			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: rerr}
 			result.RetryAfter = retryAfterFromError(errStream)
+			m.MarkResult(ctx, result)
 			if isRequestInvalidError(errStream) {
 				return nil, errStream
 			}
-			m.MarkResult(ctx, result)
 			lastErr = errStream
 			continue
 		}
@@ -1725,10 +1728,6 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			closedCh := make(chan cliproxyexecutor.StreamChunk)
 			close(closedCh)
 			remaining = closedCh
-		}
-		// Record TTFB (connection + first bytes) as latency for scheduling.
-		if m.scheduler != nil && execStart != (time.Time{}) {
-			m.scheduler.recordLatency(auth.ID, time.Since(execStart))
 		}
 		return m.wrapStreamResult(ctx, auth.Clone(), provider, resultModel, streamResult.Headers, buffered, remaining), nil
 	}
@@ -1922,6 +1921,11 @@ func (m *Manager) Register(ctx context.Context, auth *Auth) (*Auth, error) {
 	if auth.ID == "" {
 		auth.ID = uuid.NewString()
 	}
+	now := time.Now()
+	clearedCooldown := false
+	if m.cooldownDisabledForAuth(auth) || auth.Disabled || auth.Status == StatusDisabled {
+		clearedCooldown = clearCooldownStateForAuth(auth, now)
+	}
 	auth.EnsureIndex()
 	authClone := auth.Clone()
 	m.mu.Lock()
@@ -1934,6 +1938,9 @@ func (m *Manager) Register(ctx context.Context, auth *Auth) (*Auth, error) {
 	m.queueRefreshReschedule(auth.ID)
 	_ = m.persist(ctx, auth)
 	m.hook.OnAuthRegistered(ctx, auth.Clone())
+	if clearedCooldown {
+		m.persistCooldownStates(ctx)
+	}
 	return auth.Clone(), nil
 }
 
@@ -1960,6 +1967,11 @@ func (m *Manager) Update(ctx context.Context, auth *Auth) (*Auth, error) {
 			auth.ModelStates = existing.ModelStates
 		}
 	}
+	now := time.Now()
+	clearedCooldown := false
+	if m.cooldownDisabledForAuth(auth) || auth.Disabled || auth.Status == StatusDisabled {
+		clearedCooldown = clearCooldownStateForAuth(auth, now)
+	}
 	auth.EnsureIndex()
 	authClone := auth.Clone()
 	m.auths[auth.ID] = authClone
@@ -1971,6 +1983,9 @@ func (m *Manager) Update(ctx context.Context, auth *Auth) (*Auth, error) {
 	m.queueRefreshReschedule(auth.ID)
 	_ = m.persist(ctx, auth)
 	m.hook.OnAuthUpdated(ctx, auth.Clone())
+	if clearedCooldown {
+		m.persistCooldownStates(ctx)
+	}
 	return auth.Clone(), nil
 }
 
@@ -2022,6 +2037,7 @@ func (m *Manager) Remove(ctx context.Context, id string) {
 			}
 		}
 	}
+	m.persistCooldownStates(ctx)
 }
 
 func (m *Manager) invalidateSessionAffinity(authID string) {
@@ -2224,8 +2240,6 @@ func requestToFormat(provider string, executor ProviderExecutor, req cliproxyexe
 		return sdktranslator.FormatClaude
 	case "gemini", "vertex", "aistudio":
 		return sdktranslator.FormatGemini
-	case "gemini-cli":
-		return sdktranslator.FormatGeminiCLI
 	case "kimi":
 		return sdktranslator.FormatOpenAI
 	case "antigravity":
@@ -2307,19 +2321,9 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			execCtx = context.WithValue(execCtx, "cliproxy.roundtripper", rt)
 		}
 		execCtx = contextWithRequestedModelAlias(execCtx, opts, routeModel)
-		// Propagate the session ID extracted from the request body / headers
-		// down to executors. Bedrock executor's thinking-strip cache keys on
-		// it; without this, the session always falls back to per-request id
-		// and the proactive strip can never amortize across calls.
-		if sid, _ := extractSessionIDs(opts.Headers, opts.OriginalRequest, opts.Metadata); sid != "" {
-			execCtx = WithExecutorSessionID(execCtx, sid)
-		}
 
 		models, pooled := m.preparedExecutionModels(auth, routeModel)
 		if len(models) == 0 {
-			candidates := m.executionModelCandidates(auth, routeModel)
-			entry.Warnf("[exec-skip] auth=%s provider=%s route_model=%s candidates=%v -> filtered to 0 (excluded? blocked?)",
-				auth.ID, provider, routeModel, candidates)
 			continue
 		}
 		attempted[auth.ID] = struct{}{}
@@ -2339,21 +2343,12 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			resultModel := m.stateModelForExecution(auth, routeModel, upstreamModel, pooled)
 			execReq := req
 			execReq.Model = upstreamModel
-			execStart := time.Now()
-			if auth != nil {
-				accountType, _ := auth.AccountInfo()
-				execCtx = headroom.WithAuthMode(execCtx, headroom.AuthModeFromAccountType(accountType))
-			}
 			execOpts := opts
 			execReq, execOpts = applyRequestAfterAuthInterceptor(execCtx, executor, provider, execReq, execOpts, requestedModelAliasFromOptions(execOpts, routeModel))
 			resp, errExec := executor.Execute(execCtx, auth, execReq, execOpts)
-			execLatency := time.Since(execStart)
-			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: errExec == nil, Latency: execLatency}
+			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: errExec == nil}
 			if errExec != nil {
 				if errCtx := execCtx.Err(); errCtx != nil {
-					// Record the failure so affinity tracking can switch regions.
-					result.Error = &Error{Message: errCtx.Error(), HTTPStatus: 504}
-					m.MarkResult(execCtx, result)
 					return cliproxyexecutor.Response{}, errCtx
 				}
 				result.Error = &Error{Message: errExec.Error()}
@@ -2363,10 +2358,10 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 				if ra := retryAfterFromError(errExec); ra != nil {
 					result.RetryAfter = ra
 				}
+				m.MarkResult(execCtx, result)
 				if isRequestInvalidError(errExec) {
 					return cliproxyexecutor.Response{}, errExec
 				}
-				m.MarkResult(execCtx, result)
 				authErr = errExec
 				continue
 			}
@@ -2427,19 +2422,9 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 			execCtx = context.WithValue(execCtx, "cliproxy.roundtripper", rt)
 		}
 		execCtx = contextWithRequestedModelAlias(execCtx, opts, routeModel)
-		// Propagate the session ID extracted from the request body / headers
-		// down to executors. Bedrock executor's thinking-strip cache keys on
-		// it; without this, the session always falls back to per-request id
-		// and the proactive strip can never amortize across calls.
-		if sid, _ := extractSessionIDs(opts.Headers, opts.OriginalRequest, opts.Metadata); sid != "" {
-			execCtx = WithExecutorSessionID(execCtx, sid)
-		}
 
 		models, pooled := m.preparedExecutionModels(auth, routeModel)
 		if len(models) == 0 {
-			candidates := m.executionModelCandidates(auth, routeModel)
-			entry.Warnf("[exec-skip] auth=%s provider=%s route_model=%s candidates=%v -> filtered to 0 (excluded? blocked?)",
-				auth.ID, provider, routeModel, candidates)
 			continue
 		}
 		attempted[auth.ID] = struct{}{}
@@ -2465,8 +2450,6 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: errExec == nil}
 			if errExec != nil {
 				if errCtx := execCtx.Err(); errCtx != nil {
-					result.Error = &Error{Message: errCtx.Error(), HTTPStatus: 504}
-					m.MarkResult(execCtx, result)
 					return cliproxyexecutor.Response{}, errCtx
 				}
 				result.Error = &Error{Message: errExec.Error()}
@@ -2476,10 +2459,10 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 				if ra := retryAfterFromError(errExec); ra != nil {
 					result.RetryAfter = ra
 				}
+				m.MarkResult(execCtx, result)
 				if isRequestInvalidError(errExec) {
 					return cliproxyexecutor.Response{}, errExec
 				}
-				m.MarkResult(execCtx, result)
 				authErr = errExec
 				continue
 			}
@@ -2539,15 +2522,8 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			execCtx = context.WithValue(execCtx, roundTripperContextKey{}, rt)
 			execCtx = context.WithValue(execCtx, "cliproxy.roundtripper", rt)
 		}
-		// Propagate session id (same rationale as the non-stream branch).
-		if sid, _ := extractSessionIDs(opts.Headers, opts.OriginalRequest, opts.Metadata); sid != "" {
-			execCtx = WithExecutorSessionID(execCtx, sid)
-		}
 		models, pooled := m.preparedExecutionModels(auth, routeModel)
 		if len(models) == 0 {
-			candidates := m.executionModelCandidates(auth, routeModel)
-			entry.Warnf("[exec-skip] auth=%s provider=%s route_model=%s candidates=%v -> filtered to 0 (excluded? blocked?)",
-				auth.ID, provider, routeModel, candidates)
 			continue
 		}
 		attempted[auth.ID] = struct{}{}
@@ -2566,10 +2542,6 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 		streamResult, errStream := m.executeStreamWithModelPool(execCtx, executor, auth, provider, execReq, opts, routeModel, models, pooled)
 		if errStream != nil {
 			if errCtx := execCtx.Err(); errCtx != nil {
-				resultModel := m.stateModelForExecution(auth, routeModel, "", pooled)
-				result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false,
-					Error: &Error{Message: errCtx.Error(), HTTPStatus: 504}}
-				m.MarkResult(execCtx, result)
 				return nil, errCtx
 			}
 			if isRequestInvalidError(errStream) {
@@ -2940,30 +2912,9 @@ func resolveAPIKeyConfig[T APIKeyConfigEntry](entries []T, auth *Auth) *T {
 		return nil
 	}
 	attrKey, attrBase := "", ""
-	attrRegion := ""
 	if auth.Attributes != nil {
 		attrKey = strings.TrimSpace(auth.Attributes["api_key"])
 		attrBase = strings.TrimSpace(auth.Attributes["base_url"])
-		attrRegion = strings.TrimSpace(auth.Attributes["aws_region"])
-	}
-	// Region-aware match first: when the auth carries an AWS region (Bedrock
-	// path) we must pick the entry that matches both AK *and* region, otherwise
-	// we'll fall through to a different region's ExcludedModels and reject a
-	// model that this region actually serves. The previous logic stopped at the
-	// first AK match, which silently routed e.g. us-west-2 requests to the
-	// ap-northeast-1 entry (with claude-opus-4-7 excluded).
-	if attrRegion != "" && attrKey != "" {
-		for i := range entries {
-			entry := &entries[i]
-			if !strings.EqualFold(strings.TrimSpace((*entry).GetAPIKey()), attrKey) {
-				continue
-			}
-			if regionalEntry, ok := any(*entry).(interface{ GetAWSRegion() string }); ok {
-				if strings.EqualFold(strings.TrimSpace(regionalEntry.GetAWSRegion()), attrRegion) {
-					return entry
-				}
-			}
-		}
 	}
 	for i := range entries {
 		entry := &entries[i]
@@ -3364,10 +3315,16 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	clearModelQuota := false
 	setModelQuota := false
 	var authSnapshot *Auth
+	cooldownStateChanged := false
 
 	m.mu.Lock()
 	if auth, ok := m.auths[result.AuthID]; ok && auth != nil {
 		now := time.Now()
+		var cooldownRecordsBefore []CooldownStateRecord
+		trackCooldownState := m.cooldownStore != nil
+		if trackCooldownState {
+			cooldownRecordsBefore = m.cooldownStateRecordsForAuthLocked(auth, now)
+		}
 		auth.recordRecentRequest(now, result.Success)
 		if result.Success {
 			auth.Success++
@@ -3392,19 +3349,11 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 				clearAuthStateOnSuccess(auth, now)
 			}
 		} else {
-			// Cookie pool auth entries manage retries internally via pool rotation.
-			// Skip penalizing the whole auth for transient cookie failures (timeout,
-			// rate limit, server error) so the conductor keeps picking this pool and
-			// the pool rotates to a different cookie. Only penalize on auth-level
-			// errors (401/403) which indicate all cookies are exhausted.
-			isCookiePoolAuth := auth.Attributes != nil && strings.TrimSpace(auth.Attributes["cookie_pool_name"]) != ""
-			skipCookiePoolPenalty := isCookiePoolAuth &&
-				(result.Error == nil || (result.Error.HTTPStatus != 401 && result.Error.HTTPStatus != 403))
-
-			if result.Model != "" && !skipCookiePoolPenalty {
+			if result.Model != "" {
 				if !isRequestScopedNotFoundResultError(result.Error) {
-					disableCooling := quotaCooldownDisabledForAuth(auth)
+					disableCooling := m.cooldownDisabledForAuth(auth)
 					state := ensureModelState(auth, result.Model)
+					state.Unavailable = true
 					state.Status = StatusError
 					state.UpdatedAt = now
 					if result.Error != nil {
@@ -3415,24 +3364,10 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 					}
 
 					statusCode := statusCodeFromResult(result.Error)
-					errMessage := failedAuthArchiveText(result.Error)
 					if isModelSupportResultError(result.Error) {
-						state.Unavailable = true
 						next := now.Add(12 * time.Hour)
 						state.NextRetryAfter = next
 						suspendReason = "model_not_supported"
-						shouldSuspendModel = true
-					} else if isBedrockThrottlingError(errMessage) {
-						// AWS Bedrock throttling: cooldown the specific credential only.
-						state.Unavailable = true
-						next := now.Add(30 * time.Second)
-						state.NextRetryAfter = next
-					} else if isBedrockAccessDeniedError(errMessage) {
-						// AWS credentials revoked: immediately suspend for a long time.
-						state.Unavailable = true
-						next := now.Add(24 * time.Hour)
-						state.NextRetryAfter = next
-						suspendReason = "access_denied"
 						shouldSuspendModel = true
 					} else if isCloudflareChallengeResultError(result.Error) {
 						next, backoffLevel := nextCloudflareCooldown(state.Quota.BackoffLevel, disableCooling, now)
@@ -3447,26 +3382,21 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 							NextRecoverAt: next,
 							BackoffLevel:  backoffLevel,
 						}
-					} else if isClientParamError(statusCode, errMessage) {
-						// User's fault (bad input), not a key problem. Don't penalize the key.
-						state.NextRetryAfter = time.Time{}
 					} else {
 						switch statusCode {
-						case 401, 403:
-							// Credential-specific auth failure: cooldown this credential
-							// but do NOT mark state.Unavailable so the scheduler can still
-							// pick other healthy credentials in the same priority tier.
+						case 401:
 							if disableCooling {
 								state.NextRetryAfter = time.Time{}
 							} else {
 								next := now.Add(30 * time.Minute)
 								state.NextRetryAfter = next
+								suspendReason = "unauthorized"
+								shouldSuspendModel = true
 							}
-						case 402:
+						case 402, 403:
 							if disableCooling {
 								state.NextRetryAfter = time.Time{}
 							} else {
-								state.Unavailable = true
 								next := now.Add(30 * time.Minute)
 								state.NextRetryAfter = next
 								suspendReason = "payment_required"
@@ -3476,23 +3406,16 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 							if disableCooling {
 								state.NextRetryAfter = time.Time{}
 							} else {
-								state.Unavailable = true
 								next := now.Add(12 * time.Hour)
 								state.NextRetryAfter = next
 								suspendReason = "not_found"
 								shouldSuspendModel = true
 							}
 						case 429:
-							state.Unavailable = true
 							var next time.Time
 							backoffLevel := state.Quota.BackoffLevel
-							// Daily/usage limit exhaustion → long cooldown (30 min)
-							// instead of normal exponential backoff.
-							isDailyLimit := isDailyUsageLimitError(errMessage)
 							if !disableCooling {
-								if isDailyLimit {
-									next = now.Add(30 * time.Minute)
-								} else if result.RetryAfter != nil {
+								if result.RetryAfter != nil {
 									next = now.Add(*result.RetryAfter)
 								} else {
 									cooldown, nextLevel := nextQuotaCooldown(backoffLevel, disableCooling)
@@ -3515,15 +3438,10 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 								setModelQuota = true
 							}
 						case 408, 500, 502, 503, 504:
-							state.Unavailable = true
 							if disableCooling {
 								state.NextRetryAfter = time.Time{}
-							} else if isTemporaryTransportFailure(statusCodeFromResult(result.Error), strings.ToLower(strings.TrimSpace(failedAuthArchiveText(result.Error)))) {
-								next := now.Add(3 * time.Minute)
-								state.NextRetryAfter = next
 							} else {
-								next := now.Add(1 * time.Minute)
-								state.NextRetryAfter = next
+								state.NextRetryAfter = nextTransientErrorRetryAfter(now)
 							}
 						default:
 							state.NextRetryAfter = time.Time{}
@@ -3535,16 +3453,24 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 					updateAggregatedAvailability(auth, now)
 				}
 			} else {
-				applyAuthFailureState(auth, result.Error, result.RetryAfter, now)
+				disableCooling := m.cooldownDisabledForAuth(auth)
+				applyAuthFailureState(auth, result.Error, result.RetryAfter, now, disableCooling)
 			}
 		}
 
 		_ = m.persist(ctx, auth)
 		authSnapshot = auth.Clone()
+		if trackCooldownState {
+			cooldownRecordsAfter := m.cooldownStateRecordsForAuthLocked(auth, now)
+			cooldownStateChanged = !cooldownStateRecordsEqual(cooldownRecordsBefore, cooldownRecordsAfter)
+		}
 	}
 	m.mu.Unlock()
 	if m.scheduler != nil && authSnapshot != nil {
 		m.scheduler.upsertAuth(authSnapshot)
+	}
+	if authSnapshot != nil && cooldownStateChanged {
+		m.persistCooldownStates(context.Background())
 	}
 
 	if clearModelQuota && result.Model != "" {
@@ -3560,16 +3486,6 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	}
 
 	m.hook.OnResult(ctx, result)
-
-	// Notify scheduler of affinity group success/failure for region switching.
-	if m.scheduler != nil && result.Model != "" {
-		m.scheduler.RecordAffinityResult(result.AuthID, result.Model, result.Success)
-	}
-	// Record latency for latency-aware scheduling.
-	if m.scheduler != nil && result.Latency > 0 {
-		m.scheduler.recordLatency(result.AuthID, result.Latency)
-	}
-
 	m.publishErrorEvent(result, authSnapshot)
 }
 
@@ -3842,16 +3758,6 @@ func isModelSupportErrorMessage(message string) bool {
 		"model unavailable",
 		"not available for your plan",
 		"not available for your account",
-		// AWS Bedrock specific: ARN/inference-profile not deployed in region.
-		// Triggered by misconfigured Nacos entries that pair an AK with a region
-		// where the model has no application-inference-profile. We want a long
-		// cooldown so we don't keep retrying the same dead (ak, region, model).
-		"resourcenotfoundexception",
-		"could not find inference profile",
-		"isn't supported in region",
-		"is not supported in region",
-		"the provided model identifier is invalid",
-		"invalid model identifier",
 	}
 	for _, pattern := range patterns {
 		if strings.Contains(lower, pattern) {
@@ -3972,14 +3878,13 @@ func isRequestInvalidError(err error) bool {
 	}
 }
 
-func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Duration, now time.Time) {
+func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Duration, now time.Time, disableCooling bool) {
 	if auth == nil {
 		return
 	}
 	if isRequestScopedNotFoundResultError(resultErr) {
 		return
 	}
-	disableCooling := quotaCooldownDisabledForAuth(auth)
 	auth.Unavailable = true
 	auth.Status = StatusError
 	auth.UpdatedAt = now
@@ -3990,30 +3895,6 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 		}
 	}
 	statusCode := statusCodeFromResult(resultErr)
-	// Non-retryable terminal (SC-33): user-error patterns (e.g. 400 / ValidationException
-	// / oversized context) should fail fast without long cooldown — the user needs to
-	// fix the request, not wait for the auth to recover. Applied before ErrorPassList
-	// so that matched terminals override retryability.
-	if resultErr != nil && matchNonRetryableSubstrings(auth, resultErr.Message) {
-		auth.Unavailable = false
-		auth.NextRetryAfter = time.Time{}
-		if auth.StatusMessage == "" {
-			auth.StatusMessage = "non-retryable client error"
-		}
-		return
-	}
-	// ErrorListPass (SC-02): if the response body or error message contains any
-	// of the auth's error_pass_list substrings, treat as transient upstream error
-	// and route through the 503 branch so the conductor fails over to another auth.
-	// This aligns with gpt-proxy's BackupList behavior.
-	if statusCode != 401 && statusCode != 402 && statusCode != 403 && statusCode != 404 {
-		if resultErr != nil && matchErrorPassList(auth, resultErr.Message) {
-			statusCode = http.StatusServiceUnavailable
-		}
-	}
-	// Per-entry backup-duration-ms overrides the default transient cooldown.
-	// Value is applied inside the 408/500/502/503/504 branch below.
-	backupOverride := authBackupDuration(auth)
 	if isCloudflareChallengeResultError(resultErr) {
 		auth.StatusMessage = "cloudflare challenge"
 		next, backoffLevel := nextCloudflareCooldown(auth.Quota.BackoffLevel, disableCooling, now)
@@ -4070,21 +3951,10 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 		auth.StatusMessage = "transient upstream error"
 		if disableCooling {
 			auth.NextRetryAfter = time.Time{}
-		} else if backupOverride > 0 {
-			// Per-entry override takes priority over heuristic cooldown.
-			auth.NextRetryAfter = now.Add(backupOverride)
-		} else if isThirdPartyProxyAuth(auth) {
-			auth.NextRetryAfter = now.Add(10 * time.Second)
-		} else if isTemporaryTransportFailure(statusCodeFromResult(resultErr), strings.ToLower(strings.TrimSpace(failedAuthArchiveText(resultErr)))) {
-			auth.NextRetryAfter = now.Add(3 * time.Minute)
 		} else {
-			auth.NextRetryAfter = now.Add(1 * time.Minute)
+			auth.NextRetryAfter = nextTransientErrorRetryAfter(now)
 		}
 	default:
-		// Unknown status codes: don't leave Unavailable=true permanently.
-		// Apply a brief cooldown and let the auth recover on the next attempt.
-		auth.Unavailable = false
-		auth.NextRetryAfter = time.Time{}
 		if auth.StatusMessage == "" {
 			auth.StatusMessage = "request failed"
 		}
@@ -4846,7 +4716,10 @@ func (m *Manager) pickNextViaHome(ctx context.Context, model string, opts clipro
 
 	raw, err := client.RPopAuth(ctx, requestedModel, sessionID, dispatchHeaders, count)
 	if err != nil {
-		return nil, nil, "", &Error{Code: "auth_not_found", Message: err.Error(), HTTPStatus: http.StatusServiceUnavailable}
+		if errors.Is(err, home.ErrAuthNotFound) {
+			return nil, nil, "", &Error{Code: "auth_not_found", Message: err.Error(), HTTPStatus: http.StatusServiceUnavailable}
+		}
+		return nil, nil, "", &Error{Code: "home_unavailable", Message: err.Error(), Retryable: true, HTTPStatus: http.StatusServiceUnavailable}
 	}
 
 	var env homeErrorEnvelope
@@ -5082,10 +4955,6 @@ func (m *Manager) tryAntigravityCreditsExecute(ctx context.Context, req cliproxy
 			resultModel := m.stateModelForExecution(c.auth, routeModel, upstreamModel, len(models) > 1)
 			execReq := req
 			execReq.Model = upstreamModel
-			if c.auth != nil {
-				accountType, _ := c.auth.AccountInfo()
-				creditsCtx = headroom.WithAuthMode(creditsCtx, headroom.AuthModeFromAccountType(accountType))
-			}
 			resp, errExec := c.executor.Execute(creditsCtx, c.auth, execReq, creditsOpts)
 			result := Result{AuthID: c.auth.ID, Provider: c.provider, Model: resultModel, Success: errExec == nil}
 			if errExec != nil {
@@ -5535,9 +5404,7 @@ func (m *Manager) refreshAuth(ctx context.Context, id string) {
 		updated.Runtime = auth.Runtime
 	}
 	updated.LastRefreshedAt = now
-	// Preserve NextRefreshAfter set by the Authenticator
-	// If the Authenticator set a reasonable refresh time, it should not be overwritten
-	// If the Authenticator did not set it (zero value), shouldRefresh will use default logic
+	updated.NextRefreshAfter = time.Time{}
 	updated.LastError = nil
 	updated.UpdatedAt = now
 	if m.shouldRefresh(updated, now) {
@@ -5625,14 +5492,9 @@ func debugLogAuthSelection(entry *log.Entry, auth *Auth, provider string, model 
 	if proxyInfo != "" {
 		suffix = " " + proxyInfo
 	}
-	label := auth.Label
 	switch accountType {
 	case "api_key":
-		if label != "" {
-			entry.Debugf("Use API key %s [%s] for model %s%s", util.HideAPIKey(accountInfo), label, model, suffix)
-		} else {
-			entry.Debugf("Use API key %s for model %s%s", util.HideAPIKey(accountInfo), model, suffix)
-		}
+		entry.Debugf("Use API key %s for model %s%s", util.HideAPIKey(accountInfo), model, suffix)
 	case "oauth":
 		ident := formatOauthIdentity(auth, provider, accountInfo)
 		entry.Debugf("Use OAuth %s for model %s%s", ident, model, suffix)
@@ -5768,230 +5630,4 @@ func (m *Manager) HttpRequest(ctx context.Context, auth *Auth, req *http.Request
 		return nil, &Error{Code: "provider_not_found", Message: "executor not registered for provider: " + providerKey}
 	}
 	return exec.HttpRequest(ctx, auth, req)
-}
-
-func failedAuthArchiveText(resultErr *Error) string {
-	if resultErr == nil {
-		return ""
-	}
-	parts := make([]string, 0, 2)
-	if code := strings.TrimSpace(resultErr.Code); code != "" {
-		parts = append(parts, code)
-	}
-	if msg := strings.TrimSpace(resultErr.Message); msg != "" {
-		parts = append(parts, msg)
-	}
-	return strings.Join(parts, ": ")
-}
-
-// isBedrockThrottlingError detects AWS Bedrock throttling which returns HTTP 400
-// (not 429) with ThrottlingException. GPT Proxy misclassifies this as a client
-// parameter error; CPA handles it correctly as rate limiting.
-func isBedrockThrottlingError(message string) bool {
-	return containsAnyFold(message, "throttlingexception", "throttling")
-}
-
-// isBedrockAccessDeniedError detects revoked AWS credentials. GPT Proxy doesn't
-// handle this specifically; CPA immediately disables the key.
-func isBedrockAccessDeniedError(message string) bool {
-	return containsAnyFold(message,
-		"accessdeniedexception",
-		"access denied",
-		"not authorized to perform",
-		"security token included in the request is invalid",
-	)
-}
-
-// isClientParamError returns true when the failure is caused by the user's input,
-// not by a key/credential problem. Matching keys are NOT penalized.
-// Based on GPT Proxy's isClientParamError (IDA 0x15df440) with corrections.
-func isClientParamError(status int, message string) bool {
-	if status == 400 && containsAnyFold(message, "validationexception") {
-		// Only treat as client error if it's NOT a throttling exception
-		// (ThrottlingException also returns 400 but should be handled as rate limiting)
-		if !isBedrockThrottlingError(message) {
-			return true
-		}
-	}
-	// Only match string patterns on 400 (client error) status codes.
-	// Avoids misclassifying 429 rate-limit messages (e.g. "exceeds the maximum
-	// requests per minute") as user parameter errors.
-	if status != 0 && status != 400 {
-		return false
-	}
-	return containsAnyFold(message,
-		"prompt is too long",
-		"maximum context length",
-		"the maximum number of tokens allowed",
-		"too many images",
-		"could not process image",
-		"invalid image",
-		"your input is too long",
-		"exceeds the maximum",
-		"content filtering",
-		"image too large",
-	)
-}
-
-// isDailyUsageLimitError returns true when the error indicates the credential's
-// daily free-tier quota has been exhausted. These should receive a long cooldown
-// rather than normal exponential backoff, since the limit resets daily.
-func isDailyUsageLimitError(message string) bool {
-	lower := strings.ToLower(message)
-	// Both "daily" AND "limit" must appear to avoid false positives
-	// on messages that merely contain the word "daily".
-	return strings.Contains(lower, "daily") && (strings.Contains(lower, "limit") || strings.Contains(lower, "usage"))
-}
-
-func isThirdPartyProxyAuth(auth *Auth) bool {
-	if auth == nil || auth.Attributes == nil {
-		return false
-	}
-	baseURL := strings.TrimSpace(auth.Attributes["base_url"])
-	if baseURL == "" {
-		return false
-	}
-	lower := strings.ToLower(baseURL)
-	if strings.Contains(lower, "api.anthropic.com") {
-		return false
-	}
-	if strings.Contains(lower, "openai.com") {
-		return false
-	}
-	return true
-}
-
-// matchNonRetryableSubstrings reports whether the given error text contains any
-// of the auth's non_retryable_substrings.
-func matchNonRetryableSubstrings(auth *Auth, message string) bool {
-	if auth == nil || auth.Attributes == nil || message == "" {
-		return false
-	}
-	encoded := strings.TrimSpace(auth.Attributes["non_retryable_substrings"])
-	if encoded == "" {
-		return false
-	}
-	// Note: We avoid json.Unmarshal on every error by caching in Metadata.
-	// Attributes are immutable; Metadata is runtime-mutable.
-	var patterns []string
-	if auth.Metadata != nil {
-		if val, ok := auth.Metadata["_cached_non_retryable"].([]string); ok {
-			patterns = val
-		}
-	}
-	if patterns == nil {
-		if err := json.Unmarshal([]byte(encoded), &patterns); err == nil {
-			if auth.Metadata == nil {
-				auth.Metadata = make(map[string]any)
-			}
-			auth.Metadata["_cached_non_retryable"] = patterns
-		}
-	}
-	for _, p := range patterns {
-		p = strings.TrimSpace(p)
-		if p != "" && strings.Contains(message, p) {
-			return true
-		}
-	}
-	return false
-}
-
-// authBackupDuration returns the per-entry cooldown override (as time.Duration)
-// parsed from auth attr "backup_duration_ms". Returns 0 if not set, letting
-// conductor use its default cooldown.
-func authBackupDuration(auth *Auth) time.Duration {
-	if auth == nil || auth.Attributes == nil {
-		return 0
-	}
-	v := strings.TrimSpace(auth.Attributes["backup_duration_ms"])
-	if v == "" {
-		return 0
-	}
-	ms, err := strconv.Atoi(v)
-	if err != nil || ms <= 0 {
-		return 0
-	}
-	return time.Duration(ms) * time.Millisecond
-}
-
-// matchErrorPassList reports whether the given error text contains any of the
-// auth's error_pass_list substrings.
-func matchErrorPassList(auth *Auth, message string) bool {
-	if auth == nil || auth.Attributes == nil || message == "" {
-		return false
-	}
-	encoded := strings.TrimSpace(auth.Attributes["error_pass_list"])
-	if encoded == "" {
-		return false
-	}
-	// Note: We avoid json.Unmarshal on every error by caching in Metadata.
-	var patterns []string
-	if auth.Metadata != nil {
-		if val, ok := auth.Metadata["_cached_error_pass"].([]string); ok {
-			patterns = val
-		}
-	}
-	if patterns == nil {
-		if err := json.Unmarshal([]byte(encoded), &patterns); err == nil {
-			if auth.Metadata == nil {
-				auth.Metadata = make(map[string]any)
-			}
-			auth.Metadata["_cached_error_pass"] = patterns
-		}
-	}
-	for _, p := range patterns {
-		p = strings.TrimSpace(p)
-		if p != "" && strings.Contains(message, p) {
-			return true
-		}
-	}
-	return false
-}
-
-func isTemporaryTransportFailure(status int, message string) bool {
-	if containsAnyFold(message,
-		"context canceled",
-		"context cancelled",
-		"deadline exceeded",
-		"client.timeout",
-		"timeout",
-		"i/o timeout",
-		"connection reset by peer",
-		"connection refused",
-		"unexpected eof",
-	) {
-		return true
-	}
-	switch status {
-	case 408, 502, 503, 504:
-		return true
-	default:
-		return false
-	}
-}
-
-func containsAnyFold(value string, targets ...string) bool {
-	if value == "" {
-		return false
-	}
-	v := strings.ToLower(value)
-	for _, target := range targets {
-		if target == "" {
-			continue
-		}
-		if strings.Contains(v, strings.ToLower(target)) {
-			return true
-		}
-	}
-	return false
-}
-
-// SetHook replaces the hook used for auth lifecycle notifications.
-func (m *Manager) SetHook(hook Hook) {
-	if m == nil {
-		return
-	}
-	m.mu.Lock()
-	m.hook = hook
-	m.mu.Unlock()
 }
