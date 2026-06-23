@@ -627,13 +627,18 @@ func (a *Auth) AccountInfo() (string, string) {
 			}
 		}
 	}
-	// Fall back to API key (API-key auth)
-	if a.Attributes != nil {
-		if v := a.Attributes["api_key"]; v != "" {
-			return "api_key", v
+	// Fall through to upstream's AuthKind-based dispatch when no provider-specific match.
+	switch a.AuthKind() {
+	case AuthKindOAuth:
+		return "oauth", ""
+	case AuthKindAPIKey:
+		if apiKey := authAttribute(a, AttributeAPIKey); apiKey != "" {
+			return "api_key", apiKey
 		}
+		return "api_key", ""
+	default:
+		return "", ""
 	}
-	return "", ""
 }
 
 // ExpirationTime attempts to extract the credential expiration timestamp from metadata.
