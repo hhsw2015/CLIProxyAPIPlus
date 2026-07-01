@@ -261,7 +261,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 
 	// Disable thinking if tool_choice forces tool use (Anthropic API constraint)
 	body = disableThinkingIfToolChoiceForced(body)
-	body = normalizeClaudeTemperatureForThinking(body)
+	body = normalizeClaudeSamplingForThinking(body)
 
 	// Auto-inject cache_control if missing (optimization for ClawdBot/clients without caching support)
 	if countCacheControls(body) == 0 {
@@ -507,7 +507,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 
 	// Disable thinking if tool_choice forces tool use (Anthropic API constraint)
 	body = disableThinkingIfToolChoiceForced(body)
-	body = normalizeClaudeTemperatureForThinking(body)
+	body = normalizeClaudeSamplingForThinking(body)
 
 	// Auto-inject cache_control if missing (optimization for ClawdBot/clients without caching support)
 	if countCacheControls(body) == 0 {
@@ -1254,7 +1254,6 @@ func disableThinkingIfToolChoiceForced(body []byte) []byte {
 	return body
 }
 
-// normalizeClaudeTemperatureForThinking keeps Anthropic message requests valid when
 // normalizeThinkingForAdaptiveModels converts thinking.type="enabled"+budget_tokens
 // to thinking.type="adaptive"+output_config.effort for models that only support
 // adaptive thinking (e.g. Opus 4.7). Matches GPT Proxy's normalizeThinkingConfig.
@@ -1297,20 +1296,18 @@ func normalizeThinkingForAdaptiveModels(body []byte, model string) []byte {
 	return body
 }
 
-// thinking is enabled. Anthropic rejects temperatures other than 1 when
-// thinking.type is enabled/adaptive/auto.
-func normalizeClaudeTemperatureForThinking(body []byte) []byte {
-	if !gjson.GetBytes(body, "temperature").Exists() {
-		return body
-	}
-
+// normalizeClaudeSamplingForThinking keeps Anthropic message requests valid when
+// thinking is active. Anthropic rejects non-default sampling while thinking is
+// enabled/adaptive/auto.
+func normalizeClaudeSamplingForThinking(body []byte) []byte {
 	thinkingType := strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "thinking.type").String()))
 	switch thinkingType {
 	case "enabled", "adaptive", "auto":
-		if temp := gjson.GetBytes(body, "temperature"); temp.Exists() && temp.Type == gjson.Number && temp.Float() == 1 {
-			return body
+		if temp := gjson.GetBytes(body, "temperature"); temp.Exists() && (temp.Type != gjson.Number || temp.Float() != 1) {
+			body, _ = sjson.SetBytes(body, "temperature", 1)
 		}
-		body, _ = sjson.SetBytes(body, "temperature", 1)
+		body, _ = sjson.DeleteBytes(body, "top_p")
+		body, _ = sjson.DeleteBytes(body, "top_k")
 	}
 	return body
 }
