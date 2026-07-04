@@ -3,10 +3,12 @@ package proxypool
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"net"
 	"net/http"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
@@ -139,6 +141,9 @@ func (p *Pool) DialContext(ctx context.Context, network, addr string) (net.Conn,
 		return (&net.Dialer{Timeout: 10 * time.Second}).DialContext(ctx, network, addr)
 	}
 	start := p.counter.Add(1)
+	var targetSideErr error       // remember the first target-side failure
+	targetSideEntries := 0        // how many distinct workers agreed the target is bad
+	const targetSideRetryLimit = 2 // fail fast after this many workers agree
 	for attempts := 0; attempts < len(p.entries)*2; attempts++ {
 		idx := p.weightedIndex(start + uint64(attempts))
 		e := p.entries[idx]
@@ -158,16 +163,28 @@ func (p *Pool) DialContext(ctx context.Context, network, addr string) (net.Conn,
 			// by a single bad upstream domain, breaking every provider that
 			// shares the pool. See #woyaochat storm (2026-07-04).
 			if isTargetSideDialError(err) {
-				log.Warnf("[proxypool] %s dial failed (target-side, worker kept): %v", e.name, err)
-				// Do NOT mark unhealthy; return the error to caller so the
-				// specific auth is failed but the pool stays alive.
-				return nil, err
+				// Two independent workers agreeing the target is bad is enough
+				// to declare it dead; try N different workers in case one has a
+				// stale/split-DNS view of the target host.
+				targetSideEntries++
+				if targetSideErr == nil {
+					targetSideErr = err
+				}
+				log.Warnf("[proxypool] %s dial failed (target-side, worker kept, %d/%d): %v",
+					e.name, targetSideEntries, targetSideRetryLimit, err)
+				if targetSideEntries >= targetSideRetryLimit {
+					return nil, targetSideErr
+				}
+				continue
 			}
 			log.Warnf("[proxypool] %s dial failed: %v", e.name, err)
 			e.healthy.Store(false)
 			continue
 		}
 		return conn, nil
+	}
+	if targetSideErr != nil {
+		return nil, targetSideErr
 	}
 	return nil, net.ErrClosed
 }
@@ -176,10 +193,27 @@ func (p *Pool) DialContext(ctx context.Context, network, addr string) (net.Conn,
 // the target address (NXDOMAIN, connection refused, HTTP-scheme target rejected
 // by the proxy, etc.) rather than the tunnel worker being unhealthy. In these
 // cases we must NOT mark the worker unhealthy — the worker is fine.
+//
+// Prefers structured error checks (errors.As/Is) over substring matching, so
+// wording differences across Go versions / OSes (Linux/Windows/macOS) don't
+// silently regress the classification.
 func isTargetSideDialError(err error) bool {
 	if err == nil {
 		return false
 	}
+	// Structured: DNS "no such host" (NXDOMAIN and friends).
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) && dnsErr.IsNotFound {
+		return true
+	}
+	// Structured: kernel-level refused/unreachable.
+	if errors.Is(err, syscall.ECONNREFUSED) ||
+		errors.Is(err, syscall.EHOSTUNREACH) ||
+		errors.Is(err, syscall.ENETUNREACH) {
+		return true
+	}
+	// String fallback for backends that wrap errors without preserving the
+	// structured form (Cloudflare Workers HTTP rejection, non-Go proxies, etc.).
 	msg := strings.ToLower(err.Error())
 	// Cloudflare Workers reject non-HTTPS / non-fetchable targets with:
 	//   "proxy request failed, cannot connect to the specified address"
@@ -189,10 +223,11 @@ func isTargetSideDialError(err error) bool {
 		strings.Contains(msg, "consider using fetch") {
 		return true
 	}
-	// Generic target-side signals across dialer implementations.
+	// Localization-independent DNS/kernel wording fallback.
 	if strings.Contains(msg, "no such host") ||
 		strings.Contains(msg, "nxdomain") ||
 		strings.Contains(msg, "connection refused") ||
+		strings.Contains(msg, "actively refused") || // Windows phrasing
 		strings.Contains(msg, "host unreachable") ||
 		strings.Contains(msg, "network unreachable") {
 		return true

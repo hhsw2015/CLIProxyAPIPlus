@@ -1297,9 +1297,18 @@ func normalizeThinkingForAdaptiveModels(body []byte, model string) []byte {
 }
 
 // normalizeClaudeSamplingForUpstream keeps Anthropic message requests valid.
+//
+// Sampling normalization rules (as of upstream 5afc0f1d, 2026-07-04):
+//   - temperature is stripped unconditionally. Anthropic-compatible upstreams
+//     (Anthropic API proper, Bedrock, Vertex, several relays) differ in their
+//     handling of `temperature`, and some now reject any non-default value
+//     when reasoning/thinking is in play. Rather than probe per-provider, we
+//     let each provider default. Clients that need deterministic sampling
+//     should use `top_p: 0` semantics instead.
+//   - top_p and top_k are stripped when thinking is enabled/adaptive/auto,
+//     because Anthropic rejects them alongside active thinking.
 func normalizeClaudeSamplingForUpstream(body []byte) []byte {
 	body, _ = sjson.DeleteBytes(body, "temperature")
-
 
 	thinkingType := strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "thinking.type").String()))
 	switch thinkingType {

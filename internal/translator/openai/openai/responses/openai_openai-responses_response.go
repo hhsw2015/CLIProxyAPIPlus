@@ -399,7 +399,14 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 				// reasoning_content (OpenAI reasoning incremental text)
 				rc := delta.Get("reasoning_content")
 				if !rc.Exists() || rc.String() == "" {
-					rc = delta.Get("reasoning")
+					// Some providers emit `reasoning` as an object
+					// ({"effort":"medium"} or {"content":[...]}); only
+					// fall back when it's a string, otherwise gjson's
+					// .String() returns the raw JSON, which would leak
+					// JSON fragments into the visible reasoning summary.
+					if r := delta.Get("reasoning"); r.Type == gjson.String {
+						rc = r
+					}
 				}
 				if rc.Exists() && rc.String() != "" {
 					// On first appearance, add reasoning item and part
