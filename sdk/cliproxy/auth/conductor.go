@@ -4038,17 +4038,26 @@ func isRequestScopedNotFoundResultError(err *Error) bool {
 }
 
 // isClientCanceledResultError returns true when the failure was caused by the
-// downstream client aborting the request (context.Canceled propagating from the
-// client's request context), NOT by the upstream auth failing. We must avoid
-// punishing a healthy auth just because the client hung up early.
+// downstream client aborting the request (context.Canceled propagating from
+// the client's request context), NOT by the upstream auth failing. We must
+// avoid punishing a healthy auth just because the client hung up early.
 //
-// Only matches context.Canceled — deliberately NOT context.DeadlineExceeded,
-// which may originate from a server-side (proxy or upstream-dial) deadline and
-// legitimately indicates an unhealthy upstream that should be cooled down.
+// Detection priority:
+//   1. Error.Code == "client_canceled" — the executor layer can stamp this
+//      when it observes errors.Is(origErr, context.Canceled) tied to the
+//      client's request context. This is the preferred, unambiguous form.
+//   2. Message equals or ends in ": context canceled" — best-effort fallback
+//      for executors that haven't been updated to set Code. Deliberately
+//      strict (equality / suffix) so a wrapped upstream error whose body
+//      happens to contain the phrase mid-string doesn't get misclassified.
 //
-// TODO: for stronger disambiguation, have the executor layer stamp a dedicated
-// Error.Code (e.g. "client_canceled") at the point where errors.Is(origErr,
-// context.Canceled) is checked, then match on that here instead of message text.
+// Deliberately NOT matched:
+//   - context.DeadlineExceeded — may originate from a server-side proxy or
+//     upstream-dial deadline; the upstream really is unhealthy and should be
+//     cooled down.
+//   - Free-form "client disconnected" strings — not a stable stdlib phrase
+//     and appears in mixed contexts (websocket relay, log messages) that we
+//     don't want to blanket-suppress.
 func isClientCanceledResultError(err *Error) bool {
 	if err == nil {
 		return false
@@ -4056,9 +4065,8 @@ func isClientCanceledResultError(err *Error) bool {
 	if err.Code == "client_canceled" {
 		return true
 	}
-	msg := strings.ToLower(err.Message)
-	return strings.Contains(msg, "context canceled") ||
-		strings.Contains(msg, "client disconnected")
+	msg := err.Message
+	return msg == "context canceled" || strings.HasSuffix(msg, ": context canceled")
 }
 
 // isRequestInvalidError returns true if the error represents a client request

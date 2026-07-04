@@ -243,13 +243,28 @@ func (h *ClaudeCodeAPIHandler) handleStreamingResponse(c *gin.Context, rawJSON [
 	// client sees zero bytes and may time out, forcing CPA to fallback and
 	// (before the client-cancel fix) mark the healthy auth Unavailable.
 	//
-	// Emit SSE headers + a comment line immediately, then heartbeat every
-	// KeepAliveInterval until first upstream data arrives. Once first data
-	// arrives, we hand off to ForwardStream which owns the ticker.
+	// Emit SSE headers + a comment line at the first ticker fire, then
+	// heartbeat every KeepAliveInterval until first upstream data arrives.
+	// Once first data arrives, ForwardStream owns keep-alive from there; we
+	// stop the peek ticker before handoff to avoid double-heartbeat.
 	keepAliveInterval := handlers.StreamingKeepAliveInterval(h.Cfg)
 	earlyFlushed := false
 	var peekKeepAlive *time.Ticker
 	var peekKeepAliveC <-chan time.Time
+	if keepAliveInterval > 0 {
+		peekKeepAlive = time.NewTicker(keepAliveInterval)
+		peekKeepAliveC = peekKeepAlive.C
+	}
+	stopPeekTicker := func() {
+		if peekKeepAlive != nil {
+			peekKeepAlive.Stop()
+			peekKeepAlive = nil
+			peekKeepAliveC = nil
+		}
+	}
+	// Defensive: stop the ticker if the request returns via any path we
+	// haven't already covered (e.g. context cancel).
+	defer stopPeekTicker()
 	earlyFlush := func() {
 		if earlyFlushed {
 			return
@@ -260,24 +275,7 @@ func (h *ClaudeCodeAPIHandler) handleStreamingResponse(c *gin.Context, rawJSON [
 		// to fail loud with proper JSON. Only after true first data chunk.
 		_, _ = c.Writer.Write([]byte(": keep-alive\n\n"))
 		flusher.Flush()
-		if keepAliveInterval > 0 {
-			peekKeepAlive = time.NewTicker(keepAliveInterval)
-			peekKeepAliveC = peekKeepAlive.C
-		}
 	}
-	// Immediately schedule the first heartbeat if streaming keep-alive is
-	// enabled. We only actually write bytes once the pre-upstream stage takes
-	// long enough that the first ticker fires, OR when the client's SSE reader
-	// needs headers to consider the stream active.
-	if keepAliveInterval > 0 {
-		peekKeepAlive = time.NewTicker(keepAliveInterval)
-		peekKeepAliveC = peekKeepAlive.C
-	}
-	defer func() {
-		if peekKeepAlive != nil {
-			peekKeepAlive.Stop()
-		}
-	}()
 
 	// Peek at the first chunk to determine success or failure before setting headers
 	for {
@@ -354,7 +352,9 @@ func (h *ClaudeCodeAPIHandler) handleStreamingResponse(c *gin.Context, rawJSON [
 				return
 			}
 
-			// Success! Set headers now.
+			// Success! Set headers now. Stop the peek ticker before handoff
+			// so ForwardStream owns keep-alive from here (no double-heartbeat).
+			stopPeekTicker()
 			setSSEHeaders()
 			handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
 
