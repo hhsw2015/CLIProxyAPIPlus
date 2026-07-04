@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"net"
 	"net/http"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -150,6 +151,18 @@ func (p *Pool) DialContext(ctx context.Context, network, addr string) (net.Conn,
 		}
 		conn, err := e.dialer.Dial(addr)
 		if err != nil {
+			// Distinguish target-side vs worker-side failure. If the upstream
+			// worker rejected because the *target* is bad (NXDOMAIN, refused,
+			// blacklisted HTTP target, etc.), the worker itself is healthy —
+			// marking it unhealthy would cascade into all workers being killed
+			// by a single bad upstream domain, breaking every provider that
+			// shares the pool. See #woyaochat storm (2026-07-04).
+			if isTargetSideDialError(err) {
+				log.Warnf("[proxypool] %s dial failed (target-side, worker kept): %v", e.name, err)
+				// Do NOT mark unhealthy; return the error to caller so the
+				// specific auth is failed but the pool stays alive.
+				return nil, err
+			}
 			log.Warnf("[proxypool] %s dial failed: %v", e.name, err)
 			e.healthy.Store(false)
 			continue
@@ -157,6 +170,34 @@ func (p *Pool) DialContext(ctx context.Context, network, addr string) (net.Conn,
 		return conn, nil
 	}
 	return nil, net.ErrClosed
+}
+
+// isTargetSideDialError returns true when the dial failure is attributable to
+// the target address (NXDOMAIN, connection refused, HTTP-scheme target rejected
+// by the proxy, etc.) rather than the tunnel worker being unhealthy. In these
+// cases we must NOT mark the worker unhealthy — the worker is fine.
+func isTargetSideDialError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	// Cloudflare Workers reject non-HTTPS / non-fetchable targets with:
+	//   "proxy request failed, cannot connect to the specified address"
+	//   "It looks like you might be trying to connect to a HTTP-based service"
+	if strings.Contains(msg, "cannot connect to the specified address") ||
+		strings.Contains(msg, "http-based service") ||
+		strings.Contains(msg, "consider using fetch") {
+		return true
+	}
+	// Generic target-side signals across dialer implementations.
+	if strings.Contains(msg, "no such host") ||
+		strings.Contains(msg, "nxdomain") ||
+		strings.Contains(msg, "connection refused") ||
+		strings.Contains(msg, "host unreachable") ||
+		strings.Contains(msg, "network unreachable") {
+		return true
+	}
+	return false
 }
 
 // StartHealthCheck runs periodic health checks.
