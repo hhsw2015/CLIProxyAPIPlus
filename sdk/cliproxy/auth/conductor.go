@@ -3539,6 +3539,14 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 			}
 		} else {
 			if result.Model != "" {
+				// Client-side cancellation (client hung up during upload / first-byte
+				// wait) is NOT the auth's fault. Do not penalize a healthy auth for
+				// slow but working upstreams by marking it Unavailable.
+				if isClientCanceledResultError(result.Error) {
+					// Update recorded stats only; leave availability untouched.
+					m.mu.Unlock()
+					return
+				}
 				if !isRequestScopedNotFoundResultError(result.Error) {
 					disableCooling := m.cooldownDisabledForAuth(auth)
 					state := ensureModelState(auth, result.Model)
@@ -4029,6 +4037,21 @@ func isRequestScopedNotFoundResultError(err *Error) bool {
 		return false
 	}
 	return isRequestScopedNotFoundMessage(err.Message)
+}
+
+// isClientCanceledResultError returns true when the failure was caused by the
+// downstream client aborting the request (context.Canceled or context.DeadlineExceeded
+// during upload / first byte wait), NOT by the upstream auth failing. We must
+// avoid punishing a healthy auth just because the client hung up early.
+func isClientCanceledResultError(err *Error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Message)
+	return strings.Contains(msg, "context canceled") ||
+		strings.Contains(msg, "context deadline exceeded") ||
+		strings.Contains(msg, "client disconnected") ||
+		strings.Contains(msg, "canceled, context canceled")
 }
 
 // isRequestInvalidError returns true if the error represents a client request
