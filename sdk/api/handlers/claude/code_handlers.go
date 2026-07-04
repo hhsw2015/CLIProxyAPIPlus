@@ -237,12 +237,61 @@ func (h *ClaudeCodeAPIHandler) handleStreamingResponse(c *gin.Context, rawJSON [
 		c.Header("Access-Control-Allow-Origin", "*")
 	}
 
+	// Early SSE flush + keep-alive during pre-upstream wait: for large-context
+	// requests (>1MB body) or slow-thinking upstreams (Bedrock adaptive), the
+	// upstream can take 20-60s+ to send its first byte. During that window the
+	// client sees zero bytes and may time out, forcing CPA to fallback and
+	// (before the client-cancel fix) mark the healthy auth Unavailable.
+	//
+	// Emit SSE headers + a comment line immediately, then heartbeat every
+	// KeepAliveInterval until first upstream data arrives. Once first data
+	// arrives, we hand off to ForwardStream which owns the ticker.
+	keepAliveInterval := handlers.StreamingKeepAliveInterval(h.Cfg)
+	earlyFlushed := false
+	var peekKeepAlive *time.Ticker
+	var peekKeepAliveC <-chan time.Time
+	earlyFlush := func() {
+		if earlyFlushed {
+			return
+		}
+		earlyFlushed = true
+		setSSEHeaders()
+		// Do NOT WriteUpstreamHeaders yet — we may still get an error and want
+		// to fail loud with proper JSON. Only after true first data chunk.
+		_, _ = c.Writer.Write([]byte(": keep-alive\n\n"))
+		flusher.Flush()
+		if keepAliveInterval > 0 {
+			peekKeepAlive = time.NewTicker(keepAliveInterval)
+			peekKeepAliveC = peekKeepAlive.C
+		}
+	}
+	// Immediately schedule the first heartbeat if streaming keep-alive is
+	// enabled. We only actually write bytes once the pre-upstream stage takes
+	// long enough that the first ticker fires, OR when the client's SSE reader
+	// needs headers to consider the stream active.
+	if keepAliveInterval > 0 {
+		peekKeepAlive = time.NewTicker(keepAliveInterval)
+		peekKeepAliveC = peekKeepAlive.C
+	}
+	defer func() {
+		if peekKeepAlive != nil {
+			peekKeepAlive.Stop()
+		}
+	}()
+
 	// Peek at the first chunk to determine success or failure before setting headers
 	for {
 		select {
 		case <-c.Request.Context().Done():
 			cliCancel(c.Request.Context().Err())
 			return
+		case <-peekKeepAliveC:
+			// Pre-upstream stage is slow (e.g. large body upload to Bedrock,
+			// or model thinking). Flush SSE headers + comment line so the
+			// client's SSE reader sees the stream is alive and does not
+			// time out during first-byte wait.
+			earlyFlush()
+			continue
 		case errMsg, ok := <-errChan:
 			if !ok {
 				// Err channel closed cleanly; wait for data channel.
@@ -250,6 +299,24 @@ func (h *ClaudeCodeAPIHandler) handleStreamingResponse(c *gin.Context, rawJSON [
 				continue
 			}
 			// Upstream failed immediately. Return proper error status and JSON.
+			// If we've already early-flushed SSE headers, we can't send a JSON
+			// status body; emit as SSE error event instead.
+			if earlyFlushed {
+				payload := []byte(`{"type":"error","error":{"type":"api_error","message":"upstream error"}}`)
+				if errMsg != nil && errMsg.Error != nil {
+					payload = []byte(fmt.Sprintf(`{"type":"error","error":{"type":"api_error","message":%q}}`, errMsg.Error.Error()))
+				}
+				_, _ = c.Writer.Write([]byte("event: error\ndata: "))
+				_, _ = c.Writer.Write(payload)
+				_, _ = c.Writer.Write([]byte("\n\n"))
+				flusher.Flush()
+				if errMsg != nil {
+					cliCancel(errMsg.Error)
+				} else {
+					cliCancel(nil)
+				}
+				return
+			}
 			h.WriteErrorResponse(c, errMsg)
 			if errMsg != nil {
 				cliCancel(errMsg.Error)
@@ -260,7 +327,18 @@ func (h *ClaudeCodeAPIHandler) handleStreamingResponse(c *gin.Context, rawJSON [
 		case chunk, ok := <-dataChan:
 			if !ok {
 				if errMsg, okPendingErr := pendingClaudeStreamError(errChan); okPendingErr {
-					h.WriteErrorResponse(c, errMsg)
+					if earlyFlushed {
+						payload := []byte(`{"type":"error","error":{"type":"api_error","message":"upstream error"}}`)
+						if errMsg != nil && errMsg.Error != nil {
+							payload = []byte(fmt.Sprintf(`{"type":"error","error":{"type":"api_error","message":%q}}`, errMsg.Error.Error()))
+						}
+						_, _ = c.Writer.Write([]byte("event: error\ndata: "))
+						_, _ = c.Writer.Write(payload)
+						_, _ = c.Writer.Write([]byte("\n\n"))
+						flusher.Flush()
+					} else {
+						h.WriteErrorResponse(c, errMsg)
+					}
 					if errMsg != nil {
 						cliCancel(errMsg.Error)
 					} else {
