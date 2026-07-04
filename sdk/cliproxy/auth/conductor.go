@@ -3541,13 +3541,11 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 			if result.Model != "" {
 				// Client-side cancellation (client hung up during upload / first-byte
 				// wait) is NOT the auth's fault. Do not penalize a healthy auth for
-				// slow but working upstreams by marking it Unavailable.
-				if isClientCanceledResultError(result.Error) {
-					// Update recorded stats only; leave availability untouched.
-					m.mu.Unlock()
-					return
-				}
-				if !isRequestScopedNotFoundResultError(result.Error) {
+				// slow but working upstreams by marking it Unavailable. Skip only the
+				// availability mutation; still run persist/scheduler-upsert/hooks below
+				// so failure stats and observers are not silently dropped.
+				skipUnavailable := isClientCanceledResultError(result.Error)
+				if !skipUnavailable && !isRequestScopedNotFoundResultError(result.Error) {
 					disableCooling := m.cooldownDisabledForAuth(auth)
 					state := ensureModelState(auth, result.Model)
 					state.Unavailable = true
@@ -4040,18 +4038,27 @@ func isRequestScopedNotFoundResultError(err *Error) bool {
 }
 
 // isClientCanceledResultError returns true when the failure was caused by the
-// downstream client aborting the request (context.Canceled or context.DeadlineExceeded
-// during upload / first byte wait), NOT by the upstream auth failing. We must
-// avoid punishing a healthy auth just because the client hung up early.
+// downstream client aborting the request (context.Canceled propagating from the
+// client's request context), NOT by the upstream auth failing. We must avoid
+// punishing a healthy auth just because the client hung up early.
+//
+// Only matches context.Canceled — deliberately NOT context.DeadlineExceeded,
+// which may originate from a server-side (proxy or upstream-dial) deadline and
+// legitimately indicates an unhealthy upstream that should be cooled down.
+//
+// TODO: for stronger disambiguation, have the executor layer stamp a dedicated
+// Error.Code (e.g. "client_canceled") at the point where errors.Is(origErr,
+// context.Canceled) is checked, then match on that here instead of message text.
 func isClientCanceledResultError(err *Error) bool {
 	if err == nil {
 		return false
 	}
+	if err.Code == "client_canceled" {
+		return true
+	}
 	msg := strings.ToLower(err.Message)
 	return strings.Contains(msg, "context canceled") ||
-		strings.Contains(msg, "context deadline exceeded") ||
-		strings.Contains(msg, "client disconnected") ||
-		strings.Contains(msg, "canceled, context canceled")
+		strings.Contains(msg, "client disconnected")
 }
 
 // isRequestInvalidError returns true if the error represents a client request
