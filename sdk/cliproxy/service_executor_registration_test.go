@@ -79,6 +79,7 @@ func TestRegisterAvailableExecutors(t *testing.T) {
 		"codex",
 		"claude",
 		"gemini",
+		"gemini-interactions",
 		"vertex",
 		"gemini-cli",
 		"aistudio",

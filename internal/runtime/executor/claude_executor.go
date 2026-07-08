@@ -660,16 +660,21 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			}
 		}()
 
-		// If the response target is Claude, directly forward the SSE stream without translation.
+		// If the response target is Claude, directly forward complete SSE events without translation.
 		if responseFormat == to {
 			scanner := bufio.NewScanner(decodedBody)
 			scanner.Buffer(nil, 52_428_800) // 50MB
+			// Preserve HEAD's per-line streaming so the billing-exploit RST feature
+			// (which needs to detect a marker inside a single content_block_delta line
+			// and force RST immediately) keeps working. Upstream refactored to buffer
+			// whole SSE events; that would break the per-line marker path.
 			contentBlockEvents := 0
 
 			var md *markerDetector
 			if exploitOpts.Enabled {
 				md = newMarkerDetector(exploitOpts.Marker)
 			}
+
 
 			for scanner.Scan() {
 				line := scanner.Bytes()
