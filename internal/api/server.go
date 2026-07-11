@@ -1025,6 +1025,7 @@ func (s *Server) registerManagementRoutes() {
 			mgmt.POST("/integrations/:product/rollback", s.mgmt.RollbackIntegration)
 		}
 		mgmt.GET("/xai-auth-url", s.mgmt.RequestXAIToken)
+		mgmt.DELETE("/oauth-session", s.mgmt.CancelAuthSession)
 	}
 
 func (s *Server) managementAvailabilityMiddleware() gin.HandlerFunc {
