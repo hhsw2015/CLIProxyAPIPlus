@@ -12,8 +12,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	usqueapi "github.com/hhsw2015/usque/v3/api"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"golang.zx2c4.com/wireguard/tun/netstack"
 )
 

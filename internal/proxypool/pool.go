@@ -62,7 +62,7 @@ func NewPool(dialers []*ECHDialer, warpDialers []*WARPDialer, cfg config.ProxyPo
 			MaxIdleConnsPerHost: 5,
 			IdleConnTimeout:     90 * time.Second,
 			TLSHandshakeTimeout: 10 * time.Second,
-			TLSClientConfig:    &tls.Config{},
+			TLSClientConfig:     &tls.Config{},
 		}
 		e := &entry{
 			name:      d.name,
@@ -86,7 +86,7 @@ func NewPool(dialers []*ECHDialer, warpDialers []*WARPDialer, cfg config.ProxyPo
 			MaxIdleConnsPerHost: 5,
 			IdleConnTimeout:     90 * time.Second,
 			TLSHandshakeTimeout: 10 * time.Second,
-			TLSClientConfig:    &tls.Config{},
+			TLSClientConfig:     &tls.Config{},
 		}
 		e := &entry{
 			name:      w.name,
@@ -104,7 +104,7 @@ func NewPool(dialers []*ECHDialer, warpDialers []*WARPDialer, cfg config.ProxyPo
 			MaxIdleConns:        10,
 			MaxIdleConnsPerHost: 5,
 			IdleConnTimeout:     90 * time.Second,
-			TLSClientConfig:    &tls.Config{},
+			TLSClientConfig:     &tls.Config{},
 		}
 		e := &entry{
 			name:      "direct",
@@ -134,15 +134,14 @@ func (p *Pool) NextTransport() *http.Transport {
 	return p.entries[0].transport
 }
 
-
 // DialContext dials target through the next ECH tunnel (for utls client).
 func (p *Pool) DialContext(ctx context.Context, network, addr string) (net.Conn, error) {
 	if len(p.entries) == 0 {
 		return (&net.Dialer{Timeout: 10 * time.Second}).DialContext(ctx, network, addr)
 	}
 	start := p.counter.Add(1)
-	var targetSideErr error       // remember the first target-side failure
-	targetSideEntries := 0        // how many distinct workers agreed the target is bad
+	var targetSideErr error        // remember the first target-side failure
+	targetSideEntries := 0         // how many distinct workers agreed the target is bad
 	const targetSideRetryLimit = 2 // fail fast after this many workers agree
 	for attempts := 0; attempts < len(p.entries)*2; attempts++ {
 		idx := p.weightedIndex(start + uint64(attempts))

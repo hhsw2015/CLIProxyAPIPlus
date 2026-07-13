@@ -74,10 +74,10 @@ func (a *falAdaptor) FetchTask(baseURL, apiKey, upstreamTaskID, action string) (
 func (a *falAdaptor) ParseTaskResult(respBody []byte) (*TaskInfo, error) {
 	// Fal status response: {"status":"IN_QUEUE|IN_PROGRESS|COMPLETED|FAILED",...}
 	var result struct {
-		Status       string `json:"status"`
-		ResponseURL  string `json:"response_url"`
-		Error        string `json:"error"`
-		QueuePos     int    `json:"queue_position"`
+		Status      string `json:"status"`
+		ResponseURL string `json:"response_url"`
+		Error       string `json:"error"`
+		QueuePos    int    `json:"queue_position"`
 	}
 	if err := json.Unmarshal(respBody, &result); err != nil {
 		return nil, err

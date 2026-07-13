@@ -77,11 +77,11 @@ func (a *sunoAdaptor) FetchTask(baseURL, apiKey, upstreamTaskID, action string) 
 func (a *sunoAdaptor) ParseTaskResult(respBody []byte) (*TaskInfo, error) {
 	// Suno returns an array of clips.
 	var clips []struct {
-		ID        string `json:"id"`
-		Status    string `json:"status"`
-		AudioURL  string `json:"audio_url"`
-		VideoURL  string `json:"video_url"`
-		ErrorMsg  string `json:"error_message"`
+		ID       string `json:"id"`
+		Status   string `json:"status"`
+		AudioURL string `json:"audio_url"`
+		VideoURL string `json:"video_url"`
+		ErrorMsg string `json:"error_message"`
 	}
 	if err := json.Unmarshal(respBody, &clips); err != nil {
 		// Try wrapping format.
@@ -97,11 +97,11 @@ func (a *sunoAdaptor) ParseTaskResult(respBody []byte) (*TaskInfo, error) {
 		}
 		if len(wrapped.Data) > 0 {
 			clips = append(clips, struct {
-				ID        string `json:"id"`
-				Status    string `json:"status"`
-				AudioURL  string `json:"audio_url"`
-				VideoURL  string `json:"video_url"`
-				ErrorMsg  string `json:"error_message"`
+				ID       string `json:"id"`
+				Status   string `json:"status"`
+				AudioURL string `json:"audio_url"`
+				VideoURL string `json:"video_url"`
+				ErrorMsg string `json:"error_message"`
 			}{
 				ID:       wrapped.Data[0].ID,
 				Status:   wrapped.Data[0].Status,

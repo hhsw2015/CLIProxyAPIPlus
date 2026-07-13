@@ -100,9 +100,9 @@ func (a *hailuoAdaptor) FetchTask(baseURL, apiKey, upstreamTaskID, action string
 
 func (a *hailuoAdaptor) ParseTaskResult(respBody []byte) (*TaskInfo, error) {
 	var result struct {
-		TaskID string `json:"task_id"`
-		Status int    `json:"status"`
-		FileID string `json:"file_id"`
+		TaskID   string `json:"task_id"`
+		Status   int    `json:"status"`
+		FileID   string `json:"file_id"`
 		BaseResp struct {
 			StatusCode int    `json:"status_code"`
 			StatusMsg  string `json:"status_msg"`

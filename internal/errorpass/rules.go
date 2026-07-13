@@ -28,7 +28,7 @@ type Rule struct {
 	Priority        int      `yaml:"priority" json:"priority"`
 	ErrorCodes      []int    `yaml:"error-codes" json:"error_codes"`
 	Keywords        []string `yaml:"keywords" json:"keywords"`
-	MatchMode       string   `yaml:"match-mode" json:"match_mode"`       // "any" | "all"
+	MatchMode       string   `yaml:"match-mode" json:"match_mode"` // "any" | "all"
 	Platforms       []string `yaml:"platforms" json:"platforms"`
 	PassthroughCode bool     `yaml:"passthrough-code" json:"passthrough_code"`
 	ResponseCode    *int     `yaml:"response-code" json:"response_code"`

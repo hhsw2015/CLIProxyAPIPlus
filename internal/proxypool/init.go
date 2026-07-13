@@ -75,7 +75,6 @@ func GetTransport() *http.Transport {
 	return globalPool.NextTransport()
 }
 
-
 // GetDialContext returns a DialContext function for the pool (used by utls client).
 func GetDialContext() func(ctx context.Context, network, addr string) (net.Conn, error) {
 	mu.RLock()

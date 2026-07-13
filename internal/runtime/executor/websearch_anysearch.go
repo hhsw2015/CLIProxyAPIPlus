@@ -23,10 +23,10 @@ import (
 const anysearchEndpoint = "https://api.anysearch.com/mcp"
 
 type anysearchRPCRequest struct {
-	JSONRPC string         `json:"jsonrpc"`
-	ID      int            `json:"id"`
-	Method  string         `json:"method"`
-	Params  anysearchCall  `json:"params"`
+	JSONRPC string        `json:"jsonrpc"`
+	ID      int           `json:"id"`
+	Method  string        `json:"method"`
+	Params  anysearchCall `json:"params"`
 }
 
 type anysearchCall struct {

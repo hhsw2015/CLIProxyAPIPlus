@@ -11,7 +11,6 @@ import (
 
 	"github.com/gin-gonic/gin"
 	log "github.com/sirupsen/logrus"
-
 )
 
 // taskRegistry maps platform names to their adaptors.

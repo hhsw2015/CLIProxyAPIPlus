@@ -34,7 +34,7 @@ type Pool struct {
 	mu             sync.RWMutex
 	entries        []Entry
 	dead           map[string]time.Time // entryID → expiry of dead mark
-	preferred      int               // index of sticky preferred cookie, -1 = none
+	preferred      int                  // index of sticky preferred cookie, -1 = none
 	filePath       string
 	healthCheckURL string // base URL for zero-token health checks (from config)
 	modTime        time.Time

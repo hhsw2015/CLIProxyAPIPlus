@@ -60,7 +60,8 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 		inputItems := input.Array()
 		outputCallIDs := make(map[string]struct{})
 		for _, item := range inputItems {
-			if item.Get("type").String() != "function_call_output" {
+			itemType := item.Get("type").String()
+			if itemType != "function_call_output" && itemType != "custom_tool_call_output" {
 				continue
 			}
 			callID := strings.TrimSpace(item.Get("call_id").String())
@@ -138,7 +139,7 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 			if itemType == "" && item.Get("role").String() != "" {
 				itemType = "message"
 			}
-			if itemType != "function_call" {
+			if itemType != "function_call" && itemType != "custom_tool_call" {
 				flushPendingToolCalls()
 			}
 
@@ -175,6 +176,9 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 							imageURL := contentItem.Get("image_url").String()
 							contentPart := []byte(`{"type":"image_url","image_url":{"url":""}}`)
 							contentPart, _ = sjson.SetBytes(contentPart, "image_url.url", imageURL)
+							if detail := contentItem.Get("detail"); detail.Exists() {
+								contentPart, _ = sjson.SetBytes(contentPart, "image_url.detail", detail.String())
+							}
 							message, _ = sjson.SetRawBytes(message, "content.-1", contentPart)
 						}
 						return true
@@ -254,6 +258,33 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 				if len(awaitingToolOutputs) == 0 && len(deferredMessages) > 0 {
 					flushDeferredMessages()
 				}
+
+			case "custom_tool_call":
+				// Codex freeform tool call replay: wrap the raw input so it
+				// matches the {"input": string} function shape used when
+				// converting custom tool definitions.
+				toolCall := []byte(`{"id":"","type":"function","function":{"name":"","arguments":""}}`)
+				toolCall, _ = sjson.SetBytes(toolCall, "id", item.Get("call_id").String())
+				toolCall, _ = sjson.SetBytes(toolCall, "function.name", item.Get("name").String())
+				wrappedArgs, _ := sjson.SetBytes([]byte(`{"input":""}`), "input", item.Get("input").String())
+				toolCall, _ = sjson.SetBytes(toolCall, "function.arguments", string(wrappedArgs))
+				pendingToolCalls = append(pendingToolCalls, gjson.ParseBytes(toolCall).Value())
+				if callID := strings.TrimSpace(item.Get("call_id").String()); callID != "" {
+					pendingToolCallIDs = append(pendingToolCallIDs, callID)
+				}
+
+			case "custom_tool_call_output":
+				toolMessage := []byte(`{"role":"tool","tool_call_id":"","content":""}`)
+				callID := strings.TrimSpace(item.Get("call_id").String())
+				toolMessage, _ = sjson.SetBytes(toolMessage, "tool_call_id", callID)
+				toolMessage, _ = sjson.SetBytes(toolMessage, "content", responsesToolOutputText(item.Get("output")))
+				out, _ = sjson.SetRawBytes(out, "messages.-1", toolMessage)
+				if callID != "" {
+					delete(awaitingToolOutputs, callID)
+				}
+				if len(awaitingToolOutputs) == 0 && len(deferredMessages) > 0 {
+					flushDeferredMessages()
+				}
 			}
 
 		}
@@ -267,46 +298,33 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 		out, _ = sjson.SetRawBytes(out, "messages.-1", msg)
 	}
 
-	// Convert tools from responses format to chat completions format
-	if tools := root.Get("tools"); tools.Exists() && tools.IsArray() {
-		var chatCompletionsTools []interface{}
-
+	// Convert tools from responses format to chat completions format.
+	// Codex Desktop (Responses Lite) delivers tool definitions through an
+	// "additional_tools" input item instead of the top-level "tools" field,
+	// so merge both sources.
+	var chatCompletionsTools []interface{}
+	appendChatTools := func(tools gjson.Result) {
+		if !tools.Exists() || !tools.IsArray() {
+			return
+		}
 		tools.ForEach(func(_, tool gjson.Result) bool {
-			// Built-in tools (e.g. {"type":"web_search"}) are already compatible with the Chat Completions schema.
-			// Only function tools need structural conversion because Chat Completions nests details under "function".
-			toolType := tool.Get("type").String()
-			if toolType != "" && toolType != "function" && tool.IsObject() {
-				// Almost all providers lack built-in tools, so we just ignore them.
-				// chatCompletionsTools = append(chatCompletionsTools, tool.Value())
-				return true
+			for _, chatTool := range convertResponsesToolToOpenAIChatTools(tool) {
+				chatCompletionsTools = append(chatCompletionsTools, gjson.ParseBytes(chatTool).Value())
 			}
-
-			chatTool := []byte(`{"type":"function","function":{}}`)
-
-			// Convert tool structure from responses format to chat completions format
-			function := []byte(`{"name":"","description":"","parameters":{}}`)
-
-			if name := tool.Get("name"); name.Exists() {
-				function, _ = sjson.SetBytes(function, "name", name.String())
-			}
-
-			if description := tool.Get("description"); description.Exists() {
-				function, _ = sjson.SetBytes(function, "description", description.String())
-			}
-
-			if parameters := tool.Get("parameters"); parameters.Exists() {
-				function, _ = sjson.SetRawBytes(function, "parameters", []byte(parameters.Raw))
-			}
-
-			chatTool, _ = sjson.SetRawBytes(chatTool, "function", function)
-			chatCompletionsTools = append(chatCompletionsTools, gjson.ParseBytes(chatTool).Value())
-
 			return true
 		})
-
-		if len(chatCompletionsTools) > 0 {
-			out, _ = sjson.SetBytes(out, "tools", chatCompletionsTools)
-		}
+	}
+	appendChatTools(root.Get("tools"))
+	if input := root.Get("input"); input.Exists() && input.IsArray() {
+		input.ForEach(func(_, item gjson.Result) bool {
+			if item.Get("type").String() == "additional_tools" {
+				appendChatTools(item.Get("tools"))
+			}
+			return true
+		})
+	}
+	if len(chatCompletionsTools) > 0 {
+		out, _ = sjson.SetBytes(out, "tools", chatCompletionsTools)
 	}
 
 	if reasoningEffort := root.Get("reasoning.effort"); reasoningEffort.Exists() {
@@ -318,7 +336,7 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 
 	// Convert tool_choice if present
 	if toolChoice := root.Get("tool_choice"); toolChoice.Exists() {
-		out, _ = sjson.SetBytes(out, "tool_choice", toolChoice.String())
+		out, _ = sjson.SetRawBytes(out, "tool_choice", []byte(toolChoice.Raw))
 	}
 
 	return out

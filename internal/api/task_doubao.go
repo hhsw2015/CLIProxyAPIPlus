@@ -34,9 +34,9 @@ func (a *doubaoAdaptor) BuildRequestHeader(req *http.Request, apiKey string) {
 func (a *doubaoAdaptor) BuildRequestBody(c *gin.Context, body []byte, model string) (io.Reader, string, error) {
 	// Doubao expects: {"model":"xxx","content":[{"type":"text","text":"..."}]}
 	var req struct {
-		Prompt string         `json:"prompt"`
-		Model  string         `json:"model"`
-		Images []string       `json:"images"`
+		Prompt   string         `json:"prompt"`
+		Model    string         `json:"model"`
+		Images   []string       `json:"images"`
 		Metadata map[string]any `json:"metadata"`
 	}
 	if err := json.Unmarshal(body, &req); err != nil {

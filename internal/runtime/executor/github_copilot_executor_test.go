@@ -247,14 +247,14 @@ func TestTranslateGitHubCopilotResponsesNonStreamToClaude_TextMapping(t *testing
 	t.Parallel()
 	resp := []byte(`{"id":"resp_1","model":"gpt-5-codex","output":[{"type":"message","content":[{"type":"output_text","text":"hello"}]}],"usage":{"input_tokens":3,"output_tokens":5}}`)
 	out := translateGitHubCopilotResponsesNonStreamToClaude(resp)
-	if gjson.GetBytes(out,"type").String() != "message" {
-		t.Fatalf("type = %q, want message", gjson.GetBytes(out,"type").String())
+	if gjson.GetBytes(out, "type").String() != "message" {
+		t.Fatalf("type = %q, want message", gjson.GetBytes(out, "type").String())
 	}
-	if gjson.GetBytes(out,"content.0.type").String() != "text" {
-		t.Fatalf("content.0.type = %q, want text", gjson.GetBytes(out,"content.0.type").String())
+	if gjson.GetBytes(out, "content.0.type").String() != "text" {
+		t.Fatalf("content.0.type = %q, want text", gjson.GetBytes(out, "content.0.type").String())
 	}
-	if gjson.GetBytes(out,"content.0.text").String() != "hello" {
-		t.Fatalf("content.0.text = %q, want hello", gjson.GetBytes(out,"content.0.text").String())
+	if gjson.GetBytes(out, "content.0.text").String() != "hello" {
+		t.Fatalf("content.0.text = %q, want hello", gjson.GetBytes(out, "content.0.text").String())
 	}
 }
 
@@ -262,14 +262,14 @@ func TestTranslateGitHubCopilotResponsesNonStreamToClaude_ToolUseMapping(t *test
 	t.Parallel()
 	resp := []byte(`{"id":"resp_2","model":"gpt-5-codex","output":[{"type":"function_call","id":"fc_1","call_id":"call_1","name":"sum","arguments":"{\"a\":1}"}],"usage":{"input_tokens":1,"output_tokens":2}}`)
 	out := translateGitHubCopilotResponsesNonStreamToClaude(resp)
-	if gjson.GetBytes(out,"content.0.type").String() != "tool_use" {
-		t.Fatalf("content.0.type = %q, want tool_use", gjson.GetBytes(out,"content.0.type").String())
+	if gjson.GetBytes(out, "content.0.type").String() != "tool_use" {
+		t.Fatalf("content.0.type = %q, want tool_use", gjson.GetBytes(out, "content.0.type").String())
 	}
-	if gjson.GetBytes(out,"content.0.name").String() != "sum" {
-		t.Fatalf("content.0.name = %q, want sum", gjson.GetBytes(out,"content.0.name").String())
+	if gjson.GetBytes(out, "content.0.name").String() != "sum" {
+		t.Fatalf("content.0.name = %q, want sum", gjson.GetBytes(out, "content.0.name").String())
 	}
-	if gjson.GetBytes(out,"stop_reason").String() != "tool_use" {
-		t.Fatalf("stop_reason = %q, want tool_use", gjson.GetBytes(out,"stop_reason").String())
+	if gjson.GetBytes(out, "stop_reason").String() != "tool_use" {
+		t.Fatalf("stop_reason = %q, want tool_use", gjson.GetBytes(out, "stop_reason").String())
 	}
 }
 
@@ -410,7 +410,6 @@ func TestDetectVisionContent_NoMessages(t *testing.T) {
 		t.Fatal("expected no vision content when messages field is absent")
 	}
 }
-
 
 // --- Tests for applyGitHubCopilotResponsesDefaults ---
 

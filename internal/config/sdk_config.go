@@ -9,10 +9,10 @@ package config
 // Falls back to original body if compression fails or is disabled.
 //
 // Filters are evaluated in this order; failing any one skips compression:
-//   1. Enabled must be true
-//   2. body length must be >= MinBytes (when MinBytes > 0)
-//   3. model must NOT match any Deny glob
-//   4. when Allow is non-empty, model must match at least one Allow glob
+//  1. Enabled must be true
+//  2. body length must be >= MinBytes (when MinBytes > 0)
+//  3. model must NOT match any Deny glob
+//  4. when Allow is non-empty, model must match at least one Allow glob
 //
 // Globs use Go path.Match semantics: '*' / '?' / '[a-z]'. Note that '*' does
 // NOT cross '/' (path.Match treats '/' as a separator), so for vendor/model
@@ -113,13 +113,13 @@ type HeadroomConfig struct {
 // added via WARPInstances. Each tunnel exits at a unique Cloudflare WARP IP and
 // participates in the same weighted round-robin pool as ECH workers.
 type ProxyPoolConfig struct {
-	Enabled        bool              `yaml:"enabled" json:"enabled"`
-	Workers        []ECHWorkerConfig `yaml:"workers" json:"workers"`
-	WARPInstances  []WARPInstance    `yaml:"warp-instances,omitempty" json:"warp-instances,omitempty"`
-	IncludeDirect  bool              `yaml:"include-direct,omitempty" json:"include-direct,omitempty"`
-	WeightECH      int               `yaml:"weight-ech,omitempty" json:"weight-ech,omitempty"`
-	WeightWARP     int               `yaml:"weight-warp,omitempty" json:"weight-warp,omitempty"`
-	WeightDirect   int               `yaml:"weight-direct,omitempty" json:"weight-direct,omitempty"`
+	Enabled       bool              `yaml:"enabled" json:"enabled"`
+	Workers       []ECHWorkerConfig `yaml:"workers" json:"workers"`
+	WARPInstances []WARPInstance    `yaml:"warp-instances,omitempty" json:"warp-instances,omitempty"`
+	IncludeDirect bool              `yaml:"include-direct,omitempty" json:"include-direct,omitempty"`
+	WeightECH     int               `yaml:"weight-ech,omitempty" json:"weight-ech,omitempty"`
+	WeightWARP    int               `yaml:"weight-warp,omitempty" json:"weight-warp,omitempty"`
+	WeightDirect  int               `yaml:"weight-direct,omitempty" json:"weight-direct,omitempty"`
 }
 
 // WARPInstance holds the credentials produced by `usque register` for one
@@ -128,10 +128,10 @@ type ProxyPoolConfig struct {
 // IPv6 mode) but are not required for outbound HTTP/3 SOCKS-equivalent use.
 type WARPInstance struct {
 	Name           string `yaml:"name" json:"name"`
-	PrivateKey     string `yaml:"private-key" json:"private-key"`         // base64-DER ECDSA
+	PrivateKey     string `yaml:"private-key" json:"private-key"`           // base64-DER ECDSA
 	EndpointPubKey string `yaml:"endpoint-pub-key" json:"endpoint-pub-key"` // PEM
-	EndpointV4     string `yaml:"endpoint-v4" json:"endpoint-v4"`         // 162.159.x
-	IPv4           string `yaml:"ipv4" json:"ipv4"`                       // 172.16.x assigned to us
+	EndpointV4     string `yaml:"endpoint-v4" json:"endpoint-v4"`           // 162.159.x
+	IPv4           string `yaml:"ipv4" json:"ipv4"`                         // 172.16.x assigned to us
 	IPv6           string `yaml:"ipv6,omitempty" json:"ipv6,omitempty"`
 	AccessToken    string `yaml:"access-token,omitempty" json:"access-token,omitempty"`
 	ID             string `yaml:"id,omitempty" json:"id,omitempty"`

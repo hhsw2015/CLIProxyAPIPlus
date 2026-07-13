@@ -10,12 +10,12 @@ import (
 
 // Task represents an async media generation task.
 type Task struct {
-	ID         string    `json:"id"`          // Public ID: "task_xxxx"
-	Model      string    `json:"model"`       // Requested model name
-	Platform   string    `json:"platform"`    // Provider platform (sora, kling, suno, etc.)
-	Action     string    `json:"action"`      // e.g. "text2video", "image2video", "generate"
-	Status     string    `json:"status"`      // NOT_START, SUBMITTED, QUEUED, IN_PROGRESS, SUCCESS, FAILURE
-	Progress   string    `json:"progress"`    // "0%".."100%"
+	ID         string    `json:"id"`       // Public ID: "task_xxxx"
+	Model      string    `json:"model"`    // Requested model name
+	Platform   string    `json:"platform"` // Provider platform (sora, kling, suno, etc.)
+	Action     string    `json:"action"`   // e.g. "text2video", "image2video", "generate"
+	Status     string    `json:"status"`   // NOT_START, SUBMITTED, QUEUED, IN_PROGRESS, SUCCESS, FAILURE
+	Progress   string    `json:"progress"` // "0%".."100%"
 	FailReason string    `json:"fail_reason,omitempty"`
 	ResultURL  string    `json:"result_url,omitempty"`
 	Data       []byte    `json:"-"` // Raw upstream response data

@@ -7,8 +7,8 @@ import (
 	"sync"
 	"time"
 
-	log "github.com/sirupsen/logrus"
 	"github.com/glebarez/sqlite"
+	log "github.com/sirupsen/logrus"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 	"gorm.io/gorm/logger"
@@ -39,12 +39,12 @@ type UsageRecord struct {
 
 // ModelPrice stores per-model pricing for cost calculation.
 type ModelPrice struct {
-	ID                   uint    `gorm:"primaryKey"`
-	Model                string  `gorm:"uniqueIndex:uniq_model_price"`
-	InputPricePer1M      float64
-	OutputPricePer1M     float64
-	CacheReadPricePer1M  float64
-	UpdatedAt            time.Time
+	ID                  uint   `gorm:"primaryKey"`
+	Model               string `gorm:"uniqueIndex:uniq_model_price"`
+	InputPricePer1M     float64
+	OutputPricePer1M    float64
+	CacheReadPricePer1M float64
+	UpdatedAt           time.Time
 }
 
 // SQLiteStore handles persistent usage storage.
@@ -271,15 +271,15 @@ func (s *SQLiteStore) QuerySummary(since time.Time) map[string]any {
 	}
 
 	type summaryRow struct {
-		TotalRequests   int64
-		FailedRequests  int64
-		TotalInput      int64
-		TotalOutput     int64
-		TotalReasoning  int64
-		TotalCached     int64
-		TotalTokens     int64
-		TotalCost       float64
-		AvgLatency      float64
+		TotalRequests  int64
+		FailedRequests int64
+		TotalInput     int64
+		TotalOutput    int64
+		TotalReasoning int64
+		TotalCached    int64
+		TotalTokens    int64
+		TotalCost      float64
+		AvgLatency     float64
 	}
 
 	var row summaryRow
@@ -298,15 +298,15 @@ func (s *SQLiteStore) QuerySummary(since time.Time) map[string]any {
 		`).Scan(&row)
 
 	return map[string]any{
-		"total_requests":   row.TotalRequests,
-		"failed_requests":  row.FailedRequests,
-		"total_input":      row.TotalInput,
-		"total_output":     row.TotalOutput,
-		"total_reasoning":  row.TotalReasoning,
-		"total_cached":     row.TotalCached,
-		"total_tokens":     row.TotalTokens,
-		"total_cost_usd":   row.TotalCost,
-		"avg_latency_ms":   row.AvgLatency,
+		"total_requests":  row.TotalRequests,
+		"failed_requests": row.FailedRequests,
+		"total_input":     row.TotalInput,
+		"total_output":    row.TotalOutput,
+		"total_reasoning": row.TotalReasoning,
+		"total_cached":    row.TotalCached,
+		"total_tokens":    row.TotalTokens,
+		"total_cost_usd":  row.TotalCost,
+		"avg_latency_ms":  row.AvgLatency,
 	}
 }
 
@@ -349,12 +349,12 @@ func (s *SQLiteStore) QueryByModel(since time.Time, limit int) []map[string]any 
 	result := make([]map[string]any, len(rows))
 	for i, r := range rows {
 		result[i] = map[string]any{
-			"model":         r.Model,
-			"requests":      r.Requests,
-			"failed":        r.Failed,
-			"input_tokens":  r.InputTokens,
-			"output_tokens": r.OutputTokens,
-			"total_tokens":  r.TotalTokens,
+			"model":          r.Model,
+			"requests":       r.Requests,
+			"failed":         r.Failed,
+			"input_tokens":   r.InputTokens,
+			"output_tokens":  r.OutputTokens,
+			"total_tokens":   r.TotalTokens,
 			"avg_latency_ms": r.AvgLatency,
 		}
 	}
@@ -368,10 +368,10 @@ func (s *SQLiteStore) QueryDaily(since time.Time) []map[string]any {
 	}
 
 	type dailyRow struct {
-		Day          string
-		Requests     int64
-		Failed       int64
-		TotalTokens  int64
+		Day         string
+		Requests    int64
+		Failed      int64
+		TotalTokens int64
 	}
 
 	var rows []dailyRow

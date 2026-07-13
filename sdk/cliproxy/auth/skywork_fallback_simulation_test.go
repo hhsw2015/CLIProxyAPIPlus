@@ -13,12 +13,12 @@ import (
 
 // mockFallbackExecutor simulates an executor that fails for specific models.
 type mockFallbackExecutor struct {
-	failModels map[string]bool    // models that should fail
-	calls      []string           // records which models were attempted
+	failModels map[string]bool // models that should fail
+	calls      []string        // records which models were attempted
 	provider   string
 }
 
-func (m *mockFallbackExecutor) Identifier() string { return m.provider }
+func (m *mockFallbackExecutor) Identifier() string                            { return m.provider }
 func (m *mockFallbackExecutor) PrepareRequest(_ *http.Request, _ *Auth) error { return nil }
 func (m *mockFallbackExecutor) HttpRequest(_ context.Context, _ *Auth, _ *http.Request) (*http.Response, error) {
 	return nil, nil
@@ -54,8 +54,8 @@ type mockStatusError struct {
 	msg  string
 }
 
-func (e *mockStatusError) Error() string            { return e.msg }
-func (e *mockStatusError) StatusCode() int           { return e.code }
+func (e *mockStatusError) Error() string              { return e.msg }
+func (e *mockStatusError) StatusCode() int            { return e.code }
 func (e *mockStatusError) RetryAfter() *time.Duration { return nil }
 
 func TestSkyworkFallback_ClaudeFailsToGPT(t *testing.T) {
