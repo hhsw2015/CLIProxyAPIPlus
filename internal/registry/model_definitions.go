@@ -225,7 +225,6 @@ func GetCodeBuddyModels() []*ModelInfo {
 	}
 }
 
-
 // AntigravityWebSearchModelFor returns the Antigravity model that should run a
 // native web search request for modelID.
 func AntigravityWebSearchModelFor(modelID string) string {

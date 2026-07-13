@@ -201,7 +201,6 @@ const (
 	formatAnthropic
 )
 
-
 // classifyRequest returns the body format for endpoints headroom-ffi knows
 // how to compress. Returns formatNone for token validation, model listing,
 // OAuth refresh, count_tokens, Gemini, etc. — those pass through unchanged.

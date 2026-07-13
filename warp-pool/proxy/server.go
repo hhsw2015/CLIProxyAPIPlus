@@ -31,17 +31,17 @@ type route struct {
 	addr       string // backend address for routeExtra (e.g. "127.0.0.1:30004")
 	name       string // label for logging
 	process    *process.Process
-	weight     int    // higher = more traffic; 0 treated as 1
-	echManaged bool   // true if managed by ech manager (skip health probe)
+	weight     int  // higher = more traffic; 0 treated as 1
+	echManaged bool // true if managed by ech manager (skip health probe)
 }
 
 // RouteStats holds per-route request statistics.
 type RouteStats struct {
-	Name       string `json:"name"`
-	Kind       string `json:"kind"`
-	Total      int64  `json:"total_requests"`
-	Active     int64  `json:"active_connections"`
-	Healthy    bool   `json:"healthy"`
+	Name    string `json:"name"`
+	Kind    string `json:"kind"`
+	Total   int64  `json:"total_requests"`
+	Active  int64  `json:"active_connections"`
+	Healthy bool   `json:"healthy"`
 }
 
 // routeState holds runtime counters for a route entry.
@@ -105,7 +105,8 @@ func NewWithOptions(p *pool.Pool, socksPort, httpPort int, includeDirect bool, e
 // buildRoutes constructs the weighted round-robin route table.
 // Each route is repeated by its weight, then interleaved for even distribution.
 // Example with weights ech=3, warp=2, direct=1:
-//   [ech-1, warp-0, ech-2, warp-1, ech-3, warp-2, ech-1, direct, ech-2, warp-0, ech-3, warp-1, ...]
+//
+//	[ech-1, warp-0, ech-2, warp-1, ech-3, warp-2, ech-1, direct, ech-2, warp-0, ech-3, warp-1, ...]
 func (s *Server) buildRoutes(includeDirect bool, extras []ExtraBackend, weights RouteWeights) {
 	if weights.ECH <= 0 {
 		weights.ECH = 3
@@ -730,7 +731,7 @@ func (s *Server) handleHTTPConnect(w http.ResponseWriter, r *http.Request) {
 
 // handleHTTPViaBackend forwards a plain HTTP request through an external proxy.
 func (s *Server) handleHTTPViaBackend(w http.ResponseWriter, r *http.Request, backendAddr string) {
-	proxyURL, _ := url.Parse(fmt.Sprintf("socks5://"+backendAddr))
+	proxyURL, _ := url.Parse(fmt.Sprintf("socks5://" + backendAddr))
 	client := &http.Client{
 		Transport: &http.Transport{Proxy: http.ProxyURL(proxyURL)},
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {

@@ -554,7 +554,7 @@ func codexReasoningReplayInsertIndex(inputItems []gjson.Result, replayItems [][]
 	}
 	for index := len(inputItems) - 1; index >= 0; index-- {
 		inputItem := inputItems[index]
-		if strings.TrimSpace(inputItem.Get("type").String()) == "message" && strings.TrimSpace(inputItem.Get("role").String()) == "assistant" {
+		if role, ok := codexReplayMessageRole(inputItem); ok && role == "assistant" {
 			return index
 		}
 	}
@@ -623,15 +623,25 @@ func codexReplayOutputCallIDs(inputItems []gjson.Result) map[string]string {
 }
 
 func shouldInsertCodexReasoningReplayBefore(item gjson.Result) bool {
-	if strings.TrimSpace(item.Get("type").String()) != "message" {
+	role, ok := codexReplayMessageRole(item)
+	if !ok {
 		return true
 	}
-	switch strings.TrimSpace(item.Get("role").String()) {
+	switch role {
 	case "developer", "system":
 		return false
 	default:
 		return true
 	}
+}
+
+func codexReplayMessageRole(item gjson.Result) (string, bool) {
+	itemType := strings.TrimSpace(item.Get("type").String())
+	role := strings.ToLower(strings.TrimSpace(item.Get("role").String()))
+	if role == "" || (itemType != "" && itemType != "message") {
+		return "", false
+	}
+	return role, true
 }
 
 func codexReplayToolCallKeys(item gjson.Result) []string {
@@ -972,9 +982,6 @@ func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.A
 	body, _ = sjson.SetBytes(body, "model", baseModel)
 	body, _ = sjson.DeleteBytes(body, "stream")
 	body = normalizeCodexInstructions(body)
-	if e.cfg == nil || e.cfg.DisableImageGeneration == config.DisableImageGenerationOff {
-		body = ensureImageGenerationTool(body, baseModel, auth, opts.Headers)
-	}
 	body = sanitizeOpenAIResponsesReasoningEncryptedContent(ctx, "codex executor", body)
 	body = normalizeCodexParallelToolCallsForTools(body)
 	reporter.SetTranslatedReasoningEffort(body, to.String())
@@ -1305,7 +1312,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		if md != nil {
 			if remaining := md.Flush(); remaining != "" {
 				flushData, _ := sjson.SetBytes([]byte(`{"type":"response.output_text.delta"}`), "delta", remaining)
-					synthLine := append([]byte("data: "), flushData...)
+				synthLine := append([]byte("data: "), flushData...)
 				chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, originalPayload, body, synthLine, &param)
 				for i := range chunks {
 					select {

@@ -4238,13 +4238,13 @@ func isRequestScopedNotFoundResultError(err *Error) bool {
 // avoid punishing a healthy auth just because the client hung up early.
 //
 // Detection priority:
-//   1. Error.Code == "client_canceled" — the executor layer can stamp this
-//      when it observes errors.Is(origErr, context.Canceled) tied to the
-//      client's request context. This is the preferred, unambiguous form.
-//   2. Message equals or ends in ": context canceled" — best-effort fallback
-//      for executors that haven't been updated to set Code. Deliberately
-//      strict (equality / suffix) so a wrapped upstream error whose body
-//      happens to contain the phrase mid-string doesn't get misclassified.
+//  1. Error.Code == "client_canceled" — the executor layer can stamp this
+//     when it observes errors.Is(origErr, context.Canceled) tied to the
+//     client's request context. This is the preferred, unambiguous form.
+//  2. Message equals or ends in ": context canceled" — best-effort fallback
+//     for executors that haven't been updated to set Code. Deliberately
+//     strict (equality / suffix) so a wrapped upstream error whose body
+//     happens to contain the phrase mid-string doesn't get misclassified.
 //
 // Deliberately NOT matched:
 //   - context.DeadlineExceeded — may originate from a server-side proxy or
@@ -4630,6 +4630,16 @@ func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, op
 		m.mu.Unlock()
 	}
 	return authCopy, executor, nil
+}
+
+// SelectAuth selects one credential through the configured scheduling strategy.
+// It does not execute or alter the selected credential's result state.
+func (m *Manager) SelectAuth(ctx context.Context, provider, model string, opts cliproxyexecutor.Options) (*Auth, error) {
+	selected, _, errPick := m.pickNext(ctx, provider, model, opts, nil)
+	if errPick != nil {
+		return nil, errPick
+	}
+	return selected, nil
 }
 
 func (m *Manager) pickNext(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, ProviderExecutor, error) {

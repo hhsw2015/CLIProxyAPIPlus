@@ -14,17 +14,17 @@ import (
 
 // Manager starts and supervises ech-workers child processes.
 type Manager struct {
-	cfg     config.ECHWorkersConfig
-	procs   []*worker
-	mu      sync.Mutex
-	cancel  context.CancelFunc
+	cfg    config.ECHWorkersConfig
+	procs  []*worker
+	mu     sync.Mutex
+	cancel context.CancelFunc
 }
 
 type worker struct {
-	cfg    config.ECHWorkerConfig
+	cfg     config.ECHWorkerConfig
 	binPath string
-	cmd    *exec.Cmd
-	cancel context.CancelFunc
+	cmd     *exec.Cmd
+	cancel  context.CancelFunc
 }
 
 // New creates a new ech-workers manager.

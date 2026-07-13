@@ -109,9 +109,9 @@ func (c *wsConn) keepAlive() {
 // net.Conn interface stubs
 func (c *wsConn) LocalAddr() net.Addr                { return wsAddr{c.name} }
 func (c *wsConn) RemoteAddr() net.Addr               { return wsAddr{c.target} }
-func (c *wsConn) SetDeadline(t time.Time) error       { return nil }
-func (c *wsConn) SetReadDeadline(t time.Time) error   { return nil }
-func (c *wsConn) SetWriteDeadline(t time.Time) error  { return nil }
+func (c *wsConn) SetDeadline(t time.Time) error      { return nil }
+func (c *wsConn) SetReadDeadline(t time.Time) error  { return nil }
+func (c *wsConn) SetWriteDeadline(t time.Time) error { return nil }
 
 type wsAddr struct{ s string }
 

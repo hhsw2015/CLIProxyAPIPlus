@@ -11,7 +11,7 @@ import (
 type contextKey string
 
 const (
-	ctxKeyIsClaudeCode    contextKey = "clientdetect.isClaudeCode"
+	ctxKeyIsClaudeCode      contextKey = "clientdetect.isClaudeCode"
 	ctxKeyClaudeCodeVersion contextKey = "clientdetect.claudeCodeVersion"
 )
 

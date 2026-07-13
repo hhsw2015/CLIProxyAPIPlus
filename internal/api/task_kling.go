@@ -109,9 +109,9 @@ func (a *klingAdaptor) ParseTaskResult(respBody []byte) (*TaskInfo, error) {
 	var result struct {
 		Code int `json:"code"`
 		Data struct {
-			TaskID    string `json:"task_id"`
+			TaskID     string `json:"task_id"`
 			TaskStatus string `json:"task_status"`
-			VideoURL  string `json:"video_url"`
+			VideoURL   string `json:"video_url"`
 		} `json:"data"`
 		Message string `json:"message"`
 	}

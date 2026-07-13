@@ -13,9 +13,9 @@ import (
 )
 
 type tinyfishSearchResponse struct {
-	Query        string               `json:"query"`
-	Results      []tinyfishResult     `json:"results"`
-	TotalResults int                  `json:"total_results"`
+	Query        string           `json:"query"`
+	Results      []tinyfishResult `json:"results"`
+	TotalResults int              `json:"total_results"`
 }
 
 type tinyfishResult struct {

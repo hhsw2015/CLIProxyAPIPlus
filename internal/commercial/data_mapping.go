@@ -21,10 +21,10 @@ const (
 	cpaAccountTypeAPIKey  = "apikey"
 	cpaAccountTypeBedrock = "bedrock"
 
-	extraKeyCPASource    = "cpa_source"
-	extraKeyCPAStableID  = "cpa_stable_id"
-	extraKeyCPAImported  = "cpa_imported_at"
-	extraKeyCPAProvider  = "cpa_provider"
+	extraKeyCPASource   = "cpa_source"
+	extraKeyCPAStableID = "cpa_stable_id"
+	extraKeyCPAImported = "cpa_imported_at"
+	extraKeyCPAProvider = "cpa_provider"
 )
 
 // AccountMapping holds the converted Sub2API input alongside CPA metadata.

@@ -7,10 +7,10 @@ import (
 )
 
 type ProxyConfig struct {
-	SocksPort     int             `yaml:"socks_port"`
-	HTTPPort      int             `yaml:"http_port"`
-	IncludeDirect bool            `yaml:"include_direct"`
-	ExtraBackends []ExtraBackend  `yaml:"extra_backends"`
+	SocksPort     int            `yaml:"socks_port"`
+	HTTPPort      int            `yaml:"http_port"`
+	IncludeDirect bool           `yaml:"include_direct"`
+	ExtraBackends []ExtraBackend `yaml:"extra_backends"`
 	// Routing weights: higher = more traffic. Default: ech=3, warp=2, direct=1
 	WeightECH    int `yaml:"weight_ech"`
 	WeightWarp   int `yaml:"weight_warp"`
@@ -25,18 +25,18 @@ type ExtraBackend struct {
 
 // ECHWorkerConfig defines an ech-workers instance to be managed by warp-pool.
 type ECHWorkerConfig struct {
-	Name   string `yaml:"name"`             // display name
-	Domain string `yaml:"domain"`           // e.g. "ech.playingapi.tech:443"
-	IP     string `yaml:"ip,omitempty"`     // optional: pin server IP
-	Token  string `yaml:"token"`            // auth token
-	Port   int    `yaml:"port"`             // local listen port (SOCKS5)
+	Name   string `yaml:"name"`         // display name
+	Domain string `yaml:"domain"`       // e.g. "ech.playingapi.tech:443"
+	IP     string `yaml:"ip,omitempty"` // optional: pin server IP
+	Token  string `yaml:"token"`        // auth token
+	Port   int    `yaml:"port"`         // local listen port (SOCKS5)
 }
 
 // ECHWorkersConfig holds all ech-workers instances.
 type ECHWorkersConfig struct {
-	Enabled  bool              `yaml:"enabled"`
-	BinPath  string            `yaml:"bin_path"`  // path to ech-workers binary
-	Workers  []ECHWorkerConfig `yaml:"workers"`
+	Enabled bool              `yaml:"enabled"`
+	BinPath string            `yaml:"bin_path"` // path to ech-workers binary
+	Workers []ECHWorkerConfig `yaml:"workers"`
 }
 
 type APIConfig struct {
@@ -72,15 +72,15 @@ type ResourceLimitsConfig struct {
 }
 
 type Config struct {
-	PoolSize            int              `yaml:"pool_size"`
-	WarpBin             string           `yaml:"warp_bin"`
-	DataDir             string           `yaml:"data_dir"`
-	SocksBasePort       int              `yaml:"socks_base_port"`
-	HTTPBasePort        int              `yaml:"http_base_port"`
-	Proxy               ProxyConfig      `yaml:"proxy"`
-	API                 APIConfig        `yaml:"api"`
-	HealthCheckInterval int              `yaml:"health_check_interval"`
-	LicenseKeyURL       string           `yaml:"license_key_url"`
+	PoolSize            int                  `yaml:"pool_size"`
+	WarpBin             string               `yaml:"warp_bin"`
+	DataDir             string               `yaml:"data_dir"`
+	SocksBasePort       int                  `yaml:"socks_base_port"`
+	HTTPBasePort        int                  `yaml:"http_base_port"`
+	Proxy               ProxyConfig          `yaml:"proxy"`
+	API                 APIConfig            `yaml:"api"`
+	HealthCheckInterval int                  `yaml:"health_check_interval"`
+	LicenseKeyURL       string               `yaml:"license_key_url"`
 	Rotation            RotationConfig       `yaml:"rotation"`
 	Direct              DirectConfig         `yaml:"direct"`
 	UniqueIPv4          UniqueIPv4Config     `yaml:"unique_ipv4"`

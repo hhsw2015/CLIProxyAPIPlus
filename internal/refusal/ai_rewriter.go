@@ -13,12 +13,12 @@ import (
 
 // AIRewriterConfig holds the settings for calling an external model.
 type AIRewriterConfig struct {
-	Endpoint       string        // OpenAI-compatible chat completions URL
-	APIKey         string        // Bearer token (empty = no auth)
-	Model          string        // Model identifier
-	Timeout        time.Duration // Request timeout
-	UserMessage    string        // The original user message (for context)
-	RefusalText    string        // The refusal text that was detected
+	Endpoint    string        // OpenAI-compatible chat completions URL
+	APIKey      string        // Bearer token (empty = no auth)
+	Model       string        // Model identifier
+	Timeout     time.Duration // Request timeout
+	UserMessage string        // The original user message (for context)
+	RefusalText string        // The refusal text that was detected
 }
 
 // RewriteSystemPrompt is the system prompt used to generate context-aware

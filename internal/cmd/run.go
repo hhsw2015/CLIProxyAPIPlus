@@ -38,7 +38,6 @@ func StartServiceWithPluginHost(cfg *config.Config, configPath string, localPass
 	var commercialAuth gin.HandlerFunc
 	var commercialJWTValidator func(string) bool
 
-
 	builder := cliproxy.NewBuilder().
 		WithConfig(cfg).
 		WithConfigPath(configPath).

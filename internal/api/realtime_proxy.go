@@ -195,4 +195,3 @@ func httpToWS(rawURL string) string {
 	}
 	return parsed.String()
 }
-

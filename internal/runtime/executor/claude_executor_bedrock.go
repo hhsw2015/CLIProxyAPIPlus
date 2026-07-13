@@ -144,18 +144,18 @@ var claudeVersionRe = regexp.MustCompile(`(?i)-(\d+)([-\.])(\d+)((?:-\d{8})?)$`)
 // will cause a 400 ValidationException. Updated from the actual Bedrock error
 // messages as new tool types ship.
 var bedrockSupportedToolTypes = map[string]struct{}{
-	"bash_20250124":                    {},
-	"custom":                           {},
-	"memory_20250818":                  {},
-	"text_editor_20250124":             {},
-	"text_editor_20250429":             {},
-	"text_editor_20250728":             {},
-	"tool_search_tool_bm25":            {},
-	"tool_search_tool_bm25_20251119":   {},
-	"tool_search_tool_regex":           {},
-	"tool_search_tool_regex_20251119":  {},
-	"computer_20250124":                {},
-	"mcp":                              {},
+	"bash_20250124":                   {},
+	"custom":                          {},
+	"memory_20250818":                 {},
+	"text_editor_20250124":            {},
+	"text_editor_20250429":            {},
+	"text_editor_20250728":            {},
+	"tool_search_tool_bm25":           {},
+	"tool_search_tool_bm25_20251119":  {},
+	"tool_search_tool_regex":          {},
+	"tool_search_tool_regex_20251119": {},
+	"computer_20250124":               {},
+	"mcp":                             {},
 	// web_search_20250305 deliberately absent — Bedrock rejects it.
 }
 

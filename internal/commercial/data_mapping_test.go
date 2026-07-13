@@ -20,9 +20,9 @@ func TestConvertPriority(t *testing.T) {
 		{8, 10},
 		{9, 5},
 		{10, 1},
-		{11, 1},   // clamped to 1
-		{20, 1},   // clamped to 1
-		{-5, 75},  // negative CPA priority
+		{11, 1},    // clamped to 1
+		{20, 1},    // clamped to 1
+		{-5, 75},   // negative CPA priority
 		{-20, 100}, // clamped to 100
 	}
 	for _, tt := range tests {

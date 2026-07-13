@@ -15,11 +15,11 @@ import (
 // a model failure on one account means the same model will fail on all accounts.
 // Uses exponential backoff: 2min → 5min → 10min (cap), reset on success.
 var skyworkGlobalCooldown = struct {
-	mu           sync.RWMutex
-	entries      map[string]time.Time // model name -> cooldown expiry
+	mu            sync.RWMutex
+	entries       map[string]time.Time // model name -> cooldown expiry
 	failureCounts map[string]int       // model name -> consecutive failure count
 }{
-	entries:      make(map[string]time.Time),
+	entries:       make(map[string]time.Time),
 	failureCounts: make(map[string]int),
 }
 
@@ -45,10 +45,10 @@ func MarkSkyworkModelCooldown(model string) {
 	skyworkGlobalCooldown.failureCounts[model] = count + 1
 	skyworkGlobalCooldown.mu.Unlock()
 	log.WithFields(log.Fields{
-		"event":          "skywork-global-cooldown",
-		"model":          model,
-		"duration":       duration.String(),
-		"failure_count":  count + 1,
+		"event":         "skywork-global-cooldown",
+		"model":         model,
+		"duration":      duration.String(),
+		"failure_count": count + 1,
 	}).Infof("[skywork-fallback] %s globally cooled down for %s (failure #%d)", model, duration, count+1)
 }
 
