@@ -1319,6 +1319,7 @@ func normalizeThinkingForAdaptiveModels(body []byte, model string) []byte {
 //     because Anthropic rejects them alongside active thinking.
 func normalizeClaudeSamplingForUpstream(body []byte) []byte {
 	body, _ = sjson.DeleteBytes(body, "temperature")
+	body, _ = sjson.DeleteBytes(body, "top_p")
 
 	thinkingType := strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "thinking.type").String()))
 	switch thinkingType {
