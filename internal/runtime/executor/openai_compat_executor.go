@@ -136,6 +136,14 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	}
 	reporter.SetTranslatedReasoningEffort(translated, to.String())
 
+	// context_management is an Anthropic Messages / OpenAI Responses field that
+	// most vanilla OpenAI chat/completions upstreams (iamhc, generic compat
+	// relays) reject with HTTP 400 "context_management: Extra inputs are not
+	// permitted." The field is a request-scope hint (compaction window), not a
+	// semantic part of the conversation, so dropping it is safe on the
+	// chat/completions path.
+	translated, _ = sjson.DeleteBytes(translated, "context_management")
+
 	// Proactive strip: many openai-compat upstreams (cookie-pool, TaijiAI)
 	// front Bedrock internally and forward thinking/redacted_thinking blocks
 	// untouched. If a prior request on this session already saw the matching
@@ -369,6 +377,9 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	// are captured even when the upstream is an OpenAI-compatible provider.
 	translated, _ = sjson.SetBytes(translated, "stream_options.include_usage", true)
 	reporter.SetTranslatedReasoningEffort(translated, to.String())
+
+	// context_management drop (see Execute path for full comment).
+	translated, _ = sjson.DeleteBytes(translated, "context_management")
 
 	// Proactive strip (stream path): mirror the non-stream branch — third-party
 	// proxies fronting Bedrock reject thinking/redacted_thinking blobs the same
