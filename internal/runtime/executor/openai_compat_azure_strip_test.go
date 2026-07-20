@@ -85,3 +85,45 @@ func TestStripReasoningEffortIfToolsPresent(t *testing.T) {
 		}
 	})
 }
+
+func TestRenameMaxTokensForReasoningModels(t *testing.T) {
+	t.Run("renames max_tokens to max_completion_tokens", func(t *testing.T) {
+		in := []byte(`{"max_tokens":100,"model":"gpt-5.6-sol"}`)
+		out := renameMaxTokensForReasoningModels(in)
+		if gjson.GetBytes(out, "max_tokens").Exists() {
+			t.Errorf("max_tokens should be removed, got: %s", out)
+		}
+		if v := gjson.GetBytes(out, "max_completion_tokens"); !v.Exists() || v.Int() != 100 {
+			t.Errorf("max_completion_tokens = %v, want 100", v)
+		}
+	})
+
+	t.Run("keeps max_completion_tokens if already present and drops legacy", func(t *testing.T) {
+		in := []byte(`{"max_tokens":50,"max_completion_tokens":200}`)
+		out := renameMaxTokensForReasoningModels(in)
+		if gjson.GetBytes(out, "max_tokens").Exists() {
+			t.Errorf("max_tokens should be removed, got: %s", out)
+		}
+		if v := gjson.GetBytes(out, "max_completion_tokens"); v.Int() != 200 {
+			t.Errorf("max_completion_tokens = %v, want 200", v)
+		}
+	})
+
+	t.Run("no max_tokens = no-op", func(t *testing.T) {
+		in := []byte(`{"messages":[]}`)
+		before := string(in)
+		out := renameMaxTokensForReasoningModels(in)
+		if string(out) != before {
+			t.Errorf("mutation without max_tokens: %s -> %s", before, out)
+		}
+	})
+
+	t.Run("empty payload", func(t *testing.T) {
+		if got := renameMaxTokensForReasoningModels(nil); got != nil {
+			t.Errorf("nil input should stay nil, got %v", got)
+		}
+		if got := renameMaxTokensForReasoningModels([]byte{}); len(got) != 0 {
+			t.Errorf("empty input should stay empty, got %v", got)
+		}
+	})
+}
