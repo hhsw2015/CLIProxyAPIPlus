@@ -152,6 +152,7 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	// accepts both fields together, so we only strip on the chat/completions path.
 	if isAzureOpenAIBaseURL(baseURL) && strings.Contains(endpoint, "/chat/completions") {
 		translated = stripReasoningEffortIfToolsPresent(translated)
+		translated = renameMaxTokensForReasoningModels(translated)
 	}
 
 	url := strings.TrimSuffix(baseURL, "/") + endpoint
@@ -390,6 +391,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	// guard as the non-stream Execute path — see stripReasoningEffortIfToolsPresent.
 	if isAzureOpenAIBaseURL(baseURL) && strings.Contains(streamEndpoint, "/chat/completions") {
 		translated = stripReasoningEffortIfToolsPresent(translated)
+		translated = renameMaxTokensForReasoningModels(translated)
 	}
 
 	url := strings.TrimSuffix(baseURL, "/") + streamEndpoint
@@ -1019,4 +1021,33 @@ func stripReasoningEffortIfToolsPresent(body []byte) []byte {
 		}
 	}
 	return stripped
+}
+
+// renameMaxTokensForReasoningModels rewrites the legacy `max_tokens` field to
+// `max_completion_tokens` when the payload does not already carry the newer
+// name. Azure gpt-5.x reasoning models reject `max_tokens` with HTTP 400
+// ("Unsupported parameter: 'max_tokens' is not supported with this model.
+// Use 'max_completion_tokens' instead."). Anthropic Messages API only knows
+// `max_tokens`, so client requests translated through the openai-compat
+// executor arrive with the old field name and would be rejected upstream.
+// Rewriting in one place keeps the translation layer agnostic to the model.
+func renameMaxTokensForReasoningModels(body []byte) []byte {
+	if len(body) == 0 {
+		return body
+	}
+	oldField := gjson.GetBytes(body, "max_tokens")
+	if !oldField.Exists() {
+		return body
+	}
+	if gjson.GetBytes(body, "max_completion_tokens").Exists() {
+		// Caller already supplied the correct field; just drop the alias.
+		out, _ := sjson.DeleteBytes(body, "max_tokens")
+		return out
+	}
+	out, err := sjson.SetRawBytes(body, "max_completion_tokens", []byte(oldField.Raw))
+	if err != nil {
+		return body
+	}
+	out, _ = sjson.DeleteBytes(out, "max_tokens")
+	return out
 }
