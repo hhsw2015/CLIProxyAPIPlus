@@ -298,7 +298,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	originalPayload := originalPayloadSource
 	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, stream)
 	body := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, stream)
-	body, _ = sjson.SetBytes(body, "model", upstreamModel)
+	body = helps.SetStringIfDifferent(body, "model", upstreamModel)
 
 	body, err = thinking.ApplyThinking(body, req.Model, from.String(), to.String(), e.Identifier())
 	if err != nil {
@@ -331,6 +331,13 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	// Disable thinking if tool_choice forces tool use (Anthropic API constraint)
 	body = disableThinkingIfToolChoiceForced(body)
 	body = normalizeClaudeSamplingForUpstream(body)
+	// context_management is Claude Code's compaction hint. api.anthropic.com
+	// accepts it, but third-party relays (TaijiAI, OpenRouter, etc.) return
+	// 400 "context_management: Extra inputs are not permitted." Strip on
+	// non-Anthropic bases only so real Anthropic keeps the field.
+	if !isAnthropicHostBaseURL(baseURL) {
+		body, _ = sjson.DeleteBytes(body, "context_management")
+	}
 	// Claude OAuth (and this executor's redact-thinking beta) returns signature-only
 	// thinking blocks unless display is set to "summarized".
 	body = ensureClaudeThinkingDisplay(body)
@@ -549,7 +556,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	originalPayload := originalPayloadSource
 	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, true)
 	body := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, true)
-	body, _ = sjson.SetBytes(body, "model", upstreamModel)
+	body = helps.SetStringIfDifferent(body, "model", upstreamModel)
 
 	body, err = thinking.ApplyThinking(body, req.Model, from.String(), to.String(), e.Identifier())
 	if err != nil {
@@ -582,6 +589,13 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	// Disable thinking if tool_choice forces tool use (Anthropic API constraint)
 	body = disableThinkingIfToolChoiceForced(body)
 	body = normalizeClaudeSamplingForUpstream(body)
+	// context_management is Claude Code's compaction hint. api.anthropic.com
+	// accepts it, but third-party relays (TaijiAI, OpenRouter, etc.) return
+	// 400 "context_management: Extra inputs are not permitted." Strip on
+	// non-Anthropic bases only so real Anthropic keeps the field.
+	if !isAnthropicHostBaseURL(baseURL) {
+		body, _ = sjson.DeleteBytes(body, "context_management")
+	}
 	// Claude OAuth (and this executor's redact-thinking beta) returns signature-only
 	// thinking blocks unless display is set to "summarized".
 	body = ensureClaudeThinkingDisplay(body)
@@ -1053,7 +1067,7 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	// Use streaming translation to preserve function calling, except for claude.
 	stream := from != to
 	body := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, stream)
-	body, _ = sjson.SetBytes(body, "model", upstreamModel)
+	body = helps.SetStringIfDifferent(body, "model", upstreamModel)
 	if rebuildMidSystemMessageEnabled(e.cfg, auth) {
 		body = rebuildMidSystemMessagesToTopLevel(body)
 	}
@@ -1726,6 +1740,19 @@ func relayLacksCountTokens(baseURL string) bool {
 	return strings.Contains(baseURL, knownNoCountTokens)
 }
 
+// isAnthropicHostBaseURL reports whether a base URL points at Anthropic's
+// official API endpoint. Only real Anthropic accepts every Anthropic Messages
+// field (context_management, betas, anthropic_beta); third-party relays reject
+// unknown fields. Anthropic uses api.anthropic.com; some clients also point at
+// api-*.anthropic.com previews.
+func isAnthropicHostBaseURL(baseURL string) bool {
+	if baseURL == "" {
+		return false
+	}
+	lower := strings.ToLower(baseURL)
+	return strings.Contains(lower, "anthropic.com")
+}
+
 func claudeCreds(a *cliproxyauth.Auth) (apiKey, baseURL string) {
 	if a == nil {
 		return "", ""
@@ -1897,8 +1924,22 @@ func remapOAuthToolNames(body []byte) ([]byte, map[string]string) {
 	// stale snapshot will preserve removals but overwrite renamed names back to their
 	// original lowercase values.
 	tools := gjson.GetBytes(body, "tools")
+	toolsNeedRewrite := false
 	if tools.Exists() && tools.IsArray() {
-
+		tools.ForEach(func(_, tool gjson.Result) bool {
+			if tool.Get("type").Exists() && tool.Get("type").String() != "" {
+				return true
+			}
+			name := tool.Get("name").String()
+			toolsNeedRewrite = oauthToolsToRemove[name]
+			if !toolsNeedRewrite {
+				newName, ok := oauthToolRenameMap[name]
+				toolsNeedRewrite = ok && newName != name
+			}
+			return !toolsNeedRewrite
+		})
+	}
+	if toolsNeedRewrite {
 		var toolsJSON strings.Builder
 		toolsJSON.WriteByte('[')
 		toolCount := 0
