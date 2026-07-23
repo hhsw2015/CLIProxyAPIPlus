@@ -2405,3 +2405,34 @@ func (h *BaseAPIHandler) LoggingAPIResponseError(ctx context.Context, err *inter
 // APIHandlerCancelFunc is a function type for canceling an API handler's context.
 // It can optionally accept parameters, which are used for logging the response.
 type APIHandlerCancelFunc func(params ...interface{})
+
+// preparedModelRouteContextKey stores a pre-resolved model-router decision so
+// that both the caller (which stamps the route on the ctx) and the executor
+// (which needs to honor it) see the same decision. Ported from upstream to
+// support openai_responses_websocket.PrepareStreamModelRoute callers.
+type preparedModelRouteContextKey struct{}
+
+// PrepareStreamModelRoute resolves a stream route once and stores it on the
+// returned context for execution. The boolean reports whether the route
+// overrides normal model-to-provider resolution. Consumed by
+// openai_responses_websocket.go and any other stream handler that needs a
+// stable route before the ExecuteStream call.
+func (h *BaseAPIHandler) PrepareStreamModelRoute(ctx context.Context, handlerType string, modelName string, rawJSON []byte) (context.Context, bool) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	decision := h.applyModelRouter(ctx, handlerType, modelName, rawJSON, true, modelExecutionOptions{})
+	ctx = context.WithValue(ctx, preparedModelRouteContextKey{}, decision)
+	hasOverride := strings.TrimSpace(decision.ExecutorPluginID) != "" || strings.TrimSpace(decision.Provider) != ""
+	return ctx, hasOverride
+}
+
+// preparedModelRouteFromContext retrieves a decision previously stamped by
+// PrepareStreamModelRoute. Returns zero value and false if none present.
+func preparedModelRouteFromContext(ctx context.Context) (modelRouteDecision, bool) {
+	if ctx == nil {
+		return modelRouteDecision{}, false
+	}
+	decision, ok := ctx.Value(preparedModelRouteContextKey{}).(modelRouteDecision)
+	return decision, ok
+}

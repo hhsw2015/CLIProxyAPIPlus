@@ -110,6 +110,18 @@ type WatcherWrapper struct {
 	notifyTokenRefreshed  func(tokenID, accessToken, refreshToken, expiresAt string)
 	dispatchPersistedAuth func(update watcher.AuthUpdate) bool
 	setPluginAuthParser   func(parser PluginAuthParser)
+	reloadConfigIfChanged func()
+}
+
+// ReloadConfigIfChanged asks the underlying watcher to reload config from disk
+// if the on-disk file changed since the last snapshot. Returns false when the
+// hook is not wired up. Ported from upstream for service.go's config reload.
+func (w *WatcherWrapper) ReloadConfigIfChanged() bool {
+	if w == nil || w.reloadConfigIfChanged == nil {
+		return false
+	}
+	w.reloadConfigIfChanged()
+	return true
 }
 
 // Start proxies to the underlying watcher Start implementation.
