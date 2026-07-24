@@ -223,15 +223,17 @@ codex:
     enabled: false
     # Maximum concurrent media sessions. Zero uses the default of 32.
     max-sessions: 32
-    # Allow downstream SDP candidates that target private, loopback, link-local, or unspecified IPs.
-    # Enable only when Codex Desktop reaches CPA over a trusted local network.
-    allow-private-remote-ips: false
+    # Reject downstream SDP candidates that target private, loopback, link-local, or unspecified IPs.
+    # Keep false for local or trusted-network Codex Desktop connections.
+    disable-private-remote-ips: false
     # Public IPv4 or IPv6 address advertised when CPA is behind 1:1 NAT.
     public-ip: ""
     # Optional UDP allocation range. Both values must be set together and provide at least two ports per session.
     udp-port-min: 0
     udp-port-max: 0
     # Optional STUN/TURN servers. TURN credentials are never returned by the JSON config API.
+    # Global and per-auth proxy-url settings apply to call creation and Sideband WebSocket only;
+    # WebRTC media uses direct ICE/STUN/TURN connectivity and does not traverse that proxy.
     # ice-servers:
     #   - urls:
     #       - "stun:stun.example.com:3478"

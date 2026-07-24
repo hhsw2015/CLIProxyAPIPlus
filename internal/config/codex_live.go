@@ -6,10 +6,53 @@ import (
 	"net"
 	"net/url"
 	"strings"
+
+	log "github.com/sirupsen/logrus"
+	"gopkg.in/yaml.v3"
 )
 
 // DefaultCodexLiveMediaMaxSessions is the default in-process media session limit.
 const DefaultCodexLiveMediaMaxSessions = 32
+
+// UnmarshalYAML supports the deprecated allow-private-remote-ips setting while
+// preserving the default behavior of allowing private downstream candidates.
+func (c *CodexLiveMediaRelayConfig) UnmarshalYAML(value *yaml.Node) error {
+	type plain CodexLiveMediaRelayConfig
+	var decoded plain
+	if errDecode := value.Decode(&decoded); errDecode != nil {
+		return errDecode
+	}
+	var allowPrivate *bool
+	var disablePrivate *bool
+	if value.Kind == yaml.MappingNode {
+		for index := 0; index+1 < len(value.Content); index += 2 {
+			key := value.Content[index].Value
+			switch key {
+			case "allow-private-remote-ips":
+				var setting bool
+				if errDecode := value.Content[index+1].Decode(&setting); errDecode != nil {
+					return fmt.Errorf("decode codex.live-media-relay.allow-private-remote-ips: %w", errDecode)
+				}
+				allowPrivate = &setting
+			case "disable-private-remote-ips":
+				var setting bool
+				if errDecode := value.Content[index+1].Decode(&setting); errDecode != nil {
+					return fmt.Errorf("decode codex.live-media-relay.disable-private-remote-ips: %w", errDecode)
+				}
+				disablePrivate = &setting
+			}
+		}
+	}
+	if allowPrivate != nil && disablePrivate != nil {
+		return errors.New("codex.live-media-relay cannot set both allow-private-remote-ips and disable-private-remote-ips")
+	}
+	if allowPrivate != nil {
+		decoded.DisablePrivateRemoteIPs = !*allowPrivate
+		log.Warn("codex.live-media-relay.allow-private-remote-ips is deprecated; use disable-private-remote-ips with the inverse value")
+	}
+	*c = CodexLiveMediaRelayConfig(decoded)
+	return nil
+}
 
 // EffectiveMaxSessions returns the configured media session limit.
 func (c CodexLiveMediaRelayConfig) EffectiveMaxSessions() int {

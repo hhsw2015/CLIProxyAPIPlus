@@ -113,7 +113,7 @@ func (s *sessionStore) put(callID string, session liveSession) liveSession {
 			previous.session.resources.close()
 		}
 		if previous.session.media != nil && previous.session.media != session.media {
-			if errClose := previous.session.media.Close(); errClose != nil {
+			if errClose := previous.session.media.CloseWithReason("session_replaced"); errClose != nil {
 				log.WithError(errClose).Debug("codex live media: close replaced session")
 			}
 		}
@@ -237,7 +237,7 @@ func endLiveSession(session liveSession, reason string) {
 		session.resources.close()
 	}
 	if session.media != nil {
-		if errClose := session.media.Close(); errClose != nil {
+		if errClose := session.media.CloseWithReason(reason); errClose != nil {
 			log.WithError(errClose).Debug("codex live media: close stored session")
 		}
 	}
@@ -305,6 +305,7 @@ func (h *Handler) HandleSideband(c *gin.Context) {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Codex live sideband unavailable"})
 		return
 	}
+	runtimeConfig := h.currentConfig()
 	if !websocket.IsWebSocketUpgrade(c.Request) {
 		c.JSON(http.StatusUpgradeRequired, gin.H{"error": "WebSocket upgrade required"})
 		return
@@ -392,7 +393,7 @@ func (h *Handler) HandleSideband(c *gin.Context) {
 	}
 
 	authType, authValue := selected.AccountInfo()
-	helps.RecordAPIWebsocketRequest(ctx, h.cfg, helps.UpstreamRequestLog{
+	helps.RecordAPIWebsocketRequest(ctx, runtimeConfig, helps.UpstreamRequestLog{
 		URL:       upstreamURL,
 		Method:    "WEBSOCKET",
 		Headers:   headersForLogging(req.Header),
@@ -403,15 +404,15 @@ func (h *Handler) HandleSideband(c *gin.Context) {
 		AuthValue: authValue,
 	})
 
-	dialer := newProxyAwareSidebandDialer(h.cfg, selected)
+	dialer := newProxyAwareSidebandDialer(runtimeConfig, selected)
 	dialer.Subprotocols = websocket.Subprotocols(c.Request)
 	upstream, handshakeResponse, errDial := dialer.DialContext(ctx, upstreamURL, req.Header)
 	if errDial != nil {
-		handleSidebandDialError(c, ctx, h, handshakeResponse, errDial)
+		handleSidebandDialError(c, ctx, runtimeConfig, handshakeResponse, errDial)
 		return
 	}
 	if handshakeResponse != nil {
-		helps.RecordAPIWebsocketHandshake(ctx, h.cfg, handshakeResponse.StatusCode, callResponseHeaders(handshakeResponse.Header))
+		helps.RecordAPIWebsocketHandshake(ctx, runtimeConfig, handshakeResponse.StatusCode, callResponseHeaders(handshakeResponse.Header))
 		if handshakeResponse.Body != nil {
 			if errClose := handshakeResponse.Body.Close(); errClose != nil {
 				log.Errorf("codex live sideband: close handshake response body error: %v", errClose)
@@ -454,7 +455,7 @@ func (h *Handler) HandleSideband(c *gin.Context) {
 	consumeSession = true
 
 	if errRelay := relayWebsockets(downstream, upstream); errRelay != nil && !isNormalWebsocketClose(errRelay) {
-		helps.RecordAPIWebsocketError(ctx, h.cfg, "relay", errRelay)
+		helps.RecordAPIWebsocketError(ctx, runtimeConfig, "relay", errRelay)
 		log.WithError(errRelay).Debug("codex live sideband relay closed")
 	}
 }
@@ -524,20 +525,20 @@ func callIDFromLocation(location string) string {
 	return callID
 }
 
-func handleSidebandDialError(c *gin.Context, ctx context.Context, h *Handler, response *http.Response, errDial error) {
+func handleSidebandDialError(c *gin.Context, ctx context.Context, cfg *config.Config, response *http.Response, errDial error) {
 	status := http.StatusBadGateway
 	if response != nil {
 		if response.StatusCode > 0 {
 			status = response.StatusCode
 		}
-		helps.RecordAPIWebsocketHandshake(ctx, h.cfg, response.StatusCode, callResponseHeaders(response.Header))
+		helps.RecordAPIWebsocketHandshake(ctx, cfg, response.StatusCode, callResponseHeaders(response.Header))
 		if response.Body != nil {
 			if errClose := response.Body.Close(); errClose != nil {
 				log.Errorf("codex live sideband: close rejected handshake body error: %v", errClose)
 			}
 		}
 	}
-	helps.RecordAPIWebsocketError(ctx, h.cfg, "dial", errDial)
+	helps.RecordAPIWebsocketError(ctx, cfg, "dial", errDial)
 	c.JSON(status, gin.H{"error": "Codex live sideband upstream unavailable"})
 }
 

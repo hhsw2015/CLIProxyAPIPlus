@@ -11,6 +11,7 @@ import (
 	"mime"
 	"mime/multipart"
 	"net/http"
+	"reflect"
 	"strings"
 	"sync"
 
@@ -40,13 +41,16 @@ var liveProtocolHeaders = []string{
 
 // Handler forwards Codex live session requests through the shared auth scheduler.
 type Handler struct {
-	authManager        *auth.Manager
-	cfg                *config.Config
-	sessions           *sessionStore
-	sidebandAPIBaseURL string
-	mediaRelayMu       sync.RWMutex
-	mediaRelay         mediaRelayFactory
-	mediaRelayErr      error
+	authManager          *auth.Manager
+	cfg                  *config.Config
+	sessions             *sessionStore
+	sidebandAPIBaseURL   string
+	mediaRelayMu         sync.RWMutex
+	mediaRelay           mediaRelayFactory
+	mediaRelayErr        error
+	mediaRelayConfig     config.CodexLiveMediaRelayConfig
+	mediaRelayConfigured bool
+	mediaLimiter         *mediaSessionLimiter
 }
 
 // NewHandler creates a Codex live session handler.
@@ -57,7 +61,9 @@ func NewHandler(authManager *auth.Manager, cfg *config.Config) *Handler {
 		sessions:           newSessionStore(),
 		sidebandAPIBaseURL: defaultSidebandAPIBaseURL,
 	}
-	_ = handler.UpdateConfig(cfg)
+	if errUpdate := handler.UpdateConfig(cfg); errUpdate != nil {
+		log.WithError(errUpdate).Error("failed to configure Codex Live media relay")
+	}
 	return handler
 }
 
@@ -66,16 +72,79 @@ func (h *Handler) UpdateConfig(cfg *config.Config) error {
 	if h == nil {
 		return nil
 	}
-	var relay mediaRelayFactory
-	var relayErr error
-	if cfg != nil && cfg.Codex.LiveMediaRelay.Enabled {
-		relay, relayErr = newPionMediaRelay(cfg.Codex.LiveMediaRelay)
+	var relayConfig config.CodexLiveMediaRelayConfig
+	if cfg != nil {
+		relayConfig = cfg.Codex.LiveMediaRelay
 	}
 	h.mediaRelayMu.Lock()
+	previousConfig := h.mediaRelayConfig
+	previouslyConfigured := h.mediaRelayConfigured
+	h.cfg = cfg
+	if previouslyConfigured && reflect.DeepEqual(previousConfig, relayConfig) {
+		currentErr := h.mediaRelayErr
+		h.mediaRelayMu.Unlock()
+		return currentErr
+	}
+	if h.mediaLimiter == nil {
+		h.mediaLimiter = &mediaSessionLimiter{}
+	}
+	var relay mediaRelayFactory
+	var relayErr error
+	if relayConfig.Enabled {
+		relay, relayErr = newPionMediaRelayWithLimiter(relayConfig, h.mediaLimiter)
+	}
 	h.mediaRelay = relay
 	h.mediaRelayErr = relayErr
+	h.mediaRelayConfig = relayConfig
+	h.mediaRelayConfigured = true
 	h.mediaRelayMu.Unlock()
+
+	if relayErr == nil && (previouslyConfigured || relayConfig.Enabled) {
+		message := "codex live media relay configured"
+		if previouslyConfigured {
+			message = "codex live media relay configuration reloaded; changes apply to new sessions"
+		}
+		log.WithFields(liveMediaConfigLogFields(relayConfig)).Info(message)
+	}
 	return relayErr
+}
+
+func liveMediaConfigLogFields(relayConfig config.CodexLiveMediaRelayConfig) log.Fields {
+	publicIP := strings.TrimSpace(relayConfig.PublicIP)
+	if publicIP == "" {
+		publicIP = "auto"
+	}
+	return log.Fields{
+		"enabled":                    relayConfig.Enabled,
+		"max_sessions":               relayConfig.EffectiveMaxSessions(),
+		"disable_private_remote_ips": relayConfig.DisablePrivateRemoteIPs,
+		"public_ip":                  publicIP,
+		"udp_port_min":               relayConfig.UDPPortMin,
+		"udp_port_max":               relayConfig.UDPPortMax,
+		"ice_server_count":           len(relayConfig.ICEServers),
+	}
+}
+
+func (h *Handler) currentRuntime() (*config.Config, mediaRelayFactory, error) {
+	if h == nil {
+		return nil, nil, nil
+	}
+	h.mediaRelayMu.RLock()
+	cfg := h.cfg
+	relay := h.mediaRelay
+	relayErr := h.mediaRelayErr
+	h.mediaRelayMu.RUnlock()
+	return cfg, relay, relayErr
+}
+
+func (h *Handler) currentConfig() *config.Config {
+	if h == nil {
+		return nil
+	}
+	h.mediaRelayMu.RLock()
+	cfg := h.cfg
+	h.mediaRelayMu.RUnlock()
+	return cfg
 }
 
 func (h *Handler) currentMediaRelay() (mediaRelayFactory, error) {
@@ -117,7 +186,7 @@ func (h *Handler) Handle(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": errPayload.Error()})
 		return
 	}
-	mediaRelay, mediaRelayErr := h.currentMediaRelay()
+	runtimeConfig, mediaRelay, mediaRelayErr := h.currentRuntime()
 	if mediaRelayErr != nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": mediaRelayErr.Error()})
 		return
@@ -176,7 +245,7 @@ func (h *Handler) Handle(c *gin.Context) {
 		}
 		defer func() {
 			if !mediaRetained {
-				if errClose := mediaSession.Close(); errClose != nil {
+				if errClose := mediaSession.CloseWithReason("request_not_retained"); errClose != nil {
 					log.WithError(errClose).Debug("codex live media: close unretained session")
 				}
 			}
@@ -201,7 +270,7 @@ func (h *Handler) Handle(c *gin.Context) {
 	}
 
 	authType, authValue := selected.AccountInfo()
-	helps.RecordAPIRequest(ctx, h.cfg, helps.UpstreamRequestLog{
+	helps.RecordAPIRequest(ctx, runtimeConfig, helps.UpstreamRequestLog{
 		URL:       upstreamCallURL,
 		Method:    http.MethodPost,
 		Headers:   headersForLogging(req.Header),
@@ -225,7 +294,7 @@ func (h *Handler) Handle(c *gin.Context) {
 		if selection != nil {
 			selection.End("request_failed")
 		}
-		helps.RecordAPIResponseError(ctx, h.cfg, errRequest)
+		helps.RecordAPIResponseError(ctx, runtimeConfig, errRequest)
 		c.JSON(http.StatusBadGateway, gin.H{"error": errRequest.Error()})
 		return
 	}
@@ -251,10 +320,10 @@ func (h *Handler) Handle(c *gin.Context) {
 	}
 
 	responseHeaders := callResponseHeaders(resp.Header)
-	helps.RecordAPIResponseMetadata(ctx, h.cfg, resp.StatusCode, responseHeaders)
+	helps.RecordAPIResponseMetadata(ctx, runtimeConfig, resp.StatusCode, responseHeaders)
 	responseBody, errResponse := readLimitedBody(resp.Body)
 	if errResponse != nil {
-		helps.RecordAPIResponseError(ctx, h.cfg, errResponse)
+		helps.RecordAPIResponseError(ctx, runtimeConfig, errResponse)
 		message := "Failed to read Codex live response"
 		if errors.Is(errResponse, errBodyTooLarge) {
 			message = "Codex live response body too large"
@@ -262,7 +331,7 @@ func (h *Handler) Handle(c *gin.Context) {
 		c.JSON(http.StatusBadGateway, gin.H{"error": message})
 		return
 	}
-	helps.AppendAPIResponseChunk(ctx, h.cfg, responseBody)
+	helps.AppendAPIResponseChunk(ctx, runtimeConfig, responseBody)
 	responseBodyToWrite := responseBody
 	success := resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices
 	if success && mediaSession != nil {
@@ -288,10 +357,15 @@ func (h *Handler) Handle(c *gin.Context) {
 			return
 		}
 		if callID != "" {
+			if mediaSession != nil {
+				mediaSession.SetCallID(callID)
+			}
 			session := liveSession{authID: selected.ID, model: model, media: mediaSession}
 			if selection != nil {
 				if mediaSession != nil {
-					if errBind := selection.Bind(mediaSession.Close); errBind != nil {
+					if errBind := selection.Bind(func() error {
+						return mediaSession.CloseWithReason("home_selection_closed")
+					}); errBind != nil {
 						selection.End("media_bind_failed")
 						c.JSON(http.StatusServiceUnavailable, gin.H{"error": errBind.Error()})
 						return
@@ -325,7 +399,7 @@ func (h *Handler) Handle(c *gin.Context) {
 		if sessionStored {
 			h.sessions.complete(storedSession, "response_write_failed")
 		}
-		helps.RecordAPIResponseError(ctx, h.cfg, errWrite)
+		helps.RecordAPIResponseError(ctx, runtimeConfig, errWrite)
 		log.WithError(errWrite).Warn("codex live: write response body failed")
 	}
 }

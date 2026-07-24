@@ -299,19 +299,19 @@ type CodexConfig struct {
 
 // CodexLiveMediaRelayConfig configures the in-process Codex Live WebRTC gateway.
 type CodexLiveMediaRelayConfig struct {
-	Enabled               bool                 `yaml:"enabled" json:"enabled"`
-	MaxSessions           int                  `yaml:"max-sessions" json:"max-sessions"`
-	AllowPrivateRemoteIPs bool                 `yaml:"allow-private-remote-ips" json:"allow-private-remote-ips"`
-	PublicIP              string               `yaml:"public-ip" json:"public-ip"`
-	UDPPortMin            uint16               `yaml:"udp-port-min" json:"udp-port-min"`
-	UDPPortMax            uint16               `yaml:"udp-port-max" json:"udp-port-max"`
-	ICEServers            []CodexLiveICEServer `yaml:"ice-servers" json:"ice-servers"`
+	Enabled                 bool                 `yaml:"enabled" json:"enabled"`
+	MaxSessions             int                  `yaml:"max-sessions" json:"max-sessions"`
+	DisablePrivateRemoteIPs bool                 `yaml:"disable-private-remote-ips" json:"disable-private-remote-ips"`
+	PublicIP                string               `yaml:"public-ip" json:"public-ip"`
+	UDPPortMin              uint16               `yaml:"udp-port-min" json:"udp-port-min"`
+	UDPPortMax              uint16               `yaml:"udp-port-max" json:"udp-port-max"`
+	ICEServers              []CodexLiveICEServer `yaml:"ice-servers" json:"ice-servers"`
 }
 
 // CodexLiveICEServer configures a STUN or TURN server for the media relay.
 type CodexLiveICEServer struct {
 	URLs       []string `yaml:"urls" json:"urls"`
-	Username   string   `yaml:"username" json:"username"`
+	Username   string   `yaml:"username" json:"-"`
 	Credential string   `yaml:"credential" json:"-"`
 }
 

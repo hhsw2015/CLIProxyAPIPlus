@@ -10,9 +10,20 @@ import (
 	"github.com/pion/rtp"
 	"github.com/pion/webrtc/v4"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	log "github.com/sirupsen/logrus"
+	logtest "github.com/sirupsen/logrus/hooks/test"
 )
 
 func TestPionMediaRelayBridgesAudioAndDataChannel(t *testing.T) {
+	logger := log.StandardLogger()
+	previousHooks := logger.ReplaceHooks(make(log.LevelHooks))
+	previousLevel := logger.GetLevel()
+	logger.SetLevel(log.DebugLevel)
+	hook := logtest.NewLocal(logger)
+	defer func() {
+		logger.ReplaceHooks(previousHooks)
+		logger.SetLevel(previousLevel)
+	}()
 	clientAPI := newTestWebRTCAPI(t)
 	client, errClient := clientAPI.NewPeerConnection(webrtc.Configuration{})
 	if errClient != nil {
@@ -49,11 +60,12 @@ func TestPionMediaRelayBridgesAudioAndDataChannel(t *testing.T) {
 	})
 
 	clientOffer := completeOffer(t, client)
-	relay, errRelay := newPionMediaRelay(config.CodexLiveMediaRelayConfig{
-		Enabled:               true,
-		MaxSessions:           1,
-		AllowPrivateRemoteIPs: true,
-	})
+	relayConfig := config.CodexLiveMediaRelayConfig{
+		Enabled:                 true,
+		MaxSessions:             1,
+		DisablePrivateRemoteIPs: false,
+	}
+	relay, errRelay := newPionMediaRelay(relayConfig)
 	if errRelay != nil {
 		t.Fatalf("create media relay: %v", errRelay)
 	}
@@ -61,13 +73,18 @@ func TestPionMediaRelayBridgesAudioAndDataChannel(t *testing.T) {
 	if errSession != nil {
 		t.Fatalf("create media relay session: %v", errSession)
 	}
+	session.SetCallID("call-log-test")
 	defer func() {
 		if errClose := session.Close(); errClose != nil {
 			t.Errorf("close media relay session: %v", errClose)
 		}
 	}()
-	if _, _, errCapacity := relay.NewSession(context.Background(), clientOffer); errCapacity == nil {
-		t.Fatal("media relay accepted a session beyond its configured capacity")
+	reloadedRelay, errRelay := newPionMediaRelayWithLimiter(relayConfig, relay.limiter)
+	if errRelay != nil {
+		t.Fatalf("reload media relay: %v", errRelay)
+	}
+	if _, _, errCapacity := reloadedRelay.NewSession(context.Background(), clientOffer); errCapacity == nil {
+		t.Fatal("reloaded media relay bypassed the shared session capacity")
 	}
 
 	upstreamAPI := newTestWebRTCAPI(t)
@@ -145,6 +162,21 @@ func TestPionMediaRelayBridgesAudioAndDataChannel(t *testing.T) {
 	sendTestRTP(t, clientAudio, clientPayload, upstreamAudioMessages)
 	upstreamPayload := []byte{0xf8, 0xfe, 0xfd}
 	sendTestRTP(t, upstreamAudio, upstreamPayload, clientAudioMessages)
+	if errClose := session.Close(); errClose != nil {
+		t.Fatalf("close media relay session for logging: %v", errClose)
+	}
+	replacementSession, _, errReplacement := reloadedRelay.NewSession(context.Background(), clientOffer)
+	if errReplacement != nil {
+		t.Fatalf("shared capacity was not released: %v", errReplacement)
+	}
+	if errClose := replacementSession.CloseWithReason("test_complete"); errClose != nil {
+		t.Fatalf("close replacement media session: %v", errClose)
+	}
+	for _, peer := range []string{"local", "remote"} {
+		assertPeerLog(t, hook, "codex live WebRTC peer connected", peer, "call-log-test")
+		assertPeerLog(t, hook, "codex live WebRTC peer closed", peer, "call-log-test")
+	}
+	assertSessionLog(t, hook, "codex live WebRTC media session closed", "closed", "call-log-test")
 }
 
 func TestIsPublicRemoteIP(t *testing.T) {
@@ -285,6 +317,34 @@ func sendTestRTP(t *testing.T, track *webrtc.TrackLocalStaticRTP, payload []byte
 		}
 	}
 	t.Fatal("RTP packet was not relayed")
+}
+
+func assertSessionLog(t *testing.T, hook *logtest.Hook, message, reason, callID string) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		for _, entry := range hook.AllEntries() {
+			if entry.Message == message && entry.Data["reason"] == reason && entry.Data["call_id"] == callID {
+				return
+			}
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("missing session log message %q for reason %q and call %q", message, reason, callID)
+}
+
+func assertPeerLog(t *testing.T, hook *logtest.Hook, message, peer, callID string) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		for _, entry := range hook.AllEntries() {
+			if entry.Message == message && entry.Data["peer"] == peer && entry.Data["call_id"] == callID {
+				return
+			}
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("missing log message %q for peer %q and call %q", message, peer, callID)
 }
 
 func closeTestPeerConnection(t *testing.T, connection *webrtc.PeerConnection) {

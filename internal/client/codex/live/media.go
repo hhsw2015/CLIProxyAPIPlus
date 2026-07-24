@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/google/uuid"
 	"github.com/pion/interceptor"
 	"github.com/pion/rtp"
 	"github.com/pion/webrtc/v4"
@@ -32,8 +33,10 @@ var opusCodec = webrtc.RTPCodecCapability{
 
 type mediaRelaySession interface {
 	AcceptUpstreamAnswer(context.Context, string) (string, error)
+	SetCallID(string)
 	SetCloseHandler(func(string))
 	Close() error
+	CloseWithReason(string) error
 }
 
 type mediaRelayFactory interface {
@@ -44,7 +47,13 @@ type pionMediaRelay struct {
 	downstreamAPI *webrtc.API
 	upstreamAPI   *webrtc.API
 	configuration webrtc.Configuration
-	slots         chan struct{}
+	limiter       *mediaSessionLimiter
+}
+
+type mediaSessionLimiter struct {
+	mu     sync.Mutex
+	limit  int
+	active int
 }
 
 type pionMediaSession struct {
@@ -52,15 +61,17 @@ type pionMediaSession struct {
 	upstream   *webrtc.PeerConnection
 	bridge     *dataChannelBridge
 
-	done          chan struct{}
-	closeOnce     sync.Once
-	closeErr      error
-	failureOnce   sync.Once
-	handlerMu     sync.Mutex
-	onClose       func(string)
-	failureReason string
-	handlerCalled bool
-	releaseSlot   func()
+	done           chan struct{}
+	closeOnce      sync.Once
+	closeErr       error
+	failureOnce    sync.Once
+	handlerMu      sync.Mutex
+	onClose        func(string)
+	failureReason  string
+	handlerCalled  bool
+	mediaSessionID string
+	callID         string
+	releaseSlot    func()
 }
 
 type dataChannelMessage struct {
@@ -92,10 +103,14 @@ type dataChannelBridge struct {
 }
 
 func newPionMediaRelay(relayConfig config.CodexLiveMediaRelayConfig) (*pionMediaRelay, error) {
+	return newPionMediaRelayWithLimiter(relayConfig, &mediaSessionLimiter{})
+}
+
+func newPionMediaRelayWithLimiter(relayConfig config.CodexLiveMediaRelayConfig, limiter *mediaSessionLimiter) (*pionMediaRelay, error) {
 	if errValidate := relayConfig.Validate(); errValidate != nil {
 		return nil, errValidate
 	}
-	downstreamAPI, errAPI := newPionAPI(relayConfig, !relayConfig.AllowPrivateRemoteIPs)
+	downstreamAPI, errAPI := newPionAPI(relayConfig, relayConfig.DisablePrivateRemoteIPs)
 	if errAPI != nil {
 		return nil, errAPI
 	}
@@ -116,12 +131,49 @@ func newPionMediaRelay(relayConfig config.CodexLiveMediaRelayConfig) (*pionMedia
 			CredentialType: webrtc.ICECredentialTypePassword,
 		})
 	}
+	if limiter == nil {
+		limiter = &mediaSessionLimiter{}
+	}
+	limiter.setLimit(relayConfig.EffectiveMaxSessions())
 	return &pionMediaRelay{
 		downstreamAPI: downstreamAPI,
 		upstreamAPI:   upstreamAPI,
 		configuration: webrtc.Configuration{ICEServers: iceServers},
-		slots:         make(chan struct{}, relayConfig.EffectiveMaxSessions()),
+		limiter:       limiter,
 	}, nil
+}
+
+func (l *mediaSessionLimiter) setLimit(limit int) {
+	if l == nil {
+		return
+	}
+	l.mu.Lock()
+	l.limit = limit
+	l.mu.Unlock()
+}
+
+func (l *mediaSessionLimiter) acquire() bool {
+	if l == nil {
+		return false
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.limit <= 0 || l.active >= l.limit {
+		return false
+	}
+	l.active++
+	return true
+}
+
+func (l *mediaSessionLimiter) release() {
+	if l == nil {
+		return
+	}
+	l.mu.Lock()
+	if l.active > 0 {
+		l.active--
+	}
+	l.mu.Unlock()
 }
 
 func newPionAPI(relayConfig config.CodexLiveMediaRelayConfig, filterPrivateRemoteIPs bool) (*webrtc.API, error) {
@@ -161,17 +213,16 @@ func isPublicRemoteIP(ip net.IP) bool {
 }
 
 func (r *pionMediaRelay) NewSession(ctx context.Context, clientOffer string) (mediaRelaySession, string, error) {
-	if r == nil || r.downstreamAPI == nil || r.upstreamAPI == nil {
+	if r == nil || r.downstreamAPI == nil || r.upstreamAPI == nil || r.limiter == nil {
 		return nil, "", errors.New("Codex live media relay unavailable")
 	}
-	select {
-	case r.slots <- struct{}{}:
-	case <-ctx.Done():
-		return nil, "", ctx.Err()
-	default:
+	if errContext := ctx.Err(); errContext != nil {
+		return nil, "", errContext
+	}
+	if !r.limiter.acquire() {
 		return nil, "", errors.New("Codex live media relay capacity exhausted")
 	}
-	releaseSlot := func() { <-r.slots }
+	releaseSlot := r.limiter.release
 	downstream, errDownstream := r.downstreamAPI.NewPeerConnection(r.configuration)
 	if errDownstream != nil {
 		releaseSlot()
@@ -187,15 +238,17 @@ func (r *pionMediaRelay) NewSession(ctx context.Context, clientOffer string) (me
 	}
 
 	session := &pionMediaSession{
-		downstream:  downstream,
-		upstream:    upstream,
-		done:        make(chan struct{}),
-		releaseSlot: releaseSlot,
+		downstream:     downstream,
+		upstream:       upstream,
+		done:           make(chan struct{}),
+		mediaSessionID: uuid.NewString(),
+		releaseSlot:    releaseSlot,
 	}
 	session.bridge = newDataChannelBridge(session.done, func(err error) {
 		session.fail("data_channel_failed", err)
 	})
 	session.installStateHandlers()
+	log.WithFields(session.logFields("session")).Info("codex live WebRTC media session created")
 
 	if errRemote := downstream.SetRemoteDescription(webrtc.SessionDescription{
 		Type: webrtc.SDPTypeOffer,
@@ -311,6 +364,29 @@ func (s *pionMediaSession) AcceptUpstreamAnswer(ctx context.Context, upstreamAns
 	return localDescription.SDP, nil
 }
 
+func (s *pionMediaSession) SetCallID(callID string) {
+	if s == nil {
+		return
+	}
+	s.handlerMu.Lock()
+	s.callID = strings.TrimSpace(callID)
+	s.handlerMu.Unlock()
+}
+
+func (s *pionMediaSession) logFields(peer string) log.Fields {
+	fields := log.Fields{
+		"media_session_id": s.mediaSessionID,
+		"peer":             peer,
+	}
+	s.handlerMu.Lock()
+	callID := s.callID
+	s.handlerMu.Unlock()
+	if callID != "" {
+		fields["call_id"] = callID
+	}
+	return fields
+}
+
 func (s *pionMediaSession) SetCloseHandler(handler func(string)) {
 	if s == nil {
 		return
@@ -329,59 +405,95 @@ func (s *pionMediaSession) SetCloseHandler(handler func(string)) {
 }
 
 func (s *pionMediaSession) Close() error {
+	return s.CloseWithReason("closed")
+}
+
+func (s *pionMediaSession) CloseWithReason(reason string) error {
 	if s == nil {
 		return nil
 	}
 	s.closeOnce.Do(func() {
+		fields := s.logFields("session")
+		fields["reason"] = reason
+		log.WithFields(fields).Info("codex live WebRTC media session closing")
 		close(s.done)
 		if s.bridge != nil {
 			s.bridge.close()
 		}
 		var closeErrors []error
-		if s.downstream != nil {
-			if errClose := s.downstream.Close(); errClose != nil {
-				closeErrors = append(closeErrors, fmt.Errorf("close downstream PeerConnection: %w", errClose))
-			}
+		if errClose := s.closePeerConnection("local", s.downstream); errClose != nil {
+			closeErrors = append(closeErrors, fmt.Errorf("close downstream PeerConnection: %w", errClose))
 		}
-		if s.upstream != nil {
-			if errClose := s.upstream.Close(); errClose != nil {
-				closeErrors = append(closeErrors, fmt.Errorf("close upstream PeerConnection: %w", errClose))
-			}
+		if errClose := s.closePeerConnection("remote", s.upstream); errClose != nil {
+			closeErrors = append(closeErrors, fmt.Errorf("close upstream PeerConnection: %w", errClose))
 		}
 		if s.releaseSlot != nil {
 			s.releaseSlot()
 		}
 		s.closeErr = errors.Join(closeErrors...)
+		if s.closeErr != nil {
+			log.WithFields(fields).WithError(s.closeErr).Warn("codex live WebRTC media session closed with errors")
+		} else {
+			log.WithFields(fields).Info("codex live WebRTC media session closed")
+		}
 	})
 	return s.closeErr
 }
 
+func (s *pionMediaSession) closePeerConnection(peer string, connection *webrtc.PeerConnection) error {
+	if connection == nil {
+		return nil
+	}
+	fields := s.logFields(peer)
+	fields["state_before"] = connection.ConnectionState().String()
+	errClose := connection.Close()
+	fields["state_after"] = connection.ConnectionState().String()
+	if errClose != nil {
+		log.WithFields(fields).WithError(errClose).Warn("codex live WebRTC peer close failed")
+		return errClose
+	}
+	log.WithFields(fields).Info("codex live WebRTC peer closed")
+	return nil
+}
+
 func (s *pionMediaSession) installStateHandlers() {
-	handle := func(leg string) func(webrtc.PeerConnectionState) {
+	handle := func(peer, reasonPrefix string) func(webrtc.PeerConnectionState) {
 		return func(state webrtc.PeerConnectionState) {
+			fields := s.logFields(peer)
+			fields["state"] = state.String()
 			switch state {
+			case webrtc.PeerConnectionStateConnecting:
+				log.WithFields(fields).Info("codex live WebRTC peer connecting")
+			case webrtc.PeerConnectionStateConnected:
+				log.WithFields(fields).Info("codex live WebRTC peer connected")
+			case webrtc.PeerConnectionStateDisconnected:
+				log.WithFields(fields).Warn("codex live WebRTC peer disconnected")
 			case webrtc.PeerConnectionStateFailed:
-				s.fail(leg+"_failed", fmt.Errorf("%s PeerConnection failed", leg))
+				log.WithFields(fields).Warn("codex live WebRTC peer failed")
+				s.fail(reasonPrefix+"_failed", fmt.Errorf("%s PeerConnection failed", reasonPrefix))
 			case webrtc.PeerConnectionStateClosed:
 				select {
 				case <-s.done:
 					return
 				default:
-					s.fail(leg+"_closed", fmt.Errorf("%s PeerConnection closed", leg))
+					log.WithFields(fields).Info("codex live WebRTC peer closed by remote")
+					s.fail(reasonPrefix+"_closed", fmt.Errorf("%s PeerConnection closed", reasonPrefix))
 				}
+			default:
+				log.WithFields(fields).Debug("codex live WebRTC peer state changed")
 			}
 		}
 	}
-	s.downstream.OnConnectionStateChange(handle("downstream"))
-	s.upstream.OnConnectionStateChange(handle("upstream"))
+	s.downstream.OnConnectionStateChange(handle("local", "downstream"))
+	s.upstream.OnConnectionStateChange(handle("remote", "upstream"))
 }
 
 func (s *pionMediaSession) fail(reason string, err error) {
 	s.failureOnce.Do(func() {
 		if err != nil {
-			log.WithError(err).Debug("codex live media relay closed")
+			log.WithFields(s.logFields("session")).WithField("reason", reason).WithError(err).Warn("codex live WebRTC media session failed")
 		}
-		if errClose := s.Close(); errClose != nil {
+		if errClose := s.CloseWithReason(reason); errClose != nil {
 			log.WithError(errClose).Debug("codex live media: close failed session")
 		}
 		s.handlerMu.Lock()

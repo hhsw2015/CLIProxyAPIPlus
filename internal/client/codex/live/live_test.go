@@ -163,6 +163,8 @@ type fakeMediaSession struct {
 	upstreamAnswer string
 	downstreamSDP  string
 	closeHandler   func(string)
+	callID         string
+	closeReason    string
 	closed         atomic.Bool
 	err            error
 }
@@ -172,11 +174,20 @@ func (s *fakeMediaSession) AcceptUpstreamAnswer(_ context.Context, answer string
 	return s.downstreamSDP, s.err
 }
 
+func (s *fakeMediaSession) SetCallID(callID string) {
+	s.callID = callID
+}
+
 func (s *fakeMediaSession) SetCloseHandler(handler func(string)) {
 	s.closeHandler = handler
 }
 
 func (s *fakeMediaSession) Close() error {
+	return s.CloseWithReason("closed")
+}
+
+func (s *fakeMediaSession) CloseWithReason(reason string) error {
+	s.closeReason = reason
 	s.closed.Store(true)
 	return nil
 }
@@ -356,6 +367,9 @@ func TestHandlerRelaysWebRTCMediaSDP(t *testing.T) {
 	if mediaSession.upstreamAnswer != "v=0\r\no=upstream-answer\r\n" {
 		t.Fatalf("accepted upstream answer = %q", mediaSession.upstreamAnswer)
 	}
+	if mediaSession.callID != "call-123" {
+		t.Fatalf("media call ID = %q, want call-123", mediaSession.callID)
+	}
 	if got := recorder.Body.String(); got != mediaSession.downstreamSDP {
 		t.Fatalf("downstream SDP = %q, want %q", got, mediaSession.downstreamSDP)
 	}
@@ -432,6 +446,9 @@ func TestHandlerClosesUnretainedMediaSession(t *testing.T) {
 			if !mediaSession.closed.Load() {
 				t.Fatal("failed request retained its media session")
 			}
+			if mediaSession.closeReason != "request_not_retained" {
+				t.Fatalf("media close reason = %q, want request_not_retained", mediaSession.closeReason)
+			}
 			if _, ok := handler.sessions.peek("call-123"); ok {
 				t.Fatal("failed request stored its media session")
 			}
@@ -502,6 +519,9 @@ func TestHandlerClosesMediaWhenResponseWriteFails(t *testing.T) {
 	}
 	if !mediaSession.closed.Load() {
 		t.Fatal("response write failure retained its media session")
+	}
+	if mediaSession.closeReason != "response_write_failed" {
+		t.Fatalf("media close reason = %q, want response_write_failed", mediaSession.closeReason)
 	}
 	if _, ok := handler.sessions.peek("call-123"); ok {
 		t.Fatal("response write failure retained a stored session")
@@ -762,15 +782,38 @@ func TestHandlerUpdatesMediaRelayConfig(t *testing.T) {
 		t.Fatalf("initial media relay = %#v, error = %v", relay, errRelay)
 	}
 	enabled := &config.Config{Codex: config.CodexConfig{LiveMediaRelay: config.CodexLiveMediaRelayConfig{
-		Enabled:               true,
-		MaxSessions:           1,
-		AllowPrivateRemoteIPs: true,
+		Enabled:                 true,
+		MaxSessions:             1,
+		DisablePrivateRemoteIPs: false,
 	}}}
 	if errUpdate := handler.UpdateConfig(enabled); errUpdate != nil {
 		t.Fatalf("enable media relay: %v", errUpdate)
 	}
-	if relay, errRelay := handler.currentMediaRelay(); relay == nil || errRelay != nil {
-		t.Fatalf("enabled media relay = %#v, error = %v", relay, errRelay)
+	enabledRelay, errRelay := handler.currentMediaRelay()
+	if enabledRelay == nil || errRelay != nil {
+		t.Fatalf("enabled media relay = %#v, error = %v", enabledRelay, errRelay)
+	}
+	unchanged := *enabled
+	unchanged.Debug = true
+	unchanged.ProxyURL = "http://new-proxy.example"
+	if errUpdate := handler.UpdateConfig(&unchanged); errUpdate != nil {
+		t.Fatalf("apply unrelated config change: %v", errUpdate)
+	}
+	unchangedRelay, errRelay := handler.currentMediaRelay()
+	if unchangedRelay != enabledRelay || errRelay != nil {
+		t.Fatalf("unrelated config change rebuilt media relay: before=%#v after=%#v error=%v", enabledRelay, unchangedRelay, errRelay)
+	}
+	if current := handler.currentConfig(); current == nil || current.ProxyURL != "http://new-proxy.example" {
+		t.Fatalf("runtime config was not updated: %#v", current)
+	}
+	changed := *enabled
+	changed.Codex.LiveMediaRelay.MaxSessions = 2
+	if errUpdate := handler.UpdateConfig(&changed); errUpdate != nil {
+		t.Fatalf("reload media relay: %v", errUpdate)
+	}
+	changedRelay, errRelay := handler.currentMediaRelay()
+	if changedRelay == nil || changedRelay == enabledRelay || errRelay != nil {
+		t.Fatalf("changed media relay = %#v, previous=%#v error=%v", changedRelay, enabledRelay, errRelay)
 	}
 	if errUpdate := handler.UpdateConfig(&config.Config{}); errUpdate != nil {
 		t.Fatalf("disable media relay: %v", errUpdate)
