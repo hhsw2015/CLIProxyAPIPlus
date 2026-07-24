@@ -1,0 +1,618 @@
+package live
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"net"
+	"strings"
+	"sync"
+
+	"github.com/pion/interceptor"
+	"github.com/pion/rtp"
+	"github.com/pion/webrtc/v4"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	log "github.com/sirupsen/logrus"
+)
+
+const (
+	realtimeDataChannelLabel = "oai-events"
+	mediaDataQueueSize       = 64
+	mediaDataMessageMaxSize  = 256 << 10
+	mediaDataBufferedMaxSize = 1 << 20
+)
+
+var opusCodec = webrtc.RTPCodecCapability{
+	MimeType:    webrtc.MimeTypeOpus,
+	ClockRate:   48000,
+	Channels:    2,
+	SDPFmtpLine: "minptime=10;useinbandfec=1",
+}
+
+type mediaRelaySession interface {
+	AcceptUpstreamAnswer(context.Context, string) (string, error)
+	SetCloseHandler(func(string))
+	Close() error
+}
+
+type mediaRelayFactory interface {
+	NewSession(context.Context, string) (mediaRelaySession, string, error)
+}
+
+type pionMediaRelay struct {
+	downstreamAPI *webrtc.API
+	upstreamAPI   *webrtc.API
+	configuration webrtc.Configuration
+	slots         chan struct{}
+}
+
+type pionMediaSession struct {
+	downstream *webrtc.PeerConnection
+	upstream   *webrtc.PeerConnection
+	bridge     *dataChannelBridge
+
+	done          chan struct{}
+	closeOnce     sync.Once
+	closeErr      error
+	failureOnce   sync.Once
+	handlerMu     sync.Mutex
+	onClose       func(string)
+	failureReason string
+	handlerCalled bool
+	releaseSlot   func()
+}
+
+type dataChannelMessage struct {
+	data     []byte
+	isString bool
+}
+
+type dataChannelPipe struct {
+	name        string
+	done        <-chan struct{}
+	queue       chan dataChannelMessage
+	ready       chan struct{}
+	readyOnce   sync.Once
+	writable    chan struct{}
+	destination *webrtc.DataChannel
+	mu          sync.RWMutex
+	onError     func(error)
+}
+
+type dataChannelBridge struct {
+	done         <-chan struct{}
+	downToUp     *dataChannelPipe
+	upToDown     *dataChannelPipe
+	closeOnce    sync.Once
+	downstreamMu sync.Mutex
+	downstream   *webrtc.DataChannel
+	upstreamMu   sync.Mutex
+	upstream     *webrtc.DataChannel
+}
+
+func newPionMediaRelay(relayConfig config.CodexLiveMediaRelayConfig) (*pionMediaRelay, error) {
+	if errValidate := relayConfig.Validate(); errValidate != nil {
+		return nil, errValidate
+	}
+	downstreamAPI, errAPI := newPionAPI(relayConfig, !relayConfig.AllowPrivateRemoteIPs)
+	if errAPI != nil {
+		return nil, errAPI
+	}
+	upstreamAPI, errAPI := newPionAPI(relayConfig, false)
+	if errAPI != nil {
+		return nil, errAPI
+	}
+	iceServers := make([]webrtc.ICEServer, 0, len(relayConfig.ICEServers))
+	for _, server := range relayConfig.ICEServers {
+		urls := make([]string, 0, len(server.URLs))
+		for _, rawURL := range server.URLs {
+			urls = append(urls, strings.TrimSpace(rawURL))
+		}
+		iceServers = append(iceServers, webrtc.ICEServer{
+			URLs:           urls,
+			Username:       server.Username,
+			Credential:     server.Credential,
+			CredentialType: webrtc.ICECredentialTypePassword,
+		})
+	}
+	return &pionMediaRelay{
+		downstreamAPI: downstreamAPI,
+		upstreamAPI:   upstreamAPI,
+		configuration: webrtc.Configuration{ICEServers: iceServers},
+		slots:         make(chan struct{}, relayConfig.EffectiveMaxSessions()),
+	}, nil
+}
+
+func newPionAPI(relayConfig config.CodexLiveMediaRelayConfig, filterPrivateRemoteIPs bool) (*webrtc.API, error) {
+	mediaEngine := &webrtc.MediaEngine{}
+	if errRegister := mediaEngine.RegisterCodec(webrtc.RTPCodecParameters{
+		RTPCodecCapability: opusCodec,
+		PayloadType:        111,
+	}, webrtc.RTPCodecTypeAudio); errRegister != nil {
+		return nil, fmt.Errorf("register Opus codec: %w", errRegister)
+	}
+	interceptorRegistry := &interceptor.Registry{}
+	if errRegister := webrtc.RegisterDefaultInterceptors(mediaEngine, interceptorRegistry); errRegister != nil {
+		return nil, fmt.Errorf("register WebRTC interceptors: %w", errRegister)
+	}
+	settingEngine := webrtc.SettingEngine{}
+	if relayConfig.UDPPortMin != 0 {
+		if errPorts := settingEngine.SetEphemeralUDPPortRange(relayConfig.UDPPortMin, relayConfig.UDPPortMax); errPorts != nil {
+			return nil, fmt.Errorf("configure WebRTC UDP port range: %w", errPorts)
+		}
+	}
+	if publicIP := strings.TrimSpace(relayConfig.PublicIP); publicIP != "" {
+		settingEngine.SetNAT1To1IPs([]string{publicIP}, webrtc.ICECandidateTypeHost)
+	}
+	if filterPrivateRemoteIPs {
+		settingEngine.SetRemoteIPFilter(isPublicRemoteIP)
+	}
+	return webrtc.NewAPI(
+		webrtc.WithMediaEngine(mediaEngine),
+		webrtc.WithInterceptorRegistry(interceptorRegistry),
+		webrtc.WithSettingEngine(settingEngine),
+	), nil
+}
+
+func isPublicRemoteIP(ip net.IP) bool {
+	return ip != nil && !ip.IsUnspecified() && !ip.IsLoopback() && !ip.IsPrivate() &&
+		!ip.IsLinkLocalUnicast() && !ip.IsLinkLocalMulticast() && !ip.IsMulticast()
+}
+
+func (r *pionMediaRelay) NewSession(ctx context.Context, clientOffer string) (mediaRelaySession, string, error) {
+	if r == nil || r.downstreamAPI == nil || r.upstreamAPI == nil {
+		return nil, "", errors.New("Codex live media relay unavailable")
+	}
+	select {
+	case r.slots <- struct{}{}:
+	case <-ctx.Done():
+		return nil, "", ctx.Err()
+	default:
+		return nil, "", errors.New("Codex live media relay capacity exhausted")
+	}
+	releaseSlot := func() { <-r.slots }
+	downstream, errDownstream := r.downstreamAPI.NewPeerConnection(r.configuration)
+	if errDownstream != nil {
+		releaseSlot()
+		return nil, "", fmt.Errorf("create downstream PeerConnection: %w", errDownstream)
+	}
+	upstream, errUpstream := r.upstreamAPI.NewPeerConnection(r.configuration)
+	if errUpstream != nil {
+		releaseSlot()
+		if errClose := downstream.Close(); errClose != nil {
+			log.WithError(errClose).Debug("codex live media: close downstream PeerConnection after setup error")
+		}
+		return nil, "", fmt.Errorf("create upstream PeerConnection: %w", errUpstream)
+	}
+
+	session := &pionMediaSession{
+		downstream:  downstream,
+		upstream:    upstream,
+		done:        make(chan struct{}),
+		releaseSlot: releaseSlot,
+	}
+	session.bridge = newDataChannelBridge(session.done, func(err error) {
+		session.fail("data_channel_failed", err)
+	})
+	session.installStateHandlers()
+
+	if errRemote := downstream.SetRemoteDescription(webrtc.SessionDescription{
+		Type: webrtc.SDPTypeOffer,
+		SDP:  clientOffer,
+	}); errRemote != nil {
+		_ = session.Close()
+		return nil, "", fmt.Errorf("set downstream WebRTC offer: %w", errRemote)
+	}
+
+	toDesktop, errTrack := webrtc.NewTrackLocalStaticRTP(opusCodec, "audio", "codex-live")
+	if errTrack != nil {
+		_ = session.Close()
+		return nil, "", fmt.Errorf("create downstream audio track: %w", errTrack)
+	}
+	downstreamSender, errTrack := downstream.AddTrack(toDesktop)
+	if errTrack != nil {
+		_ = session.Close()
+		return nil, "", fmt.Errorf("add downstream audio track: %w", errTrack)
+	}
+	go drainRTCP("downstream", downstreamSender, session.done)
+
+	toOpenAI, errTrack := webrtc.NewTrackLocalStaticRTP(opusCodec, "audio", "codex-live")
+	if errTrack != nil {
+		_ = session.Close()
+		return nil, "", fmt.Errorf("create upstream audio track: %w", errTrack)
+	}
+	upstreamSender, errTrack := upstream.AddTrack(toOpenAI)
+	if errTrack != nil {
+		_ = session.Close()
+		return nil, "", fmt.Errorf("add upstream audio track: %w", errTrack)
+	}
+	go drainRTCP("upstream", upstreamSender, session.done)
+
+	downstream.OnTrack(func(track *webrtc.TrackRemote, _ *webrtc.RTPReceiver) {
+		if !strings.EqualFold(track.Codec().MimeType, webrtc.MimeTypeOpus) {
+			return
+		}
+		go relayRTP("downstream-to-upstream", track, toOpenAI, session.done)
+	})
+	upstream.OnTrack(func(track *webrtc.TrackRemote, _ *webrtc.RTPReceiver) {
+		if !strings.EqualFold(track.Codec().MimeType, webrtc.MimeTypeOpus) {
+			return
+		}
+		go relayRTP("upstream-to-downstream", track, toDesktop, session.done)
+	})
+	downstream.OnDataChannel(func(channel *webrtc.DataChannel) {
+		if channel.Label() != realtimeDataChannelLabel {
+			if errClose := channel.Close(); errClose != nil {
+				log.WithError(errClose).Debug("codex live media: close unsupported downstream DataChannel")
+			}
+			return
+		}
+		session.bridge.attachDownstream(channel)
+	})
+	upstreamChannel, errChannel := upstream.CreateDataChannel(realtimeDataChannelLabel, nil)
+	if errChannel != nil {
+		_ = session.Close()
+		return nil, "", fmt.Errorf("create upstream DataChannel: %w", errChannel)
+	}
+	session.bridge.attachUpstream(upstreamChannel)
+
+	gatherComplete := webrtc.GatheringCompletePromise(upstream)
+	offer, errOffer := upstream.CreateOffer(nil)
+	if errOffer != nil {
+		_ = session.Close()
+		return nil, "", fmt.Errorf("create upstream WebRTC offer: %w", errOffer)
+	}
+	if errLocal := upstream.SetLocalDescription(offer); errLocal != nil {
+		_ = session.Close()
+		return nil, "", fmt.Errorf("set upstream WebRTC offer: %w", errLocal)
+	}
+	select {
+	case <-gatherComplete:
+	case <-ctx.Done():
+		_ = session.Close()
+		return nil, "", fmt.Errorf("gather upstream WebRTC candidates: %w", ctx.Err())
+	}
+	localDescription := upstream.LocalDescription()
+	if localDescription == nil || strings.TrimSpace(localDescription.SDP) == "" {
+		_ = session.Close()
+		return nil, "", errors.New("upstream WebRTC offer is empty")
+	}
+	return session, localDescription.SDP, nil
+}
+
+func (s *pionMediaSession) AcceptUpstreamAnswer(ctx context.Context, upstreamAnswer string) (string, error) {
+	if s == nil || s.upstream == nil || s.downstream == nil {
+		return "", errors.New("Codex live media session unavailable")
+	}
+	if errRemote := s.upstream.SetRemoteDescription(webrtc.SessionDescription{
+		Type: webrtc.SDPTypeAnswer,
+		SDP:  upstreamAnswer,
+	}); errRemote != nil {
+		return "", fmt.Errorf("set upstream WebRTC answer: %w", errRemote)
+	}
+	gatherComplete := webrtc.GatheringCompletePromise(s.downstream)
+	answer, errAnswer := s.downstream.CreateAnswer(nil)
+	if errAnswer != nil {
+		return "", fmt.Errorf("create downstream WebRTC answer: %w", errAnswer)
+	}
+	if errLocal := s.downstream.SetLocalDescription(answer); errLocal != nil {
+		return "", fmt.Errorf("set downstream WebRTC answer: %w", errLocal)
+	}
+	select {
+	case <-gatherComplete:
+	case <-ctx.Done():
+		return "", fmt.Errorf("gather downstream WebRTC candidates: %w", ctx.Err())
+	}
+	localDescription := s.downstream.LocalDescription()
+	if localDescription == nil || strings.TrimSpace(localDescription.SDP) == "" {
+		return "", errors.New("downstream WebRTC answer is empty")
+	}
+	return localDescription.SDP, nil
+}
+
+func (s *pionMediaSession) SetCloseHandler(handler func(string)) {
+	if s == nil {
+		return
+	}
+	s.handlerMu.Lock()
+	s.onClose = handler
+	reason := s.failureReason
+	callHandler := handler != nil && reason != "" && !s.handlerCalled
+	if callHandler {
+		s.handlerCalled = true
+	}
+	s.handlerMu.Unlock()
+	if callHandler {
+		handler(reason)
+	}
+}
+
+func (s *pionMediaSession) Close() error {
+	if s == nil {
+		return nil
+	}
+	s.closeOnce.Do(func() {
+		close(s.done)
+		if s.bridge != nil {
+			s.bridge.close()
+		}
+		var closeErrors []error
+		if s.downstream != nil {
+			if errClose := s.downstream.Close(); errClose != nil {
+				closeErrors = append(closeErrors, fmt.Errorf("close downstream PeerConnection: %w", errClose))
+			}
+		}
+		if s.upstream != nil {
+			if errClose := s.upstream.Close(); errClose != nil {
+				closeErrors = append(closeErrors, fmt.Errorf("close upstream PeerConnection: %w", errClose))
+			}
+		}
+		if s.releaseSlot != nil {
+			s.releaseSlot()
+		}
+		s.closeErr = errors.Join(closeErrors...)
+	})
+	return s.closeErr
+}
+
+func (s *pionMediaSession) installStateHandlers() {
+	handle := func(leg string) func(webrtc.PeerConnectionState) {
+		return func(state webrtc.PeerConnectionState) {
+			switch state {
+			case webrtc.PeerConnectionStateFailed:
+				s.fail(leg+"_failed", fmt.Errorf("%s PeerConnection failed", leg))
+			case webrtc.PeerConnectionStateClosed:
+				select {
+				case <-s.done:
+					return
+				default:
+					s.fail(leg+"_closed", fmt.Errorf("%s PeerConnection closed", leg))
+				}
+			}
+		}
+	}
+	s.downstream.OnConnectionStateChange(handle("downstream"))
+	s.upstream.OnConnectionStateChange(handle("upstream"))
+}
+
+func (s *pionMediaSession) fail(reason string, err error) {
+	s.failureOnce.Do(func() {
+		if err != nil {
+			log.WithError(err).Debug("codex live media relay closed")
+		}
+		if errClose := s.Close(); errClose != nil {
+			log.WithError(errClose).Debug("codex live media: close failed session")
+		}
+		s.handlerMu.Lock()
+		s.failureReason = reason
+		handler := s.onClose
+		callHandler := handler != nil && !s.handlerCalled
+		if callHandler {
+			s.handlerCalled = true
+		}
+		s.handlerMu.Unlock()
+		if callHandler {
+			handler(reason)
+		}
+	})
+}
+
+func relayRTP(name string, source *webrtc.TrackRemote, destination *webrtc.TrackLocalStaticRTP, done <-chan struct{}) {
+	for {
+		packet, _, errRead := source.ReadRTP()
+		if errRead != nil {
+			if !isClosedMediaError(errRead, done) {
+				log.WithError(errRead).Debugf("codex live media: %s RTP read stopped", name)
+			}
+			return
+		}
+		normalizeRTPPacket(packet)
+		if errWrite := destination.WriteRTP(packet); errWrite != nil {
+			if !isClosedMediaError(errWrite, done) {
+				log.WithError(errWrite).Debugf("codex live media: %s RTP write stopped", name)
+			}
+			return
+		}
+	}
+}
+
+func normalizeRTPPacket(packet *rtp.Packet) {
+	if packet == nil {
+		return
+	}
+	packet.Extension = false
+	packet.ExtensionProfile = 0
+	packet.Extensions = nil
+}
+
+func drainRTCP(name string, sender *webrtc.RTPSender, done <-chan struct{}) {
+	for {
+		if _, _, errRead := sender.ReadRTCP(); errRead != nil {
+			if !isClosedMediaError(errRead, done) {
+				log.WithError(errRead).Debugf("codex live media: %s RTCP reader stopped", name)
+			}
+			return
+		}
+	}
+}
+
+func isClosedMediaError(err error, done <-chan struct{}) bool {
+	select {
+	case <-done:
+		return true
+	default:
+	}
+	return errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed)
+}
+
+func newDataChannelBridge(done <-chan struct{}, onError func(error)) *dataChannelBridge {
+	bridge := &dataChannelBridge{done: done}
+	bridge.downToUp = newDataChannelPipe("downstream-to-upstream", done, onError)
+	bridge.upToDown = newDataChannelPipe("upstream-to-downstream", done, onError)
+	return bridge
+}
+
+func newDataChannelPipe(name string, done <-chan struct{}, onError func(error)) *dataChannelPipe {
+	pipe := &dataChannelPipe{
+		name:     name,
+		done:     done,
+		queue:    make(chan dataChannelMessage, mediaDataQueueSize),
+		ready:    make(chan struct{}),
+		writable: make(chan struct{}, 1),
+		onError:  onError,
+	}
+	go pipe.run()
+	return pipe
+}
+
+func (b *dataChannelBridge) attachDownstream(channel *webrtc.DataChannel) {
+	b.downstreamMu.Lock()
+	if b.downstream != nil {
+		b.downstreamMu.Unlock()
+		if errClose := channel.Close(); errClose != nil {
+			log.WithError(errClose).Debug("codex live media: close duplicate downstream DataChannel")
+		}
+		return
+	}
+	b.downstream = channel
+	b.downstreamMu.Unlock()
+	b.upToDown.setDestination(channel)
+	b.bindSource(channel, b.downToUp)
+}
+
+func (b *dataChannelBridge) attachUpstream(channel *webrtc.DataChannel) {
+	b.upstreamMu.Lock()
+	if b.upstream != nil {
+		b.upstreamMu.Unlock()
+		if errClose := channel.Close(); errClose != nil {
+			log.WithError(errClose).Debug("codex live media: close duplicate upstream DataChannel")
+		}
+		return
+	}
+	b.upstream = channel
+	b.upstreamMu.Unlock()
+	b.downToUp.setDestination(channel)
+	b.bindSource(channel, b.upToDown)
+}
+
+func (b *dataChannelBridge) bindSource(channel *webrtc.DataChannel, destination *dataChannelPipe) {
+	channel.OnMessage(func(message webrtc.DataChannelMessage) {
+		if len(message.Data) > mediaDataMessageMaxSize {
+			destination.reportError(fmt.Errorf("%s DataChannel message exceeds %d bytes", destination.name, mediaDataMessageMaxSize))
+			return
+		}
+		payload := append([]byte(nil), message.Data...)
+		select {
+		case destination.queue <- dataChannelMessage{data: payload, isString: message.IsString}:
+		case <-b.done:
+		}
+	})
+	channel.OnError(func(err error) {
+		destination.reportError(fmt.Errorf("%s DataChannel error: %w", destination.name, err))
+	})
+	channel.OnClose(func() {
+		select {
+		case <-b.done:
+			return
+		default:
+			destination.reportError(fmt.Errorf("%s DataChannel closed", destination.name))
+		}
+	})
+}
+
+func (b *dataChannelBridge) close() {
+	if b == nil {
+		return
+	}
+	b.closeOnce.Do(func() {
+		b.downstreamMu.Lock()
+		downstream := b.downstream
+		b.downstreamMu.Unlock()
+		if downstream != nil {
+			if errClose := downstream.Close(); errClose != nil {
+				log.WithError(errClose).Debug("codex live media: close downstream DataChannel")
+			}
+		}
+		b.upstreamMu.Lock()
+		upstream := b.upstream
+		b.upstreamMu.Unlock()
+		if upstream != nil {
+			if errClose := upstream.Close(); errClose != nil {
+				log.WithError(errClose).Debug("codex live media: close upstream DataChannel")
+			}
+		}
+	})
+}
+
+func (p *dataChannelPipe) setDestination(channel *webrtc.DataChannel) {
+	p.mu.Lock()
+	p.destination = channel
+	p.mu.Unlock()
+	markReady := func() {
+		p.readyOnce.Do(func() { close(p.ready) })
+	}
+	channel.SetBufferedAmountLowThreshold(mediaDataBufferedMaxSize / 2)
+	channel.OnBufferedAmountLow(func() {
+		select {
+		case p.writable <- struct{}{}:
+		default:
+		}
+	})
+	channel.OnOpen(markReady)
+	if channel.ReadyState() == webrtc.DataChannelStateOpen {
+		markReady()
+	}
+}
+
+func (p *dataChannelPipe) run() {
+	select {
+	case <-p.ready:
+	case <-p.done:
+		return
+	}
+	for {
+		select {
+		case message := <-p.queue:
+			p.mu.RLock()
+			destination := p.destination
+			p.mu.RUnlock()
+			if destination == nil {
+				p.reportError(fmt.Errorf("%s DataChannel destination unavailable", p.name))
+				return
+			}
+			if !p.waitWritable(destination, len(message.data)) {
+				return
+			}
+			var errSend error
+			if message.isString {
+				errSend = destination.SendText(string(message.data))
+			} else {
+				errSend = destination.Send(message.data)
+			}
+			if errSend != nil {
+				p.reportError(fmt.Errorf("send %s DataChannel message: %w", p.name, errSend))
+				return
+			}
+		case <-p.done:
+			return
+		}
+	}
+}
+
+func (p *dataChannelPipe) waitWritable(destination *webrtc.DataChannel, messageSize int) bool {
+	for destination.BufferedAmount()+uint64(messageSize) > mediaDataBufferedMaxSize {
+		select {
+		case <-p.writable:
+		case <-p.done:
+			return false
+		}
+	}
+	return true
+}
+
+func (p *dataChannelPipe) reportError(err error) {
+	if p.onError != nil {
+		p.onError(err)
+	}
+}

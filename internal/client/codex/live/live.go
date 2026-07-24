@@ -44,15 +44,55 @@ type Handler struct {
 	cfg                *config.Config
 	sessions           *sessionStore
 	sidebandAPIBaseURL string
+	mediaRelayMu       sync.RWMutex
+	mediaRelay         mediaRelayFactory
+	mediaRelayErr      error
 }
 
 // NewHandler creates a Codex live session handler.
 func NewHandler(authManager *auth.Manager, cfg *config.Config) *Handler {
-	return &Handler{
+	handler := &Handler{
 		authManager:        authManager,
 		cfg:                cfg,
 		sessions:           newSessionStore(),
 		sidebandAPIBaseURL: defaultSidebandAPIBaseURL,
+	}
+	_ = handler.UpdateConfig(cfg)
+	return handler
+}
+
+// UpdateConfig atomically applies Codex Live media relay settings to new sessions.
+func (h *Handler) UpdateConfig(cfg *config.Config) error {
+	if h == nil {
+		return nil
+	}
+	var relay mediaRelayFactory
+	var relayErr error
+	if cfg != nil && cfg.Codex.LiveMediaRelay.Enabled {
+		relay, relayErr = newPionMediaRelay(cfg.Codex.LiveMediaRelay)
+	}
+	h.mediaRelayMu.Lock()
+	h.mediaRelay = relay
+	h.mediaRelayErr = relayErr
+	h.mediaRelayMu.Unlock()
+	return relayErr
+}
+
+func (h *Handler) currentMediaRelay() (mediaRelayFactory, error) {
+	if h == nil {
+		return nil, nil
+	}
+	h.mediaRelayMu.RLock()
+	relay := h.mediaRelay
+	relayErr := h.mediaRelayErr
+	h.mediaRelayMu.RUnlock()
+	return relay, relayErr
+}
+
+// Close releases all active Codex live sessions.
+func (h *Handler) Close() {
+	if h != nil && h.sessions != nil {
+		h.sessions.closeAll("server_stopped")
 	}
 }
 
@@ -77,6 +117,13 @@ func (h *Handler) Handle(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": errPayload.Error()})
 		return
 	}
+	mediaRelay, mediaRelayErr := h.currentMediaRelay()
+	if mediaRelayErr != nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": mediaRelayErr.Error()})
+		return
+	}
+	var mediaSession mediaRelaySession
+	mediaRetained := false
 
 	ctx := context.WithValue(c.Request.Context(), "gin", c)
 	selectionOpts := coreexecutor.Options{
@@ -107,6 +154,39 @@ func (h *Handler) Handle(c *gin.Context) {
 		defer releaseAttempt()
 	}
 	logging.SetGinCPATraceID(c, selected.EnsureIndex())
+	if selection != nil {
+		defer func() {
+			if selection.Active() && !selection.Retained() {
+				selection.End("request_closed")
+			}
+		}()
+	}
+
+	if mediaRelay != nil {
+		clientOffer, errSDP := callRequestSDP(upstreamBody, upstreamContentType)
+		if errSDP != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": errSDP.Error()})
+			return
+		}
+		var upstreamOffer string
+		mediaSession, upstreamOffer, errSDP = mediaRelay.NewSession(ctx, clientOffer)
+		if errSDP != nil {
+			c.JSON(http.StatusBadGateway, gin.H{"error": errSDP.Error()})
+			return
+		}
+		defer func() {
+			if !mediaRetained {
+				if errClose := mediaSession.Close(); errClose != nil {
+					log.WithError(errClose).Debug("codex live media: close unretained session")
+				}
+			}
+		}()
+		upstreamBody, upstreamContentType, errSDP = replaceCallRequestSDP(upstreamBody, upstreamContentType, upstreamOffer)
+		if errSDP != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": errSDP.Error()})
+			return
+		}
+	}
 
 	headers := protocolHeaders(c.Request.Header)
 	headers.Set("Content-Type", upstreamContentType)
@@ -168,11 +248,6 @@ func (h *Handler) Handle(c *gin.Context) {
 			c.JSON(http.StatusServiceUnavailable, gin.H{"error": errBind.Error()})
 			return
 		}
-		defer func() {
-			if !selection.Retained() {
-				selection.End("response_closed")
-			}
-		}()
 	}
 
 	responseHeaders := callResponseHeaders(resp.Header)
@@ -188,10 +263,40 @@ func (h *Handler) Handle(c *gin.Context) {
 		return
 	}
 	helps.AppendAPIResponseChunk(ctx, h.cfg, responseBody)
-	if resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices && h.sessions != nil {
-		if callID := callIDFromLocation(resp.Header.Get("Location")); callID != "" {
-			session := liveSession{authID: selected.ID, model: model}
+	responseBodyToWrite := responseBody
+	success := resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices
+	if success && mediaSession != nil {
+		upstreamAnswer, errSDP := callResponseSDP(responseBody, resp.Header.Get("Content-Type"))
+		if errSDP != nil {
+			c.JSON(http.StatusBadGateway, gin.H{"error": errSDP.Error()})
+			return
+		}
+		downstreamAnswer, errAnswer := mediaSession.AcceptUpstreamAnswer(ctx, upstreamAnswer)
+		if errAnswer != nil {
+			c.JSON(http.StatusBadGateway, gin.H{"error": errAnswer.Error()})
+			return
+		}
+		responseBodyToWrite = []byte(downstreamAnswer)
+		responseHeaders.Set("Content-Type", "application/sdp")
+	}
+	var storedSession liveSession
+	sessionStored := false
+	if success && h.sessions != nil {
+		callID := callIDFromLocation(resp.Header.Get("Location"))
+		if callID == "" && mediaSession != nil {
+			c.JSON(http.StatusBadGateway, gin.H{"error": "Codex live response is missing a valid call ID"})
+			return
+		}
+		if callID != "" {
+			session := liveSession{authID: selected.ID, model: model, media: mediaSession}
 			if selection != nil {
+				if mediaSession != nil {
+					if errBind := selection.Bind(mediaSession.Close); errBind != nil {
+						selection.End("media_bind_failed")
+						c.JSON(http.StatusServiceUnavailable, gin.H{"error": errBind.Error()})
+						return
+					}
+				}
 				if errBind := selection.Bind(func() error {
 					// End outside the resource closer to avoid waiting on the closer itself.
 					go selection.End("session_drained")
@@ -204,12 +309,22 @@ func (h *Handler) Handle(c *gin.Context) {
 				selection.Retain()
 				session.homeSelection = selection
 			}
-			h.sessions.put(callID, session)
+			storedSession = h.sessions.put(callID, session)
+			sessionStored = storedSession.callID != ""
+			if mediaSession != nil {
+				mediaSession.SetCloseHandler(func(reason string) {
+					h.sessions.complete(storedSession, reason)
+				})
+				mediaRetained = true
+			}
 		}
 	}
 	writeResponseHeaders(c.Writer.Header(), responseHeaders)
 	c.Status(resp.StatusCode)
-	if _, errWrite := c.Writer.Write(responseBody); errWrite != nil {
+	if _, errWrite := c.Writer.Write(responseBodyToWrite); errWrite != nil {
+		if sessionStored {
+			h.sessions.complete(storedSession, "response_write_failed")
+		}
 		helps.RecordAPIResponseError(ctx, h.cfg, errWrite)
 		log.WithError(errWrite).Warn("codex live: write response body failed")
 	}
@@ -265,7 +380,6 @@ func prepareCallRequest(body []byte, contentType string) ([]byte, string, string
 	if errMediaType == nil && strings.EqualFold(mediaType, "multipart/form-data") {
 		return multipartCallRequest(body, strings.TrimSpace(params["boundary"]))
 	}
-
 	model := modelFromJSON(body)
 	if model == "" {
 		model = defaultLiveModel
@@ -321,18 +435,97 @@ func multipartCallRequest(body []byte, boundary string) ([]byte, string, string,
 		model = defaultLiveModel
 	}
 
+	encoded, errEncode := encodeCallRequest(*sdp, session)
+	if errEncode != nil {
+		return nil, "", "", errEncode
+	}
+	return encoded, "application/json", model, nil
+}
+
+func encodeCallRequest(sdp string, session json.RawMessage) ([]byte, error) {
 	payload := struct {
 		SDP     string          `json:"sdp"`
 		Session json.RawMessage `json:"session,omitempty"`
 	}{
-		SDP:     *sdp,
+		SDP:     sdp,
 		Session: session,
 	}
 	encoded, errMarshal := json.Marshal(payload)
 	if errMarshal != nil {
-		return nil, "", "", fmt.Errorf("failed to encode Codex live request: %w", errMarshal)
+		return nil, fmt.Errorf("failed to encode Codex live request: %w", errMarshal)
 	}
-	return encoded, "application/json", model, nil
+	return encoded, nil
+}
+
+func callRequestSDP(body []byte, contentType string) (string, error) {
+	mediaType, _, errMediaType := mime.ParseMediaType(contentType)
+	if errMediaType == nil && (strings.EqualFold(mediaType, "application/sdp") || strings.EqualFold(mediaType, "text/plain")) {
+		if strings.TrimSpace(string(body)) == "" {
+			return "", errors.New("Codex live call request requires an SDP offer")
+		}
+		return string(body), nil
+	}
+	if errMediaType != nil || !strings.EqualFold(mediaType, "application/json") {
+		return "", errors.New("Codex live media relay requires an SDP or JSON call request")
+	}
+	var payload struct {
+		SDP string `json:"sdp"`
+	}
+	if errUnmarshal := json.Unmarshal(body, &payload); errUnmarshal != nil {
+		return "", fmt.Errorf("failed to decode Codex live call request: %w", errUnmarshal)
+	}
+	if strings.TrimSpace(payload.SDP) == "" {
+		return "", errors.New("Codex live call request requires an SDP offer")
+	}
+	return payload.SDP, nil
+}
+
+func replaceCallRequestSDP(body []byte, contentType, sdp string) ([]byte, string, error) {
+	mediaType, _, errMediaType := mime.ParseMediaType(contentType)
+	if errMediaType == nil && (strings.EqualFold(mediaType, "application/sdp") || strings.EqualFold(mediaType, "text/plain")) {
+		encoded, errEncode := encodeCallRequest(sdp, nil)
+		if errEncode != nil {
+			return nil, "", errEncode
+		}
+		return encoded, "application/json", nil
+	}
+	if errMediaType != nil || !strings.EqualFold(mediaType, "application/json") {
+		return nil, "", errors.New("Codex live media relay requires an SDP or JSON call request")
+	}
+	var payload map[string]json.RawMessage
+	if errUnmarshal := json.Unmarshal(body, &payload); errUnmarshal != nil {
+		return nil, "", fmt.Errorf("failed to decode Codex live call request: %w", errUnmarshal)
+	}
+	encodedSDP, errMarshal := json.Marshal(sdp)
+	if errMarshal != nil {
+		return nil, "", fmt.Errorf("failed to encode Codex live SDP offer: %w", errMarshal)
+	}
+	payload["sdp"] = encodedSDP
+	encoded, errMarshal := json.Marshal(payload)
+	if errMarshal != nil {
+		return nil, "", fmt.Errorf("failed to encode Codex live call request: %w", errMarshal)
+	}
+	return encoded, "application/json", nil
+}
+
+func callResponseSDP(body []byte, contentType string) (string, error) {
+	mediaType, _, errMediaType := mime.ParseMediaType(contentType)
+	if errMediaType == nil && strings.EqualFold(mediaType, "application/json") {
+		var payload struct {
+			SDP string `json:"sdp"`
+		}
+		if errUnmarshal := json.Unmarshal(body, &payload); errUnmarshal != nil {
+			return "", fmt.Errorf("failed to decode Codex live response: %w", errUnmarshal)
+		}
+		if strings.TrimSpace(payload.SDP) == "" {
+			return "", errors.New("Codex live response requires an SDP answer")
+		}
+		return payload.SDP, nil
+	}
+	if strings.TrimSpace(string(body)) == "" {
+		return "", errors.New("Codex live response requires an SDP answer")
+	}
+	return string(body), nil
 }
 
 func modelFromJSON(body []byte) string {

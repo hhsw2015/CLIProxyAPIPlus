@@ -3,6 +3,7 @@ package live
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -38,6 +39,7 @@ type captureExecutor struct {
 	body         []byte
 	selectedAuth *auth.Auth
 	responseBody io.ReadCloser
+	statusCode   int
 }
 
 func (*captureExecutor) Identifier() string { return "codex" }
@@ -72,8 +74,12 @@ func (e *captureExecutor) HttpRequest(_ context.Context, credential *auth.Auth, 
 		return nil, errRead
 	}
 	e.body = body
+	statusCode := e.statusCode
+	if statusCode == 0 {
+		statusCode = http.StatusCreated
+	}
 	return &http.Response{
-		StatusCode: http.StatusCreated,
+		StatusCode: statusCode,
 		Header: http.Header{
 			"Connection":          []string{"X-Connection-Secret"},
 			"Content-Type":        []string{"application/sdp"},
@@ -114,6 +120,23 @@ func (d *homeDispatcher) RPopAuth(_ context.Context, model string, _ string, _ h
 
 func (*homeDispatcher) AbortAmbiguousDispatch() {}
 
+type failingHTTPWriter struct {
+	header http.Header
+	status int
+}
+
+func (w *failingHTTPWriter) Header() http.Header {
+	return w.header
+}
+
+func (*failingHTTPWriter) Write([]byte) (int, error) {
+	return 0, errors.New("downstream write failed")
+}
+
+func (w *failingHTTPWriter) WriteHeader(statusCode int) {
+	w.status = statusCode
+}
+
 type trackedResponseBody struct {
 	io.Reader
 	closed atomic.Bool
@@ -121,6 +144,40 @@ type trackedResponseBody struct {
 
 func (b *trackedResponseBody) Close() error {
 	b.closed.Store(true)
+	return nil
+}
+
+type fakeMediaRelay struct {
+	clientOffer   string
+	upstreamOffer string
+	session       *fakeMediaSession
+	err           error
+}
+
+func (r *fakeMediaRelay) NewSession(_ context.Context, clientOffer string) (mediaRelaySession, string, error) {
+	r.clientOffer = clientOffer
+	return r.session, r.upstreamOffer, r.err
+}
+
+type fakeMediaSession struct {
+	upstreamAnswer string
+	downstreamSDP  string
+	closeHandler   func(string)
+	closed         atomic.Bool
+	err            error
+}
+
+func (s *fakeMediaSession) AcceptUpstreamAnswer(_ context.Context, answer string) (string, error) {
+	s.upstreamAnswer = answer
+	return s.downstreamSDP, s.err
+}
+
+func (s *fakeMediaSession) SetCloseHandler(handler func(string)) {
+	s.closeHandler = handler
+}
+
+func (s *fakeMediaSession) Close() error {
+	s.closed.Store(true)
 	return nil
 }
 
@@ -247,6 +304,207 @@ func TestHandlerRewritesLiveCallAndSchedulesOAuth(t *testing.T) {
 	stored, ok := handler.sessions.peek("call-123")
 	if !ok || stored.authID != "codex-oauth" || stored.model != "gpt-live-1-codex" {
 		t.Fatalf("stored live session = %#v, ok=%t", stored, ok)
+	}
+}
+
+func TestHandlerRelaysWebRTCMediaSDP(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	manager := auth.NewManager(nil, nil, nil)
+	executor := &captureExecutor{
+		responseBody: &trackedResponseBody{Reader: strings.NewReader("v=0\r\no=upstream-answer\r\n")},
+	}
+	manager.RegisterExecutor(executor)
+	registerCredential(t, manager, &auth.Auth{
+		ID:       "codex-oauth",
+		Provider: "codex",
+		Status:   auth.StatusActive,
+		Metadata: map[string]any{"access_token": "oauth-token"},
+	})
+	mediaSession := &fakeMediaSession{downstreamSDP: "v=0\r\no=downstream-answer\r\n"}
+	mediaRelay := &fakeMediaRelay{
+		upstreamOffer: "v=0\r\no=gateway-offer\r\n",
+		session:       mediaSession,
+	}
+	handler := NewHandler(manager, nil)
+	handler.mediaRelay = mediaRelay
+	router := gin.New()
+	router.POST("/v1/live", handler.Handle)
+
+	const boundary = "media-relay-boundary"
+	body := multipartBody(boundary, "v=0\r\no=desktop-offer\r\n", `{"model":"gpt-live-1-codex"}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/live", strings.NewReader(body))
+	req.Header.Set("Content-Type", "multipart/form-data; boundary="+boundary)
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, req)
+
+	if recorder.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want %d; body=%s", recorder.Code, http.StatusCreated, recorder.Body.String())
+	}
+	if mediaRelay.clientOffer != "v=0\r\no=desktop-offer\r\n" {
+		t.Fatalf("media client offer = %q", mediaRelay.clientOffer)
+	}
+	var upstreamPayload struct {
+		SDP string `json:"sdp"`
+	}
+	if errUnmarshal := json.Unmarshal(executor.body, &upstreamPayload); errUnmarshal != nil {
+		t.Fatalf("unmarshal upstream body: %v", errUnmarshal)
+	}
+	if upstreamPayload.SDP != mediaRelay.upstreamOffer {
+		t.Fatalf("upstream SDP = %q, want gateway offer", upstreamPayload.SDP)
+	}
+	if mediaSession.upstreamAnswer != "v=0\r\no=upstream-answer\r\n" {
+		t.Fatalf("accepted upstream answer = %q", mediaSession.upstreamAnswer)
+	}
+	if got := recorder.Body.String(); got != mediaSession.downstreamSDP {
+		t.Fatalf("downstream SDP = %q, want %q", got, mediaSession.downstreamSDP)
+	}
+	if got := recorder.Header().Get("Content-Type"); got != "application/sdp" {
+		t.Fatalf("Content-Type = %q, want application/sdp", got)
+	}
+	if mediaSession.closed.Load() {
+		t.Fatal("retained media session was closed before session completion")
+	}
+	if mediaSession.closeHandler == nil {
+		t.Fatal("media session close handler was not installed")
+	}
+	mediaSession.closeHandler("test_closed")
+	if !mediaSession.closed.Load() {
+		t.Fatal("completed media session was not closed")
+	}
+	if _, ok := handler.sessions.peek("call-123"); ok {
+		t.Fatal("completed media session remained stored")
+	}
+}
+
+func TestHandlerClosesUnretainedMediaSession(t *testing.T) {
+	for name, testCase := range map[string]struct {
+		upstreamStatus int
+		answerError    error
+		wantStatus     int
+	}{
+		"upstream rejection": {
+			upstreamStatus: http.StatusUnauthorized,
+			wantStatus:     http.StatusUnauthorized,
+		},
+		"invalid upstream answer": {
+			upstreamStatus: http.StatusCreated,
+			answerError:    errors.New("invalid answer"),
+			wantStatus:     http.StatusBadGateway,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			gin.SetMode(gin.TestMode)
+			manager := auth.NewManager(nil, nil, nil)
+			executor := &captureExecutor{
+				responseBody: &trackedResponseBody{Reader: strings.NewReader("v=0\r\no=upstream-answer\r\n")},
+				statusCode:   testCase.upstreamStatus,
+			}
+			manager.RegisterExecutor(executor)
+			registerCredential(t, manager, &auth.Auth{
+				ID:       "codex-oauth",
+				Provider: "codex",
+				Status:   auth.StatusActive,
+				Metadata: map[string]any{"access_token": "oauth-token"},
+			})
+			mediaSession := &fakeMediaSession{
+				downstreamSDP: "v=0\r\no=downstream-answer\r\n",
+				err:           testCase.answerError,
+			}
+			handler := NewHandler(manager, nil)
+			handler.mediaRelay = &fakeMediaRelay{
+				upstreamOffer: "v=0\r\no=gateway-offer\r\n",
+				session:       mediaSession,
+			}
+			router := gin.New()
+			router.POST("/v1/live", handler.Handle)
+
+			const boundary = "media-error-boundary"
+			body := multipartBody(boundary, "v=0\r\no=desktop-offer\r\n", `{"model":"gpt-live-1-codex"}`)
+			req := httptest.NewRequest(http.MethodPost, "/v1/live", strings.NewReader(body))
+			req.Header.Set("Content-Type", "multipart/form-data; boundary="+boundary)
+			recorder := httptest.NewRecorder()
+			router.ServeHTTP(recorder, req)
+
+			if recorder.Code != testCase.wantStatus {
+				t.Fatalf("status = %d, want %d; body=%s", recorder.Code, testCase.wantStatus, recorder.Body.String())
+			}
+			if !mediaSession.closed.Load() {
+				t.Fatal("failed request retained its media session")
+			}
+			if _, ok := handler.sessions.peek("call-123"); ok {
+				t.Fatal("failed request stored its media session")
+			}
+		})
+	}
+}
+
+func TestHandlerReleasesHomeSelectionWhenMediaSetupFails(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	manager := auth.NewManager(nil, nil, nil)
+	manager.SetConfig(&config.Config{Home: config.HomeConfig{Enabled: true}})
+	registry := executionregistry.New()
+	manager.PublishHomeDispatch(&homeDispatcher{}, registry, 1)
+	manager.RegisterExecutor(&captureExecutor{})
+	handler := NewHandler(manager, nil)
+	handler.mediaRelay = &fakeMediaRelay{err: errors.New("media setup failed")}
+	router := gin.New()
+	router.POST("/v1/live", handler.Handle)
+
+	const boundary = "home-media-error-boundary"
+	body := multipartBody(boundary, "v=0\r\no=desktop-offer\r\n", `{"model":"gpt-live-1-codex"}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/live", strings.NewReader(body))
+	req.Header.Set("Content-Type", "multipart/form-data; boundary="+boundary)
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, req)
+
+	if recorder.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want %d; body=%s", recorder.Code, http.StatusBadGateway, recorder.Body.String())
+	}
+	if got := len(registry.FreezeInFlight(time.Now()).Executions); got != 0 {
+		t.Fatalf("active Home executions = %d, want 0", got)
+	}
+	if errDrain := registry.Drain(context.Background()); errDrain != nil {
+		t.Fatalf("Drain() error = %v", errDrain)
+	}
+}
+
+func TestHandlerClosesMediaWhenResponseWriteFails(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	manager := auth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(&captureExecutor{
+		responseBody: &trackedResponseBody{Reader: strings.NewReader("v=0\r\no=upstream-answer\r\n")},
+	})
+	registerCredential(t, manager, &auth.Auth{
+		ID:       "codex-oauth",
+		Provider: "codex",
+		Status:   auth.StatusActive,
+		Metadata: map[string]any{"access_token": "oauth-token"},
+	})
+	mediaSession := &fakeMediaSession{downstreamSDP: "v=0\r\no=downstream-answer\r\n"}
+	handler := NewHandler(manager, nil)
+	handler.mediaRelay = &fakeMediaRelay{
+		upstreamOffer: "v=0\r\no=gateway-offer\r\n",
+		session:       mediaSession,
+	}
+	router := gin.New()
+	router.POST("/v1/live", handler.Handle)
+
+	const boundary = "response-write-error-boundary"
+	body := multipartBody(boundary, "v=0\r\no=desktop-offer\r\n", `{"model":"gpt-live-1-codex"}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/live", strings.NewReader(body))
+	req.Header.Set("Content-Type", "multipart/form-data; boundary="+boundary)
+	writer := &failingHTTPWriter{header: make(http.Header)}
+	router.ServeHTTP(writer, req)
+
+	if writer.status != http.StatusCreated {
+		t.Fatalf("status = %d, want %d", writer.status, http.StatusCreated)
+	}
+	if !mediaSession.closed.Load() {
+		t.Fatal("response write failure retained its media session")
+	}
+	if _, ok := handler.sessions.peek("call-123"); ok {
+		t.Fatal("response write failure retained a stored session")
 	}
 }
 
@@ -454,6 +712,74 @@ func TestPrepareCallRequestRewritesMultipart(t *testing.T) {
 	}
 }
 
+func TestPrepareCallRequestPreservesRawSDPWhenRelayDisabled(t *testing.T) {
+	body := []byte("v=0\r\no=raw-offer\r\n")
+	prepared, contentType, model, errPrepare := prepareCallRequest(body, "application/sdp")
+	if errPrepare != nil {
+		t.Fatalf("prepareCallRequest() error = %v", errPrepare)
+	}
+	if string(prepared) != string(body) {
+		t.Fatalf("prepared SDP = %q, want original body", prepared)
+	}
+	if contentType != "application/sdp" {
+		t.Fatalf("content type = %q, want application/sdp", contentType)
+	}
+	if model != defaultLiveModel {
+		t.Fatalf("model = %q, want %q", model, defaultLiveModel)
+	}
+}
+
+func TestMediaRelayWrapsRawSDPForCodexBackend(t *testing.T) {
+	body := []byte("v=0\r\no=raw-offer\r\n")
+	clientOffer, errSDP := callRequestSDP(body, "application/sdp")
+	if errSDP != nil {
+		t.Fatalf("callRequestSDP() error = %v", errSDP)
+	}
+	if clientOffer != string(body) {
+		t.Fatalf("client offer = %q, want original body", clientOffer)
+	}
+	prepared, contentType, errReplace := replaceCallRequestSDP(body, "application/sdp", "v=0\r\no=gateway-offer\r\n")
+	if errReplace != nil {
+		t.Fatalf("replaceCallRequestSDP() error = %v", errReplace)
+	}
+	if contentType != "application/json" {
+		t.Fatalf("content type = %q, want application/json", contentType)
+	}
+	var payload struct {
+		SDP string `json:"sdp"`
+	}
+	if errUnmarshal := json.Unmarshal(prepared, &payload); errUnmarshal != nil {
+		t.Fatalf("unmarshal prepared request: %v", errUnmarshal)
+	}
+	if payload.SDP != "v=0\r\no=gateway-offer\r\n" {
+		t.Fatalf("upstream SDP = %q", payload.SDP)
+	}
+}
+
+func TestHandlerUpdatesMediaRelayConfig(t *testing.T) {
+	handler := NewHandler(nil, nil)
+	if relay, errRelay := handler.currentMediaRelay(); relay != nil || errRelay != nil {
+		t.Fatalf("initial media relay = %#v, error = %v", relay, errRelay)
+	}
+	enabled := &config.Config{Codex: config.CodexConfig{LiveMediaRelay: config.CodexLiveMediaRelayConfig{
+		Enabled:               true,
+		MaxSessions:           1,
+		AllowPrivateRemoteIPs: true,
+	}}}
+	if errUpdate := handler.UpdateConfig(enabled); errUpdate != nil {
+		t.Fatalf("enable media relay: %v", errUpdate)
+	}
+	if relay, errRelay := handler.currentMediaRelay(); relay == nil || errRelay != nil {
+		t.Fatalf("enabled media relay = %#v, error = %v", relay, errRelay)
+	}
+	if errUpdate := handler.UpdateConfig(&config.Config{}); errUpdate != nil {
+		t.Fatalf("disable media relay: %v", errUpdate)
+	}
+	if relay, errRelay := handler.currentMediaRelay(); relay != nil || errRelay != nil {
+		t.Fatalf("disabled media relay = %#v, error = %v", relay, errRelay)
+	}
+}
+
 func TestPrepareCallRequestRejectsInvalidMultipart(t *testing.T) {
 	const boundary = "invalid-live-boundary"
 	body := "--" + boundary + "\r\n" +
@@ -507,6 +833,29 @@ func TestSessionStoreClaimsAndExpiresSessions(t *testing.T) {
 		time.Sleep(time.Millisecond)
 	}
 	t.Fatal("released live session did not expire")
+}
+
+func TestSessionStoreCloseAllReleasesMediaAndResources(t *testing.T) {
+	store := newSessionStore()
+	mediaSession := &fakeMediaSession{}
+	stored := store.put("call-close-all", liveSession{media: mediaSession})
+	var resourceClosed atomic.Bool
+	stored.resources.add(func() error {
+		resourceClosed.Store(true)
+		return nil
+	})
+
+	store.closeAll("test_shutdown")
+
+	if !mediaSession.closed.Load() {
+		t.Fatal("closeAll() did not close the media session")
+	}
+	if !resourceClosed.Load() {
+		t.Fatal("closeAll() did not close session resources")
+	}
+	if _, ok := store.peek("call-close-all"); ok {
+		t.Fatal("closeAll() retained a session")
+	}
 }
 
 func TestSidebandURLShapes(t *testing.T) {

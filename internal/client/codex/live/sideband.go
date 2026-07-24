@@ -45,7 +45,15 @@ type liveSession struct {
 	authID        string
 	model         string
 	homeSelection *auth.HomeDispatchSelection
+	media         mediaRelaySession
+	resources     *liveSessionResources
 	token         uint64
+}
+
+type liveSessionResources struct {
+	mu      sync.Mutex
+	closed  bool
+	closers []func() error
 }
 
 type storedSession struct {
@@ -76,12 +84,15 @@ func newSessionStore() *sessionStore {
 	}
 }
 
-func (s *sessionStore) put(callID string, session liveSession) {
+func (s *sessionStore) put(callID string, session liveSession) liveSession {
 	if s == nil || !callIDPattern.MatchString(callID) {
-		endHomeSelection(session, "invalid_call_id")
-		return
+		endLiveSession(session, "invalid_call_id")
+		return liveSession{}
 	}
 
+	if session.resources == nil {
+		session.resources = &liveSessionResources{}
+	}
 	s.mu.Lock()
 	s.next++
 	session.callID = callID
@@ -98,10 +109,19 @@ func (s *sessionStore) put(callID string, session liveSession) {
 		if previous.timer != nil {
 			previous.timer.Stop()
 		}
+		if previous.session.resources != nil && previous.session.resources != session.resources {
+			previous.session.resources.close()
+		}
+		if previous.session.media != nil && previous.session.media != session.media {
+			if errClose := previous.session.media.Close(); errClose != nil {
+				log.WithError(errClose).Debug("codex live media: close replaced session")
+			}
+		}
 		if previous.session.homeSelection != session.homeSelection {
 			endHomeSelection(previous.session, "session_replaced")
 		}
 	}
+	return session
 }
 
 func (s *sessionStore) claim(callID string) (liveSession, sessionClaim) {
@@ -144,7 +164,7 @@ func (s *sessionStore) release(session liveSession) {
 
 func (s *sessionStore) complete(session liveSession, reason string) {
 	if s == nil || session.callID == "" {
-		endHomeSelection(session, reason)
+		endLiveSession(session, reason)
 		return
 	}
 	s.mu.Lock()
@@ -158,7 +178,26 @@ func (s *sessionStore) complete(session liveSession, reason string) {
 		entry.timer.Stop()
 	}
 	s.mu.Unlock()
-	endHomeSelection(entry.session, reason)
+	endLiveSession(entry.session, reason)
+}
+
+func (s *sessionStore) closeAll(reason string) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	entries := make([]*storedSession, 0, len(s.sessions))
+	for callID, entry := range s.sessions {
+		delete(s.sessions, callID)
+		if entry.timer != nil {
+			entry.timer.Stop()
+		}
+		entries = append(entries, entry)
+	}
+	s.mu.Unlock()
+	for _, entry := range entries {
+		endLiveSession(entry.session, reason)
+	}
 }
 
 func (s *sessionStore) expiryDuration() time.Duration {
@@ -177,7 +216,7 @@ func (s *sessionStore) expire(callID string, token uint64) {
 	}
 	delete(s.sessions, callID)
 	s.mu.Unlock()
-	endHomeSelection(entry.session, "session_expired")
+	endLiveSession(entry.session, "session_expired")
 }
 
 func (s *sessionStore) peek(callID string) (liveSession, bool) {
@@ -193,9 +232,62 @@ func (s *sessionStore) peek(callID string) (liveSession, bool) {
 	return entry.session, true
 }
 
+func endLiveSession(session liveSession, reason string) {
+	if session.resources != nil {
+		session.resources.close()
+	}
+	if session.media != nil {
+		if errClose := session.media.Close(); errClose != nil {
+			log.WithError(errClose).Debug("codex live media: close stored session")
+		}
+	}
+	endHomeSelection(session, reason)
+}
+
 func endHomeSelection(session liveSession, reason string) {
 	if session.homeSelection != nil {
 		session.homeSelection.End(reason)
+	}
+}
+
+func (r *liveSessionResources) add(closers ...func() error) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	if !r.closed {
+		r.closers = append(r.closers, closers...)
+		r.mu.Unlock()
+		return
+	}
+	r.mu.Unlock()
+	closeSessionResources(closers)
+}
+
+func (r *liveSessionResources) close() {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	if r.closed {
+		r.mu.Unlock()
+		return
+	}
+	r.closed = true
+	closers := r.closers
+	r.closers = nil
+	r.mu.Unlock()
+	closeSessionResources(closers)
+}
+
+func closeSessionResources(closers []func() error) {
+	for _, closer := range closers {
+		if closer == nil {
+			continue
+		}
+		if errClose := closer(); errClose != nil && !isNormalWebsocketClose(errClose) {
+			log.WithError(errClose).Debug("codex live: close session resource")
+		}
 	}
 }
 
@@ -355,6 +447,9 @@ func (h *Handler) HandleSideband(c *gin.Context) {
 		}
 	} else {
 		defer func() { _ = closeDownstream() }()
+	}
+	if session.resources != nil {
+		session.resources.add(closeUpstream, closeDownstream)
 	}
 	consumeSession = true
 
