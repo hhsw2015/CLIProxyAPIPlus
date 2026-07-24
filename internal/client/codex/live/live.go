@@ -1,0 +1,408 @@
+// Package live forwards Codex realtime WebRTC session bootstrap requests.
+package live
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"mime"
+	"mime/multipart"
+	"net/http"
+	"strings"
+	"sync"
+
+	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	log "github.com/sirupsen/logrus"
+)
+
+const (
+	upstreamCallURL  = "https://chatgpt.com/backend-api/codex/realtime/calls?intent=quicksilver&architecture=avas"
+	defaultLiveModel = "gpt-live-1-codex"
+	maxBodySize      = 16 << 20
+)
+
+var liveProtocolHeaders = []string{
+	"OpenAI-Alpha",
+	"X-Session-Id",
+	"Session-Id",
+	"Thread-Id",
+	"Originator",
+	"X-Oai-Attestation",
+}
+
+// Handler forwards Codex live session requests through the shared auth scheduler.
+type Handler struct {
+	authManager        *auth.Manager
+	cfg                *config.Config
+	sessions           *sessionStore
+	sidebandAPIBaseURL string
+}
+
+// NewHandler creates a Codex live session handler.
+func NewHandler(authManager *auth.Manager, cfg *config.Config) *Handler {
+	return &Handler{
+		authManager:        authManager,
+		cfg:                cfg,
+		sessions:           newSessionStore(),
+		sidebandAPIBaseURL: defaultSidebandAPIBaseURL,
+	}
+}
+
+// Handle forwards a WebRTC SDP bootstrap request to the Codex realtime calls endpoint.
+func (h *Handler) Handle(c *gin.Context) {
+	if h == nil || h.authManager == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Codex auth manager unavailable"})
+		return
+	}
+
+	body, errRead := readBody(c.Request.Body)
+	if errRead != nil {
+		status := http.StatusBadRequest
+		if errors.Is(errRead, errBodyTooLarge) {
+			status = http.StatusRequestEntityTooLarge
+		}
+		c.JSON(status, gin.H{"error": errRead.Error()})
+		return
+	}
+	upstreamBody, upstreamContentType, model, errPayload := prepareCallRequest(body, c.GetHeader("Content-Type"))
+	if errPayload != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": errPayload.Error()})
+		return
+	}
+
+	ctx := context.WithValue(c.Request.Context(), "gin", c)
+	selectionOpts := coreexecutor.Options{
+		Headers:         c.Request.Header.Clone(),
+		OriginalRequest: body,
+	}
+	selection, selected, errSelect := h.selectOAuth(ctx, model, selectionOpts)
+	if errSelect != nil {
+		writeSelectionError(c, errSelect)
+		return
+	}
+	if selected == nil {
+		if selection != nil {
+			selection.End("missing_auth")
+		}
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Codex auth unavailable"})
+		return
+	}
+
+	if selection != nil {
+		attemptCtx, releaseAttempt, errAttempt := selection.AttemptContext(ctx)
+		if errAttempt != nil {
+			selection.End("attempt_bind_failed")
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": errAttempt.Error()})
+			return
+		}
+		ctx = attemptCtx
+		defer releaseAttempt()
+	}
+	logging.SetGinCPATraceID(c, selected.EnsureIndex())
+
+	headers := protocolHeaders(c.Request.Header)
+	headers.Set("Content-Type", upstreamContentType)
+	setAccountHeader(headers, selected)
+	req, errRequest := h.authManager.NewHttpRequest(ctx, selected, http.MethodPost, upstreamCallURL, upstreamBody, headers)
+	if errRequest != nil {
+		if selection != nil {
+			selection.End("request_build_failed")
+		}
+		c.JSON(http.StatusBadGateway, gin.H{"error": errRequest.Error()})
+		return
+	}
+
+	authType, authValue := selected.AccountInfo()
+	helps.RecordAPIRequest(ctx, h.cfg, helps.UpstreamRequestLog{
+		URL:       upstreamCallURL,
+		Method:    http.MethodPost,
+		Headers:   headersForLogging(req.Header),
+		Body:      upstreamBody,
+		Provider:  "codex",
+		AuthID:    selected.ID,
+		AuthLabel: selected.Label,
+		AuthType:  authType,
+		AuthValue: authValue,
+	})
+
+	if errContext := ctx.Err(); errContext != nil {
+		if selection != nil {
+			selection.End("attempt_canceled")
+		}
+		c.JSON(http.StatusRequestTimeout, gin.H{"error": errContext.Error()})
+		return
+	}
+	resp, errRequest := h.authManager.HttpRequest(ctx, selected, req)
+	if errRequest != nil {
+		if selection != nil {
+			selection.End("request_failed")
+		}
+		helps.RecordAPIResponseError(ctx, h.cfg, errRequest)
+		c.JSON(http.StatusBadGateway, gin.H{"error": errRequest.Error()})
+		return
+	}
+
+	var closeResponseOnce sync.Once
+	var closeResponseErr error
+	closeResponseBody := func() error {
+		closeResponseOnce.Do(func() {
+			closeResponseErr = resp.Body.Close()
+			if closeResponseErr != nil {
+				log.Errorf("codex live: close response body error: %v", closeResponseErr)
+			}
+		})
+		return closeResponseErr
+	}
+	defer func() { _ = closeResponseBody() }()
+	if selection != nil {
+		if errBind := selection.Bind(closeResponseBody); errBind != nil {
+			selection.End("response_bind_failed")
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": errBind.Error()})
+			return
+		}
+		defer func() {
+			if !selection.Retained() {
+				selection.End("response_closed")
+			}
+		}()
+	}
+
+	responseHeaders := callResponseHeaders(resp.Header)
+	helps.RecordAPIResponseMetadata(ctx, h.cfg, resp.StatusCode, responseHeaders)
+	responseBody, errResponse := readLimitedBody(resp.Body)
+	if errResponse != nil {
+		helps.RecordAPIResponseError(ctx, h.cfg, errResponse)
+		message := "Failed to read Codex live response"
+		if errors.Is(errResponse, errBodyTooLarge) {
+			message = "Codex live response body too large"
+		}
+		c.JSON(http.StatusBadGateway, gin.H{"error": message})
+		return
+	}
+	helps.AppendAPIResponseChunk(ctx, h.cfg, responseBody)
+	if resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices && h.sessions != nil {
+		if callID := callIDFromLocation(resp.Header.Get("Location")); callID != "" {
+			session := liveSession{authID: selected.ID, model: model}
+			if selection != nil {
+				if errBind := selection.Bind(func() error {
+					// End outside the resource closer to avoid waiting on the closer itself.
+					go selection.End("session_drained")
+					return nil
+				}); errBind != nil {
+					selection.End("session_drain_bind_failed")
+					c.JSON(http.StatusServiceUnavailable, gin.H{"error": errBind.Error()})
+					return
+				}
+				selection.Retain()
+				session.homeSelection = selection
+			}
+			h.sessions.put(callID, session)
+		}
+	}
+	writeResponseHeaders(c.Writer.Header(), responseHeaders)
+	c.Status(resp.StatusCode)
+	if _, errWrite := c.Writer.Write(responseBody); errWrite != nil {
+		helps.RecordAPIResponseError(ctx, h.cfg, errWrite)
+		log.WithError(errWrite).Warn("codex live: write response body failed")
+	}
+}
+
+func (h *Handler) selectOAuth(ctx context.Context, model string, opts coreexecutor.Options) (*auth.HomeDispatchSelection, *auth.Auth, error) {
+	var selection *auth.HomeDispatchSelection
+	var selected *auth.Auth
+	var errSelect error
+	if h.authManager.HomeEnabled() {
+		selection, errSelect = h.authManager.SelectHomeAuthByKind(ctx, "codex", model, auth.AuthKindOAuth, opts)
+		if selection != nil {
+			selected = selection.CloneAuth()
+		}
+	} else {
+		selected, errSelect = h.authManager.SelectAuthByKind(ctx, "codex", "", auth.AuthKindOAuth, opts)
+	}
+	if errSelect != nil && selection != nil {
+		selection.End("selection_failed")
+	}
+	return selection, selected, errSelect
+}
+
+var errBodyTooLarge = errors.New("Codex live request body too large")
+
+func readBody(body io.Reader) ([]byte, error) {
+	payload, errRead := readLimitedBody(body)
+	if errRead != nil {
+		if errors.Is(errRead, errBodyTooLarge) {
+			return nil, errRead
+		}
+		return nil, fmt.Errorf("failed to read Codex live request: %w", errRead)
+	}
+	return payload, nil
+}
+
+func readLimitedBody(body io.Reader) ([]byte, error) {
+	if body == nil {
+		return nil, nil
+	}
+	payload, errRead := io.ReadAll(io.LimitReader(body, maxBodySize+1))
+	if errRead != nil {
+		return nil, errRead
+	}
+	if len(payload) > maxBodySize {
+		return nil, errBodyTooLarge
+	}
+	return payload, nil
+}
+
+func prepareCallRequest(body []byte, contentType string) ([]byte, string, string, error) {
+	mediaType, params, errMediaType := mime.ParseMediaType(contentType)
+	if errMediaType == nil && strings.EqualFold(mediaType, "multipart/form-data") {
+		return multipartCallRequest(body, strings.TrimSpace(params["boundary"]))
+	}
+
+	model := modelFromJSON(body)
+	if model == "" {
+		model = defaultLiveModel
+	}
+	if strings.TrimSpace(contentType) == "" {
+		contentType = "application/json"
+	}
+	return body, contentType, model, nil
+}
+
+func multipartCallRequest(body []byte, boundary string) ([]byte, string, string, error) {
+	if boundary == "" {
+		return nil, "", "", errors.New("Codex live multipart boundary is missing")
+	}
+
+	reader := multipart.NewReader(bytes.NewReader(body), boundary)
+	var sdp *string
+	var session json.RawMessage
+	model := ""
+	for {
+		part, errPart := reader.NextPart()
+		if errors.Is(errPart, io.EOF) {
+			break
+		}
+		if errPart != nil {
+			return nil, "", "", fmt.Errorf("failed to parse Codex live multipart body: %w", errPart)
+		}
+		partBody, errRead := io.ReadAll(part)
+		errClose := part.Close()
+		if errRead != nil {
+			return nil, "", "", fmt.Errorf("failed to read Codex live multipart field: %w", errRead)
+		}
+		if errClose != nil {
+			return nil, "", "", fmt.Errorf("failed to close Codex live multipart field: %w", errClose)
+		}
+
+		switch part.FormName() {
+		case "sdp":
+			value := string(partBody)
+			sdp = &value
+		case "session":
+			if !json.Valid(partBody) {
+				return nil, "", "", errors.New("Codex live session field must contain valid JSON")
+			}
+			session = append(json.RawMessage(nil), partBody...)
+			model = modelFromJSON(partBody)
+		}
+	}
+	if sdp == nil {
+		return nil, "", "", errors.New("Codex live multipart body requires an sdp field")
+	}
+	if model == "" {
+		model = defaultLiveModel
+	}
+
+	payload := struct {
+		SDP     string          `json:"sdp"`
+		Session json.RawMessage `json:"session,omitempty"`
+	}{
+		SDP:     *sdp,
+		Session: session,
+	}
+	encoded, errMarshal := json.Marshal(payload)
+	if errMarshal != nil {
+		return nil, "", "", fmt.Errorf("failed to encode Codex live request: %w", errMarshal)
+	}
+	return encoded, "application/json", model, nil
+}
+
+func modelFromJSON(body []byte) string {
+	var payload struct {
+		Model   string `json:"model"`
+		Session struct {
+			Model string `json:"model"`
+		} `json:"session"`
+	}
+	if errUnmarshal := json.Unmarshal(body, &payload); errUnmarshal != nil {
+		return ""
+	}
+	if model := strings.TrimSpace(payload.Session.Model); model != "" {
+		return model
+	}
+	return strings.TrimSpace(payload.Model)
+}
+
+func protocolHeaders(source http.Header) http.Header {
+	headers := make(http.Header)
+	for _, name := range liveProtocolHeaders {
+		for _, value := range source.Values(name) {
+			headers.Add(name, value)
+		}
+	}
+	return headers
+}
+
+func setAccountHeader(headers http.Header, selected *auth.Auth) {
+	if selected == nil {
+		return
+	}
+	if accountID, ok := selected.Metadata["account_id"].(string); ok && strings.TrimSpace(accountID) != "" {
+		headers.Set("Chatgpt-Account-Id", accountID)
+	}
+}
+
+func headersForLogging(source http.Header) http.Header {
+	headers := source.Clone()
+	if headers.Get("X-Oai-Attestation") != "" {
+		headers.Set("X-Oai-Attestation", "[REDACTED]")
+	}
+	return headers
+}
+
+func callResponseHeaders(source http.Header) http.Header {
+	headers := make(http.Header)
+	for _, name := range []string{"Content-Type", "Location"} {
+		for _, value := range source.Values(name) {
+			headers.Add(name, value)
+		}
+	}
+	return headers
+}
+
+func writeResponseHeaders(destination, source http.Header) {
+	for name, values := range source {
+		for _, value := range values {
+			destination.Add(name, value)
+		}
+	}
+}
+
+func writeSelectionError(c *gin.Context, err error) {
+	status := http.StatusServiceUnavailable
+	if statusError, ok := err.(interface{ StatusCode() int }); ok && statusError.StatusCode() > 0 {
+		status = statusError.StatusCode()
+	}
+	for _, value := range auth.SafeResponseHeaders(err).Values("Retry-After") {
+		c.Writer.Header().Add("Retry-After", value)
+	}
+	c.JSON(status, gin.H{"error": err.Error()})
+}
