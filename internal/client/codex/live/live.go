@@ -238,7 +238,7 @@ func (h *Handler) Handle(c *gin.Context) {
 			return
 		}
 		var upstreamOffer string
-		mediaSession, upstreamOffer, errSDP = mediaRelay.NewSession(ctx, clientOffer)
+		mediaSession, upstreamOffer, errSDP = mediaRelay.NewSession(ctx, clientOffer, proxyURLForAuth(runtimeConfig, selected))
 		if errSDP != nil {
 			c.JSON(http.StatusBadGateway, gin.H{"error": errSDP.Error()})
 			return

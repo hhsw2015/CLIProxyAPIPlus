@@ -3,6 +3,7 @@ package live
 import (
 	"context"
 	"net"
+	"strings"
 	"testing"
 	"time"
 
@@ -13,6 +14,62 @@ import (
 	log "github.com/sirupsen/logrus"
 	logtest "github.com/sirupsen/logrus/hooks/test"
 )
+
+func TestPionMediaRelaySelectsRemoteProxyMode(t *testing.T) {
+	clientAPI := newTestWebRTCAPI(t)
+	client, errClient := clientAPI.NewPeerConnection(webrtc.Configuration{})
+	if errClient != nil {
+		t.Fatalf("create client PeerConnection: %v", errClient)
+	}
+	defer closeTestPeerConnection(t, client)
+	if _, errChannel := client.CreateDataChannel(realtimeDataChannelLabel, nil); errChannel != nil {
+		t.Fatalf("create client DataChannel: %v", errChannel)
+	}
+	clientOffer := completeOffer(t, client)
+	relay, errRelay := newPionMediaRelay(config.CodexLiveMediaRelayConfig{
+		Enabled:  true,
+		PublicIP: "198.51.100.1",
+	})
+	if errRelay != nil {
+		t.Fatalf("create media relay: %v", errRelay)
+	}
+
+	for name, testCase := range map[string]struct {
+		proxyURL string
+		proxied  bool
+	}{
+		"inherit": {proxyURL: ""},
+		"direct":  {proxyURL: "direct"},
+		"HTTP":    {proxyURL: "http://proxy.example:8080", proxied: true},
+		"HTTPS":   {proxyURL: "https://proxy.example:8443", proxied: true},
+		"SOCKS5":  {proxyURL: "socks5://proxy.example:1080", proxied: true},
+		"SOCKS5H": {proxyURL: "socks5h://proxy.example:1080", proxied: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			session, upstreamOffer, errSession := relay.NewSession(context.Background(), clientOffer, testCase.proxyURL)
+			if errSession != nil {
+				t.Fatalf("create media session: %v", errSession)
+			}
+			pionSession, ok := session.(*pionMediaSession)
+			if !ok {
+				t.Fatalf("media session type = %T", session)
+			}
+			if got := pionSession.proxyDialer != nil; got != testCase.proxied {
+				t.Fatalf("proxied = %t, want %t", got, testCase.proxied)
+			}
+			if testCase.proxied && !offerCandidatesAreLoopback(t, upstreamOffer) {
+				t.Fatal("proxied upstream offer exposed a non-loopback candidate")
+			}
+			if errClose := session.Close(); errClose != nil {
+				t.Fatalf("close media session: %v", errClose)
+			}
+		})
+	}
+
+	if _, _, errSession := relay.NewSession(context.Background(), clientOffer, "invalid-proxy"); errSession == nil {
+		t.Fatal("expected invalid proxy URL to fail media session creation")
+	}
+}
 
 func TestPionMediaRelayBridgesAudioAndDataChannel(t *testing.T) {
 	logger := log.StandardLogger()
@@ -69,7 +126,7 @@ func TestPionMediaRelayBridgesAudioAndDataChannel(t *testing.T) {
 	if errRelay != nil {
 		t.Fatalf("create media relay: %v", errRelay)
 	}
-	session, relayOffer, errSession := relay.NewSession(context.Background(), clientOffer)
+	session, relayOffer, errSession := relay.NewSession(context.Background(), clientOffer, "")
 	if errSession != nil {
 		t.Fatalf("create media relay session: %v", errSession)
 	}
@@ -83,7 +140,7 @@ func TestPionMediaRelayBridgesAudioAndDataChannel(t *testing.T) {
 	if errRelay != nil {
 		t.Fatalf("reload media relay: %v", errRelay)
 	}
-	if _, _, errCapacity := reloadedRelay.NewSession(context.Background(), clientOffer); errCapacity == nil {
+	if _, _, errCapacity := reloadedRelay.NewSession(context.Background(), clientOffer, ""); errCapacity == nil {
 		t.Fatal("reloaded media relay bypassed the shared session capacity")
 	}
 
@@ -165,7 +222,7 @@ func TestPionMediaRelayBridgesAudioAndDataChannel(t *testing.T) {
 	if errClose := session.Close(); errClose != nil {
 		t.Fatalf("close media relay session for logging: %v", errClose)
 	}
-	replacementSession, _, errReplacement := reloadedRelay.NewSession(context.Background(), clientOffer)
+	replacementSession, _, errReplacement := reloadedRelay.NewSession(context.Background(), clientOffer, "")
 	if errReplacement != nil {
 		t.Fatalf("shared capacity was not released: %v", errReplacement)
 	}
@@ -200,6 +257,27 @@ func TestIsPublicRemoteIP(t *testing.T) {
 	if isPublicRemoteIP(nil) {
 		t.Fatal("isPublicRemoteIP(nil) = true, want false")
 	}
+}
+
+func offerCandidatesAreLoopback(t *testing.T, offer string) bool {
+	t.Helper()
+	lines := strings.Split(strings.ReplaceAll(offer, "\r\n", "\n"), "\n")
+	candidateCount := 0
+	for _, line := range lines {
+		if !strings.HasPrefix(line, "a=candidate:") {
+			continue
+		}
+		candidateCount++
+		fields := strings.Fields(strings.TrimPrefix(line, "a=candidate:"))
+		if len(fields) < 6 {
+			t.Fatalf("malformed offer candidate: %q", line)
+		}
+		address := net.ParseIP(fields[4])
+		if address == nil || !address.IsLoopback() {
+			return false
+		}
+	}
+	return candidateCount > 0
 }
 
 func newTestWebRTCAPI(t *testing.T) *webrtc.API {

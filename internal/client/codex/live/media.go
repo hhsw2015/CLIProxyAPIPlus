@@ -14,7 +14,9 @@ import (
 	"github.com/pion/rtp"
 	"github.com/pion/webrtc/v4"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/proxyutil"
 	log "github.com/sirupsen/logrus"
+	"golang.org/x/net/proxy"
 )
 
 const (
@@ -40,14 +42,15 @@ type mediaRelaySession interface {
 }
 
 type mediaRelayFactory interface {
-	NewSession(context.Context, string) (mediaRelaySession, string, error)
+	NewSession(context.Context, string, string) (mediaRelaySession, string, error)
 }
 
 type pionMediaRelay struct {
-	downstreamAPI *webrtc.API
-	upstreamAPI   *webrtc.API
-	configuration webrtc.Configuration
-	limiter       *mediaSessionLimiter
+	downstreamAPI    *webrtc.API
+	upstreamAPI      *webrtc.API
+	proxyUpstreamAPI *webrtc.API
+	configuration    webrtc.Configuration
+	limiter          *mediaSessionLimiter
 }
 
 type mediaSessionLimiter struct {
@@ -72,6 +75,12 @@ type pionMediaSession struct {
 	mediaSessionID string
 	callID         string
 	releaseSlot    func()
+
+	proxyDialer proxy.ContextDialer
+	proxyScheme string
+	localOffer  string
+	tunnelsMu   sync.Mutex
+	tunnels     []*tcpCandidateTunnel
 }
 
 type dataChannelMessage struct {
@@ -118,6 +127,10 @@ func newPionMediaRelayWithLimiter(relayConfig config.CodexLiveMediaRelayConfig, 
 	if errAPI != nil {
 		return nil, errAPI
 	}
+	proxyUpstreamAPI, errAPI := newPionProxyAPI(relayConfig)
+	if errAPI != nil {
+		return nil, errAPI
+	}
 	iceServers := make([]webrtc.ICEServer, 0, len(relayConfig.ICEServers))
 	for _, server := range relayConfig.ICEServers {
 		urls := make([]string, 0, len(server.URLs))
@@ -136,10 +149,11 @@ func newPionMediaRelayWithLimiter(relayConfig config.CodexLiveMediaRelayConfig, 
 	}
 	limiter.setLimit(relayConfig.EffectiveMaxSessions())
 	return &pionMediaRelay{
-		downstreamAPI: downstreamAPI,
-		upstreamAPI:   upstreamAPI,
-		configuration: webrtc.Configuration{ICEServers: iceServers},
-		limiter:       limiter,
+		downstreamAPI:    downstreamAPI,
+		upstreamAPI:      upstreamAPI,
+		proxyUpstreamAPI: proxyUpstreamAPI,
+		configuration:    webrtc.Configuration{ICEServers: iceServers},
+		limiter:          limiter,
 	}, nil
 }
 
@@ -177,6 +191,14 @@ func (l *mediaSessionLimiter) release() {
 }
 
 func newPionAPI(relayConfig config.CodexLiveMediaRelayConfig, filterPrivateRemoteIPs bool) (*webrtc.API, error) {
+	return newPionAPIWithOptions(relayConfig, filterPrivateRemoteIPs, false)
+}
+
+func newPionProxyAPI(relayConfig config.CodexLiveMediaRelayConfig) (*webrtc.API, error) {
+	return newPionAPIWithOptions(relayConfig, false, true)
+}
+
+func newPionAPIWithOptions(relayConfig config.CodexLiveMediaRelayConfig, filterPrivateRemoteIPs, loopbackOnly bool) (*webrtc.API, error) {
 	mediaEngine := &webrtc.MediaEngine{}
 	if errRegister := mediaEngine.RegisterCodec(webrtc.RTPCodecParameters{
 		RTPCodecCapability: opusCodec,
@@ -189,16 +211,30 @@ func newPionAPI(relayConfig config.CodexLiveMediaRelayConfig, filterPrivateRemot
 		return nil, fmt.Errorf("register WebRTC interceptors: %w", errRegister)
 	}
 	settingEngine := webrtc.SettingEngine{}
-	if relayConfig.UDPPortMin != 0 {
-		if errPorts := settingEngine.SetEphemeralUDPPortRange(relayConfig.UDPPortMin, relayConfig.UDPPortMax); errPorts != nil {
-			return nil, fmt.Errorf("configure WebRTC UDP port range: %w", errPorts)
+	if !loopbackOnly {
+		if relayConfig.UDPPortMin != 0 {
+			if errPorts := settingEngine.SetEphemeralUDPPortRange(relayConfig.UDPPortMin, relayConfig.UDPPortMax); errPorts != nil {
+				return nil, fmt.Errorf("configure WebRTC UDP port range: %w", errPorts)
+			}
 		}
-	}
-	if publicIP := strings.TrimSpace(relayConfig.PublicIP); publicIP != "" {
-		settingEngine.SetNAT1To1IPs([]string{publicIP}, webrtc.ICECandidateTypeHost)
+		if publicIP := strings.TrimSpace(relayConfig.PublicIP); publicIP != "" {
+			settingEngine.SetNAT1To1IPs([]string{publicIP}, webrtc.ICECandidateTypeHost)
+		}
 	}
 	if filterPrivateRemoteIPs {
 		settingEngine.SetRemoteIPFilter(isPublicRemoteIP)
+	}
+	if loopbackOnly {
+		settingEngine.SetNetworkTypes([]webrtc.NetworkType{
+			webrtc.NetworkTypeUDP4,
+			webrtc.NetworkTypeUDP6,
+			webrtc.NetworkTypeTCP4,
+			webrtc.NetworkTypeTCP6,
+		})
+		settingEngine.SetIncludeLoopbackCandidate(true)
+		settingEngine.SetIPFilter(func(ip net.IP) bool {
+			return ip != nil && ip.IsLoopback()
+		})
 	}
 	return webrtc.NewAPI(
 		webrtc.WithMediaEngine(mediaEngine),
@@ -212,12 +248,25 @@ func isPublicRemoteIP(ip net.IP) bool {
 		!ip.IsLinkLocalUnicast() && !ip.IsLinkLocalMulticast() && !ip.IsMulticast()
 }
 
-func (r *pionMediaRelay) NewSession(ctx context.Context, clientOffer string) (mediaRelaySession, string, error) {
-	if r == nil || r.downstreamAPI == nil || r.upstreamAPI == nil || r.limiter == nil {
+func (r *pionMediaRelay) NewSession(ctx context.Context, clientOffer, proxyURL string) (mediaRelaySession, string, error) {
+	if r == nil || r.downstreamAPI == nil || r.upstreamAPI == nil || r.proxyUpstreamAPI == nil || r.limiter == nil {
 		return nil, "", errors.New("Codex live media relay unavailable")
 	}
 	if errContext := ctx.Err(); errContext != nil {
 		return nil, "", errContext
+	}
+	builtProxyDialer, proxyMode, errProxy := proxyutil.BuildDialer(proxyURL)
+	if errProxy != nil {
+		return nil, "", fmt.Errorf("configure Codex live remote TCP proxy: %w", errProxy)
+	}
+	proxied := proxyMode == proxyutil.ModeProxy
+	var proxyDialer proxy.ContextDialer
+	if proxied {
+		contextDialer, ok := builtProxyDialer.(proxy.ContextDialer)
+		if !ok {
+			return nil, "", errors.New("Codex live remote TCP proxy does not support cancellation")
+		}
+		proxyDialer = contextDialer
 	}
 	if !r.limiter.acquire() {
 		return nil, "", errors.New("Codex live media relay capacity exhausted")
@@ -228,7 +277,13 @@ func (r *pionMediaRelay) NewSession(ctx context.Context, clientOffer string) (me
 		releaseSlot()
 		return nil, "", fmt.Errorf("create downstream PeerConnection: %w", errDownstream)
 	}
-	upstream, errUpstream := r.upstreamAPI.NewPeerConnection(r.configuration)
+	upstreamAPI := r.upstreamAPI
+	upstreamConfiguration := r.configuration
+	if proxied {
+		upstreamAPI = r.proxyUpstreamAPI
+		upstreamConfiguration.ICEServers = nil
+	}
+	upstream, errUpstream := upstreamAPI.NewPeerConnection(upstreamConfiguration)
 	if errUpstream != nil {
 		releaseSlot()
 		if errClose := downstream.Close(); errClose != nil {
@@ -243,6 +298,8 @@ func (r *pionMediaRelay) NewSession(ctx context.Context, clientOffer string) (me
 		done:           make(chan struct{}),
 		mediaSessionID: uuid.NewString(),
 		releaseSlot:    releaseSlot,
+		proxyDialer:    proxyDialer,
+		proxyScheme:    proxyScheme(proxyURL),
 	}
 	session.bridge = newDataChannelBridge(session.done, func(err error) {
 		session.fail("data_channel_failed", err)
@@ -331,6 +388,7 @@ func (r *pionMediaRelay) NewSession(ctx context.Context, clientOffer string) (me
 		_ = session.Close()
 		return nil, "", errors.New("upstream WebRTC offer is empty")
 	}
+	session.localOffer = localDescription.SDP
 	return session, localDescription.SDP, nil
 }
 
@@ -338,11 +396,30 @@ func (s *pionMediaSession) AcceptUpstreamAnswer(ctx context.Context, upstreamAns
 	if s == nil || s.upstream == nil || s.downstream == nil {
 		return "", errors.New("Codex live media session unavailable")
 	}
+	answerToApply := upstreamAnswer
+	if s.proxyDialer != nil {
+		rewrittenAnswer, tunnels, errProxy := prepareProxiedUpstreamAnswer(upstreamAnswer, s.localOffer, s.proxyDialer)
+		if errProxy != nil {
+			return "", errProxy
+		}
+		if !s.installCandidateTunnels(tunnels) {
+			errClosed := errors.New("Codex live media session closed while configuring TCP proxy")
+			if errClose := closeCandidateTunnels(tunnels); errClose != nil {
+				return "", errors.Join(errClosed, fmt.Errorf("close TCP candidate tunnels: %w", errClose))
+			}
+			return "", errClosed
+		}
+		answerToApply = rewrittenAnswer
+	}
 	if errRemote := s.upstream.SetRemoteDescription(webrtc.SessionDescription{
 		Type: webrtc.SDPTypeAnswer,
-		SDP:  upstreamAnswer,
+		SDP:  answerToApply,
 	}); errRemote != nil {
-		return "", fmt.Errorf("set upstream WebRTC answer: %w", errRemote)
+		errSetRemote := fmt.Errorf("set upstream WebRTC answer: %w", errRemote)
+		if errClose := s.closeCandidateTunnels(); errClose != nil {
+			return "", errors.Join(errSetRemote, fmt.Errorf("close TCP candidate tunnels: %w", errClose))
+		}
+		return "", errSetRemote
 	}
 	gatherComplete := webrtc.GatheringCompletePromise(s.downstream)
 	answer, errAnswer := s.downstream.CreateAnswer(nil)
@@ -364,6 +441,32 @@ func (s *pionMediaSession) AcceptUpstreamAnswer(ctx context.Context, upstreamAns
 	return localDescription.SDP, nil
 }
 
+func (s *pionMediaSession) installCandidateTunnels(tunnels []*tcpCandidateTunnel) bool {
+	if s == nil {
+		return false
+	}
+	s.tunnelsMu.Lock()
+	defer s.tunnelsMu.Unlock()
+	select {
+	case <-s.done:
+		return false
+	default:
+	}
+	s.tunnels = tunnels
+	return true
+}
+
+func (s *pionMediaSession) closeCandidateTunnels() error {
+	if s == nil {
+		return nil
+	}
+	s.tunnelsMu.Lock()
+	tunnels := s.tunnels
+	s.tunnels = nil
+	s.tunnelsMu.Unlock()
+	return closeCandidateTunnels(tunnels)
+}
+
 func (s *pionMediaSession) SetCallID(callID string) {
 	if s == nil {
 		return
@@ -383,6 +486,10 @@ func (s *pionMediaSession) logFields(peer string) log.Fields {
 	s.handlerMu.Unlock()
 	if callID != "" {
 		fields["call_id"] = callID
+	}
+	if s.proxyDialer != nil && (peer == "remote" || peer == "session") {
+		fields["remote_transport"] = "tcp"
+		fields["proxy_scheme"] = s.proxyScheme
 	}
 	return fields
 }
@@ -421,6 +528,9 @@ func (s *pionMediaSession) CloseWithReason(reason string) error {
 			s.bridge.close()
 		}
 		var closeErrors []error
+		if errClose := s.closeCandidateTunnels(); errClose != nil {
+			closeErrors = append(closeErrors, fmt.Errorf("close TCP candidate tunnels: %w", errClose))
+		}
 		if errClose := s.closePeerConnection("local", s.downstream); errClose != nil {
 			closeErrors = append(closeErrors, fmt.Errorf("close downstream PeerConnection: %w", errClose))
 		}

@@ -617,10 +617,10 @@ func isNormalWebsocketClose(err error) bool {
 }
 
 func newProxyAwareSidebandDialer(cfg *config.Config, selected *auth.Auth) *websocket.Dialer {
-	return newSidebandDialer(proxyURLForSideband(cfg, selected))
+	return newSidebandDialer(proxyURLForAuth(cfg, selected))
 }
 
-func proxyURLForSideband(cfg *config.Config, selected *auth.Auth) string {
+func proxyURLForAuth(cfg *config.Config, selected *auth.Auth) string {
 	if selected != nil && strings.TrimSpace(selected.ProxyURL) != "" {
 		return strings.TrimSpace(selected.ProxyURL)
 	}

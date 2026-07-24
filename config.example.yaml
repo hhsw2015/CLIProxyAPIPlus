@@ -232,8 +232,10 @@ codex:
     udp-port-min: 0
     udp-port-max: 0
     # Optional STUN/TURN servers. TURN credentials are never returned by the JSON config API.
-    # Global and per-auth proxy-url settings apply to call creation and Sideband WebSocket only;
-    # WebRTC media uses direct ICE/STUN/TURN connectivity and does not traverse that proxy.
+    # Without a concrete global/per-auth proxy-url, WebRTC uses normal direct ICE/STUN/TURN connectivity.
+    # With http, https, socks5, or socks5h proxy-url, the OpenAI-facing leg is forced through
+    # authenticated ICE-TCP over that proxy and never falls back to UDP or a direct connection.
+    # The Codex Desktop-facing leg remains direct, and configured ICE servers still apply to it.
     # ice-servers:
     #   - urls:
     #       - "stun:stun.example.com:3478"

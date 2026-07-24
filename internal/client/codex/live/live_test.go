@@ -149,13 +149,15 @@ func (b *trackedResponseBody) Close() error {
 
 type fakeMediaRelay struct {
 	clientOffer   string
+	proxyURL      string
 	upstreamOffer string
 	session       *fakeMediaSession
 	err           error
 }
 
-func (r *fakeMediaRelay) NewSession(_ context.Context, clientOffer string) (mediaRelaySession, string, error) {
+func (r *fakeMediaRelay) NewSession(_ context.Context, clientOffer, proxyURL string) (mediaRelaySession, string, error) {
 	r.clientOffer = clientOffer
+	r.proxyURL = proxyURL
 	return r.session, r.upstreamOffer, r.err
 }
 
@@ -318,6 +320,20 @@ func TestHandlerRewritesLiveCallAndSchedulesOAuth(t *testing.T) {
 	}
 }
 
+func TestProxyURLForAuthPrefersCredentialOverride(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.ProxyURL = "http://global.example:8080"
+	if got := proxyURLForAuth(cfg, &auth.Auth{ProxyURL: "socks5://credential.example:1080"}); got != "socks5://credential.example:1080" {
+		t.Fatalf("effective proxy URL = %q, want credential override", got)
+	}
+	if got := proxyURLForAuth(cfg, &auth.Auth{}); got != "http://global.example:8080" {
+		t.Fatalf("effective proxy URL = %q, want global fallback", got)
+	}
+	if got := proxyURLForAuth(cfg, &auth.Auth{ProxyURL: "direct"}); got != "direct" {
+		t.Fatalf("effective proxy URL = %q, want explicit direct override", got)
+	}
+}
+
 func TestHandlerRelaysWebRTCMediaSDP(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
@@ -330,6 +346,7 @@ func TestHandlerRelaysWebRTCMediaSDP(t *testing.T) {
 		ID:       "codex-oauth",
 		Provider: "codex",
 		Status:   auth.StatusActive,
+		ProxyURL: "socks5://credential-proxy.example:1080",
 		Metadata: map[string]any{"access_token": "oauth-token"},
 	})
 	mediaSession := &fakeMediaSession{downstreamSDP: "v=0\r\no=downstream-answer\r\n"}
@@ -337,7 +354,9 @@ func TestHandlerRelaysWebRTCMediaSDP(t *testing.T) {
 		upstreamOffer: "v=0\r\no=gateway-offer\r\n",
 		session:       mediaSession,
 	}
-	handler := NewHandler(manager, nil)
+	runtimeConfig := &config.Config{}
+	runtimeConfig.ProxyURL = "http://global-proxy.example:8080"
+	handler := NewHandler(manager, runtimeConfig)
 	handler.mediaRelay = mediaRelay
 	router := gin.New()
 	router.POST("/v1/live", handler.Handle)
@@ -354,6 +373,9 @@ func TestHandlerRelaysWebRTCMediaSDP(t *testing.T) {
 	}
 	if mediaRelay.clientOffer != "v=0\r\no=desktop-offer\r\n" {
 		t.Fatalf("media client offer = %q", mediaRelay.clientOffer)
+	}
+	if mediaRelay.proxyURL != "socks5://credential-proxy.example:1080" {
+		t.Fatalf("media proxy URL = %q, want credential override", mediaRelay.proxyURL)
 	}
 	var upstreamPayload struct {
 		SDP string `json:"sdp"`
