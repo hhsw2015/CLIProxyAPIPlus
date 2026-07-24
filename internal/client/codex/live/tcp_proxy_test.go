@@ -37,6 +37,14 @@ type blockingContextDialer struct {
 	canceled chan struct{}
 }
 
+type closedUpstreamDialer struct{}
+
+func (*closedUpstreamDialer) DialContext(context.Context, string, string) (net.Conn, error) {
+	client, server := net.Pipe()
+	_ = server.Close()
+	return client, nil
+}
+
 func (d *blockingContextDialer) DialContext(ctx context.Context, _, _ string) (net.Conn, error) {
 	close(d.started)
 	<-ctx.Done()
@@ -228,6 +236,10 @@ func TestTCPCandidateTunnelAuthenticatesBeforeFixedTargetDial(t *testing.T) {
 		t.Fatalf("newTCPCandidateTunnel returned error: %v", errTunnel)
 	}
 	defer func() { _ = tunnel.Close() }()
+	forwardingStarted := make(chan struct{}, 1)
+	tunnel.setForwardingStartedHandler(func() {
+		forwardingStarted <- struct{}{}
+	})
 
 	client, errDial := net.Dial("tcp", tunnel.listener.Addr().String())
 	if errDial != nil {
@@ -255,6 +267,11 @@ func TestTCPCandidateTunnelAuthenticatesBeforeFixedTargetDial(t *testing.T) {
 	}
 	if !bytes.Equal(forwarded, frame) {
 		t.Fatal("forwarded STUN frame changed")
+	}
+	select {
+	case <-forwardingStarted:
+	case <-time.After(time.Second):
+		t.Fatal("forwarding start handler was not called")
 	}
 	if errWrite := writeAll(dial.connection, []byte("reply")); errWrite != nil {
 		t.Fatalf("write tunnel reply: %v", errWrite)
@@ -295,6 +312,8 @@ func TestTCPCandidateTunnelCloseCancelsProxyDial(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("proxy dial did not start")
 	}
+	forwardingStarted := make(chan struct{}, 1)
+	tunnel.setForwardingStartedHandler(func() { forwardingStarted <- struct{}{} })
 	if errClose := tunnel.Close(); errClose != nil {
 		t.Fatalf("close tunnel: %v", errClose)
 	}
@@ -303,6 +322,7 @@ func TestTCPCandidateTunnelCloseCancelsProxyDial(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("tunnel close did not cancel proxy dial")
 	}
+	assertNoForwardingStart(t, forwardingStarted)
 }
 
 func TestTCPCandidateTunnelProxyFailureDoesNotFallBack(t *testing.T) {
@@ -320,6 +340,8 @@ func TestTCPCandidateTunnelProxyFailureDoesNotFallBack(t *testing.T) {
 		t.Fatalf("newTCPCandidateTunnel returned error: %v", errTunnel)
 	}
 	defer func() { _ = tunnel.Close() }()
+	forwardingStarted := make(chan struct{}, 1)
+	tunnel.setForwardingStartedHandler(func() { forwardingStarted <- struct{}{} })
 	client, errDial := net.Dial("tcp", tunnel.listener.Addr().String())
 	if errDial != nil {
 		t.Fatalf("dial candidate listener: %v", errDial)
@@ -339,6 +361,31 @@ func TestTCPCandidateTunnelProxyFailureDoesNotFallBack(t *testing.T) {
 	if _, errSecondDial := net.Dial("tcp", tunnel.listener.Addr().String()); errSecondDial == nil {
 		t.Fatal("candidate listener remained available after proxy failure")
 	}
+	assertNoForwardingStart(t, forwardingStarted)
+}
+
+func TestTCPCandidateTunnelWriteFailureDoesNotLogForwardingStart(t *testing.T) {
+	tunnel, errTunnel := newTCPCandidateTunnel(
+		netip.MustParseAddrPort("20.42.0.20:443"),
+		&closedUpstreamDialer{},
+		"remote:local",
+		"remote-password",
+	)
+	if errTunnel != nil {
+		t.Fatalf("newTCPCandidateTunnel returned error: %v", errTunnel)
+	}
+	defer func() { _ = tunnel.Close() }()
+	forwardingStarted := make(chan struct{}, 1)
+	tunnel.setForwardingStartedHandler(func() { forwardingStarted <- struct{}{} })
+	client, errDial := net.Dial("tcp", tunnel.listener.Addr().String())
+	if errDial != nil {
+		t.Fatalf("dial candidate listener: %v", errDial)
+	}
+	if errWrite := writeAll(client, buildTestICEFrame(t, "remote:local", "remote-password", true)); errWrite != nil {
+		t.Fatalf("write authenticated frame: %v", errWrite)
+	}
+	_ = client.Close()
+	assertNoForwardingStart(t, forwardingStarted)
 }
 
 func TestTCPCandidateTunnelRejectsUnauthenticatedConnectionWithoutDial(t *testing.T) {
@@ -353,6 +400,8 @@ func TestTCPCandidateTunnelRejectsUnauthenticatedConnectionWithoutDial(t *testin
 		t.Fatalf("newTCPCandidateTunnel returned error: %v", errTunnel)
 	}
 	defer func() { _ = tunnel.Close() }()
+	forwardingStarted := make(chan struct{}, 1)
+	tunnel.setForwardingStartedHandler(func() { forwardingStarted <- struct{}{} })
 
 	client, errDial := net.Dial("tcp", tunnel.listener.Addr().String())
 	if errDial != nil {
@@ -366,6 +415,16 @@ func TestTCPCandidateTunnelRejectsUnauthenticatedConnectionWithoutDial(t *testin
 	case dial := <-dialer.dials:
 		_ = dial.connection.Close()
 		t.Fatalf("unauthenticated connection triggered proxy dial to %q", dial.address)
+	case <-time.After(100 * time.Millisecond):
+	}
+	assertNoForwardingStart(t, forwardingStarted)
+}
+
+func assertNoForwardingStart(t *testing.T, started <-chan struct{}) {
+	t.Helper()
+	select {
+	case <-started:
+		t.Fatal("forwarding start handler was called for an unestablished tunnel")
 	case <-time.After(100 * time.Millisecond):
 	}
 }

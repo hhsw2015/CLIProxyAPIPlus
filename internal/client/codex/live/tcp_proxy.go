@@ -71,13 +71,14 @@ type tcpCandidateTunnel struct {
 	expectedUser   string
 	remotePassword string
 
-	mu              sync.Mutex
-	closed          bool
-	claimed         bool
-	connections     map[net.Conn]struct{}
-	validationSlots chan struct{}
-	ctx             context.Context
-	cancel          context.CancelFunc
+	mu                  sync.Mutex
+	closed              bool
+	claimed             bool
+	connections         map[net.Conn]struct{}
+	validationSlots     chan struct{}
+	onForwardingStarted func()
+	ctx                 context.Context
+	cancel              context.CancelFunc
 }
 
 type tcpCandidatePlan struct {
@@ -379,6 +380,7 @@ func (t *tcpCandidateTunnel) handleConnection(client net.Conn) {
 		log.WithError(errWrite).Warn("codex live TCP proxy: forward authenticated ICE frame failed")
 		return
 	}
+	t.notifyForwardingStarted()
 
 	copyDone := make(chan struct{}, 2)
 	copyConnection := func(destination, source net.Conn) {
@@ -391,6 +393,27 @@ func (t *tcpCandidateTunnel) handleConnection(client net.Conn) {
 	t.untrackAndClose(upstream)
 	t.untrackAndClose(client)
 	<-copyDone
+}
+
+func (t *tcpCandidateTunnel) setForwardingStartedHandler(handler func()) {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	t.onForwardingStarted = handler
+	t.mu.Unlock()
+}
+
+func (t *tcpCandidateTunnel) notifyForwardingStarted() {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	handler := t.onForwardingStarted
+	t.mu.Unlock()
+	if handler != nil {
+		handler()
+	}
 }
 
 func (t *tcpCandidateTunnel) trackConnection(connection net.Conn) bool {

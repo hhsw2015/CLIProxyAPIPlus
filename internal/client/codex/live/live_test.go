@@ -149,20 +149,21 @@ func (b *trackedResponseBody) Close() error {
 
 type fakeMediaRelay struct {
 	clientOffer   string
-	proxyURL      string
+	route         mediaSessionRoute
 	upstreamOffer string
 	session       *fakeMediaSession
 	err           error
 }
 
-func (r *fakeMediaRelay) NewSession(_ context.Context, clientOffer, proxyURL string) (mediaRelaySession, string, error) {
+func (r *fakeMediaRelay) NewSession(_ context.Context, clientOffer string, route mediaSessionRoute) (mediaRelaySession, string, error) {
 	r.clientOffer = clientOffer
-	r.proxyURL = proxyURL
+	r.route = route
 	return r.session, r.upstreamOffer, r.err
 }
 
 type fakeMediaSession struct {
 	upstreamAnswer string
+	callIDAtAccept string
 	downstreamSDP  string
 	closeHandler   func(string)
 	callID         string
@@ -173,6 +174,7 @@ type fakeMediaSession struct {
 
 func (s *fakeMediaSession) AcceptUpstreamAnswer(_ context.Context, answer string) (string, error) {
 	s.upstreamAnswer = answer
+	s.callIDAtAccept = s.callID
 	return s.downstreamSDP, s.err
 }
 
@@ -320,6 +322,36 @@ func TestHandlerRewritesLiveCallAndSchedulesOAuth(t *testing.T) {
 	}
 }
 
+func TestMediaCredentialNameUsesSafeIdentity(t *testing.T) {
+	for name, testCase := range map[string]struct {
+		selected *auth.Auth
+		index    string
+		want     string
+	}{
+		"label": {
+			selected: &auth.Auth{Label: "Voice credential", FileName: "/auths/codex-user.json", ID: "secret-id"},
+			index:    "auth-index",
+			want:     "Voice credential",
+		},
+		"file basename": {
+			selected: &auth.Auth{FileName: "/auths/codex-user.json", ID: "secret-id"},
+			index:    "auth-index",
+			want:     "codex-user.json",
+		},
+		"opaque index": {
+			selected: &auth.Auth{ID: "secret-id"},
+			index:    "auth-index",
+			want:     "auth-index",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := mediaCredentialName(testCase.selected, testCase.index); got != testCase.want {
+				t.Fatalf("mediaCredentialName() = %q, want %q", got, testCase.want)
+			}
+		})
+	}
+}
+
 func TestProxyURLForAuthPrefersCredentialOverride(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.ProxyURL = "http://global.example:8080"
@@ -346,6 +378,7 @@ func TestHandlerRelaysWebRTCMediaSDP(t *testing.T) {
 		ID:       "codex-oauth",
 		Provider: "codex",
 		Status:   auth.StatusActive,
+		Label:    "Voice credential",
 		ProxyURL: "socks5://credential-proxy.example:1080",
 		Metadata: map[string]any{"access_token": "oauth-token"},
 	})
@@ -374,8 +407,11 @@ func TestHandlerRelaysWebRTCMediaSDP(t *testing.T) {
 	if mediaRelay.clientOffer != "v=0\r\no=desktop-offer\r\n" {
 		t.Fatalf("media client offer = %q", mediaRelay.clientOffer)
 	}
-	if mediaRelay.proxyURL != "socks5://credential-proxy.example:1080" {
-		t.Fatalf("media proxy URL = %q, want credential override", mediaRelay.proxyURL)
+	if mediaRelay.route.proxyURL != "socks5://credential-proxy.example:1080" {
+		t.Fatalf("media proxy URL = %q, want credential override", mediaRelay.route.proxyURL)
+	}
+	if mediaRelay.route.credential != "Voice credential" || mediaRelay.route.authIndex == "" {
+		t.Fatalf("media credential route = %#v", mediaRelay.route)
 	}
 	var upstreamPayload struct {
 		SDP string `json:"sdp"`
@@ -391,6 +427,9 @@ func TestHandlerRelaysWebRTCMediaSDP(t *testing.T) {
 	}
 	if mediaSession.callID != "call-123" {
 		t.Fatalf("media call ID = %q, want call-123", mediaSession.callID)
+	}
+	if mediaSession.callIDAtAccept != "call-123" {
+		t.Fatalf("media call ID at answer acceptance = %q, want call-123", mediaSession.callIDAtAccept)
 	}
 	if got := recorder.Body.String(); got != mediaSession.downstreamSDP {
 		t.Fatalf("downstream SDP = %q, want %q", got, mediaSession.downstreamSDP)

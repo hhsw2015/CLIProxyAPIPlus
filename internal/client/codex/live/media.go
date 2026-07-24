@@ -42,7 +42,13 @@ type mediaRelaySession interface {
 }
 
 type mediaRelayFactory interface {
-	NewSession(context.Context, string, string) (mediaRelaySession, string, error)
+	NewSession(context.Context, string, mediaSessionRoute) (mediaRelaySession, string, error)
+}
+
+type mediaSessionRoute struct {
+	proxyURL   string
+	credential string
+	authIndex  string
 }
 
 type pionMediaRelay struct {
@@ -76,11 +82,14 @@ type pionMediaSession struct {
 	callID         string
 	releaseSlot    func()
 
-	proxyDialer proxy.ContextDialer
-	proxyScheme string
-	localOffer  string
-	tunnelsMu   sync.Mutex
-	tunnels     []*tcpCandidateTunnel
+	proxyDialer       proxy.ContextDialer
+	proxyScheme       string
+	credential        string
+	authIndex         string
+	forwardingLogOnce sync.Once
+	localOffer        string
+	tunnelsMu         sync.Mutex
+	tunnels           []*tcpCandidateTunnel
 }
 
 type dataChannelMessage struct {
@@ -248,14 +257,14 @@ func isPublicRemoteIP(ip net.IP) bool {
 		!ip.IsLinkLocalUnicast() && !ip.IsLinkLocalMulticast() && !ip.IsMulticast()
 }
 
-func (r *pionMediaRelay) NewSession(ctx context.Context, clientOffer, proxyURL string) (mediaRelaySession, string, error) {
+func (r *pionMediaRelay) NewSession(ctx context.Context, clientOffer string, route mediaSessionRoute) (mediaRelaySession, string, error) {
 	if r == nil || r.downstreamAPI == nil || r.upstreamAPI == nil || r.proxyUpstreamAPI == nil || r.limiter == nil {
 		return nil, "", errors.New("Codex live media relay unavailable")
 	}
 	if errContext := ctx.Err(); errContext != nil {
 		return nil, "", errContext
 	}
-	builtProxyDialer, proxyMode, errProxy := proxyutil.BuildDialer(proxyURL)
+	builtProxyDialer, proxyMode, errProxy := proxyutil.BuildDialer(route.proxyURL)
 	if errProxy != nil {
 		return nil, "", fmt.Errorf("configure Codex live remote TCP proxy: %w", errProxy)
 	}
@@ -299,7 +308,9 @@ func (r *pionMediaRelay) NewSession(ctx context.Context, clientOffer, proxyURL s
 		mediaSessionID: uuid.NewString(),
 		releaseSlot:    releaseSlot,
 		proxyDialer:    proxyDialer,
-		proxyScheme:    proxyScheme(proxyURL),
+		proxyScheme:    proxyScheme(route.proxyURL),
+		credential:     strings.TrimSpace(route.credential),
+		authIndex:      strings.TrimSpace(route.authIndex),
 	}
 	session.bridge = newDataChannelBridge(session.done, func(err error) {
 		session.fail("data_channel_failed", err)
@@ -402,6 +413,9 @@ func (s *pionMediaSession) AcceptUpstreamAnswer(ctx context.Context, upstreamAns
 		if errProxy != nil {
 			return "", errProxy
 		}
+		for _, tunnel := range tunnels {
+			tunnel.setForwardingStartedHandler(s.logForwardingStarted)
+		}
 		if !s.installCandidateTunnels(tunnels) {
 			errClosed := errors.New("Codex live media session closed while configuring TCP proxy")
 			if errClose := closeCandidateTunnels(tunnels); errClose != nil {
@@ -494,6 +508,36 @@ func (s *pionMediaSession) logFields(peer string) log.Fields {
 	return fields
 }
 
+func (s *pionMediaSession) forwardingLogFields() log.Fields {
+	fields := s.logFields("remote")
+	if s.authIndex != "" {
+		fields["auth_index"] = s.authIndex
+	}
+	if s.credential != "" {
+		fields["credential"] = s.credential
+	}
+	if s.proxyDialer != nil {
+		fields["connection"] = "via " + s.proxyScheme + " proxy"
+		fields["remote_transport"] = "tcp"
+	} else {
+		fields["connection"] = "direct"
+		fields["remote_transport"] = "ice"
+	}
+	if s.upstream != nil {
+		fields["state"] = s.upstream.ConnectionState().String()
+	}
+	return fields
+}
+
+func (s *pionMediaSession) logForwardingStarted() {
+	if s == nil {
+		return
+	}
+	s.forwardingLogOnce.Do(func() {
+		log.WithFields(s.forwardingLogFields()).Info("codex live remote media forwarding started")
+	})
+}
+
 func (s *pionMediaSession) SetCloseHandler(handler func(string)) {
 	if s == nil {
 		return
@@ -576,6 +620,9 @@ func (s *pionMediaSession) installStateHandlers() {
 				log.WithFields(fields).Info("codex live WebRTC peer connecting")
 			case webrtc.PeerConnectionStateConnected:
 				log.WithFields(fields).Info("codex live WebRTC peer connected")
+				if peer == "remote" {
+					s.logForwardingStarted()
+				}
 			case webrtc.PeerConnectionStateDisconnected:
 				log.WithFields(fields).Warn("codex live WebRTC peer disconnected")
 			case webrtc.PeerConnectionStateFailed:

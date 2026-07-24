@@ -11,6 +11,7 @@ import (
 	"mime"
 	"mime/multipart"
 	"net/http"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"sync"
@@ -222,7 +223,8 @@ func (h *Handler) Handle(c *gin.Context) {
 		ctx = attemptCtx
 		defer releaseAttempt()
 	}
-	logging.SetGinCPATraceID(c, selected.EnsureIndex())
+	selectedIndex := selected.EnsureIndex()
+	logging.SetGinCPATraceID(c, selectedIndex)
 	if selection != nil {
 		defer func() {
 			if selection.Active() && !selection.Retained() {
@@ -238,7 +240,11 @@ func (h *Handler) Handle(c *gin.Context) {
 			return
 		}
 		var upstreamOffer string
-		mediaSession, upstreamOffer, errSDP = mediaRelay.NewSession(ctx, clientOffer, proxyURLForAuth(runtimeConfig, selected))
+		mediaSession, upstreamOffer, errSDP = mediaRelay.NewSession(ctx, clientOffer, mediaSessionRoute{
+			proxyURL:   proxyURLForAuth(runtimeConfig, selected),
+			credential: mediaCredentialName(selected, selectedIndex),
+			authIndex:  selectedIndex,
+		})
 		if errSDP != nil {
 			c.JSON(http.StatusBadGateway, gin.H{"error": errSDP.Error()})
 			return
@@ -334,6 +340,17 @@ func (h *Handler) Handle(c *gin.Context) {
 	helps.AppendAPIResponseChunk(ctx, runtimeConfig, responseBody)
 	responseBodyToWrite := responseBody
 	success := resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices
+	callID := ""
+	if success {
+		callID = callIDFromLocation(resp.Header.Get("Location"))
+		if callID == "" && mediaSession != nil {
+			c.JSON(http.StatusBadGateway, gin.H{"error": "Codex live response is missing a valid call ID"})
+			return
+		}
+		if mediaSession != nil {
+			mediaSession.SetCallID(callID)
+		}
+	}
 	if success && mediaSession != nil {
 		upstreamAnswer, errSDP := callResponseSDP(responseBody, resp.Header.Get("Content-Type"))
 		if errSDP != nil {
@@ -351,15 +368,7 @@ func (h *Handler) Handle(c *gin.Context) {
 	var storedSession liveSession
 	sessionStored := false
 	if success && h.sessions != nil {
-		callID := callIDFromLocation(resp.Header.Get("Location"))
-		if callID == "" && mediaSession != nil {
-			c.JSON(http.StatusBadGateway, gin.H{"error": "Codex live response is missing a valid call ID"})
-			return
-		}
 		if callID != "" {
-			if mediaSession != nil {
-				mediaSession.SetCallID(callID)
-			}
 			session := liveSession{authID: selected.ID, model: model, media: mediaSession}
 			if selection != nil {
 				if mediaSession != nil {
@@ -402,6 +411,21 @@ func (h *Handler) Handle(c *gin.Context) {
 		helps.RecordAPIResponseError(ctx, runtimeConfig, errWrite)
 		log.WithError(errWrite).Warn("codex live: write response body failed")
 	}
+}
+
+func mediaCredentialName(selected *auth.Auth, authIndex string) string {
+	if selected == nil {
+		return strings.TrimSpace(authIndex)
+	}
+	if label := strings.TrimSpace(selected.Label); label != "" {
+		return label
+	}
+	if fileName := strings.TrimSpace(selected.FileName); fileName != "" {
+		if baseName := strings.TrimSpace(filepath.Base(fileName)); baseName != "" && baseName != "." {
+			return baseName
+		}
+	}
+	return strings.TrimSpace(authIndex)
 }
 
 func (h *Handler) selectOAuth(ctx context.Context, model string, opts coreexecutor.Options) (*auth.HomeDispatchSelection, *auth.Auth, error) {

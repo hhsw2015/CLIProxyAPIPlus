@@ -2,6 +2,7 @@ package live
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"strings"
 	"testing"
@@ -46,7 +47,7 @@ func TestPionMediaRelaySelectsRemoteProxyMode(t *testing.T) {
 		"SOCKS5H": {proxyURL: "socks5h://proxy.example:1080", proxied: true},
 	} {
 		t.Run(name, func(t *testing.T) {
-			session, upstreamOffer, errSession := relay.NewSession(context.Background(), clientOffer, testCase.proxyURL)
+			session, upstreamOffer, errSession := relay.NewSession(context.Background(), clientOffer, mediaSessionRoute{proxyURL: testCase.proxyURL})
 			if errSession != nil {
 				t.Fatalf("create media session: %v", errSession)
 			}
@@ -66,8 +67,76 @@ func TestPionMediaRelaySelectsRemoteProxyMode(t *testing.T) {
 		})
 	}
 
-	if _, _, errSession := relay.NewSession(context.Background(), clientOffer, "invalid-proxy"); errSession == nil {
+	if _, _, errSession := relay.NewSession(context.Background(), clientOffer, mediaSessionRoute{proxyURL: "invalid-proxy"}); errSession == nil {
 		t.Fatal("expected invalid proxy URL to fail media session creation")
+	}
+}
+
+func TestMediaForwardingStartedLogRedactsProxyCredentials(t *testing.T) {
+	logger := log.StandardLogger()
+	previousHooks := logger.ReplaceHooks(make(log.LevelHooks))
+	hook := logtest.NewLocal(logger)
+	defer logger.ReplaceHooks(previousHooks)
+
+	for name, testCase := range map[string]struct {
+		proxyURL   string
+		connection string
+		credential string
+	}{
+		"direct": {
+			connection: "direct",
+			credential: "Voice credential",
+		},
+		"HTTP": {
+			proxyURL:   "http://user:secret@proxy.example:8080",
+			connection: "via http proxy",
+			credential: "Voice credential",
+		},
+		"SOCKS5 without label": {
+			proxyURL:   "socks5://user:secret@proxy.example:1080",
+			connection: "via socks5 proxy",
+			credential: "auth-index",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			session := &pionMediaSession{
+				mediaSessionID: "media-session-" + name,
+				proxyScheme:    proxyScheme(testCase.proxyURL),
+				credential:     testCase.credential,
+				authIndex:      "auth-index",
+			}
+			if testCase.proxyURL != "" {
+				session.proxyDialer = &recordingProxyDialer{dials: make(chan recordedProxyDial, 1)}
+			}
+			earlyFields := session.logFields("session")
+			for _, field := range []string{"auth_id", "auth_label", "auth_index", "credential", "connection"} {
+				if _, exists := earlyFields[field]; exists {
+					t.Fatalf("session log exposed forwarding-only field %q before forwarding started: %#v", field, earlyFields)
+				}
+			}
+			session.logForwardingStarted()
+			session.logForwardingStarted()
+
+			matching := 0
+			for _, entry := range hook.AllEntries() {
+				if entry.Message != "codex live remote media forwarding started" || entry.Data["media_session_id"] != session.mediaSessionID {
+					continue
+				}
+				matching++
+				if entry.Data["connection"] != testCase.connection || entry.Data["credential"] != testCase.credential {
+					t.Fatalf("forwarding fields = %#v", entry.Data)
+				}
+				serialized := fmt.Sprint(entry.Data)
+				for _, secret := range []string{"user", "secret", "proxy.example"} {
+					if strings.Contains(serialized, secret) {
+						t.Fatalf("forwarding log leaked %q: %s", secret, serialized)
+					}
+				}
+			}
+			if matching != 1 {
+				t.Fatalf("forwarding log count = %d, want 1", matching)
+			}
+		})
 	}
 }
 
@@ -126,7 +195,10 @@ func TestPionMediaRelayBridgesAudioAndDataChannel(t *testing.T) {
 	if errRelay != nil {
 		t.Fatalf("create media relay: %v", errRelay)
 	}
-	session, relayOffer, errSession := relay.NewSession(context.Background(), clientOffer, "")
+	session, relayOffer, errSession := relay.NewSession(context.Background(), clientOffer, mediaSessionRoute{
+		credential: "Voice credential",
+		authIndex:  "auth-index",
+	})
 	if errSession != nil {
 		t.Fatalf("create media relay session: %v", errSession)
 	}
@@ -140,7 +212,7 @@ func TestPionMediaRelayBridgesAudioAndDataChannel(t *testing.T) {
 	if errRelay != nil {
 		t.Fatalf("reload media relay: %v", errRelay)
 	}
-	if _, _, errCapacity := reloadedRelay.NewSession(context.Background(), clientOffer, ""); errCapacity == nil {
+	if _, _, errCapacity := reloadedRelay.NewSession(context.Background(), clientOffer, mediaSessionRoute{}); errCapacity == nil {
 		t.Fatal("reloaded media relay bypassed the shared session capacity")
 	}
 
@@ -222,7 +294,7 @@ func TestPionMediaRelayBridgesAudioAndDataChannel(t *testing.T) {
 	if errClose := session.Close(); errClose != nil {
 		t.Fatalf("close media relay session for logging: %v", errClose)
 	}
-	replacementSession, _, errReplacement := reloadedRelay.NewSession(context.Background(), clientOffer, "")
+	replacementSession, _, errReplacement := reloadedRelay.NewSession(context.Background(), clientOffer, mediaSessionRoute{})
 	if errReplacement != nil {
 		t.Fatalf("shared capacity was not released: %v", errReplacement)
 	}
@@ -233,6 +305,8 @@ func TestPionMediaRelayBridgesAudioAndDataChannel(t *testing.T) {
 		assertPeerLog(t, hook, "codex live WebRTC peer connected", peer, "call-log-test")
 		assertPeerLog(t, hook, "codex live WebRTC peer closed", peer, "call-log-test")
 	}
+	assertForwardingLog(t, hook, "direct", "Voice credential", "auth-index", "connected")
+	assertForwardingAfterRemoteConnected(t, hook)
 	assertSessionLog(t, hook, "codex live WebRTC media session closed", "closed", "call-log-test")
 }
 
@@ -395,6 +469,41 @@ func sendTestRTP(t *testing.T, track *webrtc.TrackLocalStaticRTP, payload []byte
 		}
 	}
 	t.Fatal("RTP packet was not relayed")
+}
+
+func assertForwardingAfterRemoteConnected(t *testing.T, hook *logtest.Hook) {
+	t.Helper()
+	connectedIndex := -1
+	forwardingIndex := -1
+	for index, entry := range hook.AllEntries() {
+		if entry.Message == "codex live WebRTC peer connected" && entry.Data["peer"] == "remote" && connectedIndex == -1 {
+			connectedIndex = index
+		}
+		if entry.Message == "codex live remote media forwarding started" && forwardingIndex == -1 {
+			forwardingIndex = index
+		}
+	}
+	if connectedIndex == -1 || forwardingIndex <= connectedIndex {
+		t.Fatalf("remote connected index=%d, forwarding index=%d", connectedIndex, forwardingIndex)
+	}
+}
+
+func assertForwardingLog(t *testing.T, hook *logtest.Hook, connection, credential, authIndex, state string) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		for _, entry := range hook.AllEntries() {
+			if entry.Message == "codex live remote media forwarding started" &&
+				entry.Data["connection"] == connection &&
+				entry.Data["credential"] == credential &&
+				entry.Data["auth_index"] == authIndex &&
+				entry.Data["state"] == state {
+				return
+			}
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("missing forwarding log for connection %q and credential %q", connection, credential)
 }
 
 func assertSessionLog(t *testing.T, hook *logtest.Hook, message, reason, callID string) {
