@@ -28,6 +28,7 @@ import (
 	managementHandlers "github.com/router-for-me/CLIProxyAPI/v7/internal/api/handlers/management"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/api/middleware"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/cache"
+	claudemodels "github.com/router-for-me/CLIProxyAPI/v7/internal/client/claude/models"
 	codexmodels "github.com/router-for-me/CLIProxyAPI/v7/internal/client/codex/models"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/home"
@@ -1411,23 +1412,7 @@ func (s *Server) handleHomeModels(c *gin.Context) {
 	isClaude := isAnthropicModelsRequest(c)
 
 	if isClaude {
-		out := formatHomeClaudeModels(entries)
-		firstID := ""
-		lastID := ""
-		if len(out) > 0 {
-			if id, okID := out[0]["id"].(string); okID {
-				firstID = id
-			}
-			if id, okID := out[len(out)-1]["id"].(string); okID {
-				lastID = id
-			}
-		}
-		c.JSON(http.StatusOK, gin.H{
-			"data":     out,
-			"has_more": false,
-			"first_id": firstID,
-			"last_id":  lastID,
-		})
+		c.JSON(http.StatusOK, claudemodels.BuildResponse(formatHomeClaudeModels(entries)))
 		return
 	}
 
@@ -1456,16 +1441,6 @@ func formatHomeClaudeModels(entries []homeModelEntry) []map[string]any {
 	for _, entry := range entries {
 		out = append(out, formatHomeClaudeModel(entry))
 	}
-	sort.SliceStable(out, func(i, j int) bool {
-		di, _ := out[i]["display_name"].(string)
-		dj, _ := out[j]["display_name"].(string)
-		if di != dj {
-			return di < dj
-		}
-		idi, _ := out[i]["id"].(string)
-		idj, _ := out[j]["id"].(string)
-		return idi < idj
-	})
 	return out
 }
 
@@ -1483,7 +1458,7 @@ func formatHomeClaudeModel(entry homeModelEntry) map[string]any {
 		maxOutput = registry.DefaultClaudeMaxOutputTokens
 	}
 	model := map[string]any{
-		"id":               util.EnsureClaudeModelIDPrefix(entry.id),
+		"id":               entry.id,
 		"object":           "model",
 		"owned_by":         entry.ownedBy,
 		"type":             "model",

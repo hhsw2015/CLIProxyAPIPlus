@@ -1719,11 +1719,11 @@ func TestFormatHomeClaudeModelIncludesAnthropicSchemaFields(t *testing.T) {
 		t.Fatalf("display_name fallback = %v, want claude-no-limits", got)
 	}
 
-	prefixed := formatHomeClaudeModel(homeModelEntry{id: "gpt-4o", displayName: "GPT-4o"})
-	if got := prefixed["id"]; got != "claude-fable-5-dd-o4-tpg" {
-		t.Fatalf("id = %v, want claude-fable-5-dd-o4-tpg", got)
+	customModel := formatHomeClaudeModel(homeModelEntry{id: "gpt-4o", displayName: "GPT-4o"})
+	if got := customModel["id"]; got != "gpt-4o" {
+		t.Fatalf("id = %v, want gpt-4o", got)
 	}
-	if got := prefixed["display_name"]; got != "GPT-4o" {
+	if got := customModel["display_name"]; got != "GPT-4o" {
 		t.Fatalf("display_name = %v, want GPT-4o", got)
 	}
 	if got := withDefaults["max_input_tokens"]; got != registry.DefaultClaudeMaxInputTokens {
@@ -1734,24 +1734,6 @@ func TestFormatHomeClaudeModelIncludesAnthropicSchemaFields(t *testing.T) {
 	}
 	if _, ok := withDefaults["created_at"]; ok {
 		t.Fatalf("created_at should be omitted when source created is missing, got %v", withDefaults)
-	}
-}
-
-func TestFormatHomeClaudeModelsSortsByDisplayName(t *testing.T) {
-	out := formatHomeClaudeModels([]homeModelEntry{
-		{id: "claude-z", displayName: "Zebra"},
-		{id: "gpt-4o", displayName: "Alpha"},
-		{id: "claude-b", displayName: "Beta"},
-	})
-	if len(out) != 3 {
-		t.Fatalf("len(out) = %d, want 3", len(out))
-	}
-	wantNames := []string{"Alpha", "Beta", "Zebra"}
-	for i, want := range wantNames {
-		got, _ := out[i]["display_name"].(string)
-		if got != want {
-			t.Fatalf("out[%d].display_name = %q, want %q", i, got, want)
-		}
 	}
 }
 
