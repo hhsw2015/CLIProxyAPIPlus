@@ -854,7 +854,7 @@ attemptLoop:
 				}
 			}
 
-			httpReq, errReq := e.buildRequest(ctx, auth, token, baseModel, requestPayload, false, opts.Alt, baseURL)
+			httpReq, errReq := e.buildRequest(ctx, auth, token, baseModel, requestPayload, false, opts.Alt, baseURL, helps.DerivedAntigravitySessionID(opts.Metadata, req.Metadata))
 			if errReq != nil {
 				err = errReq
 				return resp, err
@@ -1076,7 +1076,7 @@ attemptLoop:
 					return resp, err
 				}
 			}
-			httpReq, errReq := e.buildRequest(ctx, auth, token, baseModel, requestPayload, true, opts.Alt, baseURL)
+			httpReq, errReq := e.buildRequest(ctx, auth, token, baseModel, requestPayload, true, opts.Alt, baseURL, helps.DerivedAntigravitySessionID(opts.Metadata, req.Metadata))
 			if errReq != nil {
 				err = errReq
 				return resp, err
@@ -1568,7 +1568,7 @@ attemptLoop:
 					return nil, err
 				}
 			}
-			httpReq, errReq := e.buildRequest(ctx, auth, token, baseModel, requestPayload, true, opts.Alt, baseURL)
+			httpReq, errReq := e.buildRequest(ctx, auth, token, baseModel, requestPayload, true, opts.Alt, baseURL, helps.DerivedAntigravitySessionID(opts.Metadata, req.Metadata))
 			if errReq != nil {
 				err = errReq
 				return nil, err
@@ -2376,7 +2376,7 @@ func (e *AntigravityExecutor) updateAntigravityCreditsBalance(ctx context.Contex
 	}
 }
 
-func (e *AntigravityExecutor) buildRequest(ctx context.Context, auth *cliproxyauth.Auth, token, modelName string, payload []byte, stream bool, alt, baseURL string) (*http.Request, error) {
+func (e *AntigravityExecutor) buildRequest(ctx context.Context, auth *cliproxyauth.Auth, token, modelName string, payload []byte, stream bool, alt, baseURL string, derivedSessionIDs ...string) (*http.Request, error) {
 	if token == "" {
 		return nil, statusErr{code: http.StatusUnauthorized, msg: "missing access token"}
 	}
@@ -2408,7 +2408,7 @@ func (e *AntigravityExecutor) buildRequest(ctx context.Context, auth *cliproxyau
 	if errProject != nil {
 		return nil, errProject
 	}
-	payload = geminiToAntigravity(modelName, payload, projectID)
+	payload = geminiToAntigravity(modelName, payload, projectID, derivedSessionIDs...)
 
 	// Cap maxOutputTokens to model's max_completion_tokens from registry
 	if maxOut := gjson.GetBytes(payload, "request.generationConfig.maxOutputTokens"); maxOut.Exists() && maxOut.Type == gjson.Number {
@@ -3052,7 +3052,7 @@ func resolveCustomAntigravityBaseURL(auth *cliproxyauth.Auth) string {
 	return ""
 }
 
-func geminiToAntigravity(modelName string, payload []byte, projectID string) []byte {
+func geminiToAntigravity(modelName string, payload []byte, projectID string, derivedSessionIDs ...string) []byte {
 	template := payload
 	template = helps.SetStringIfDifferent(template, "model", modelName)
 	template = helps.SetStringIfDifferent(template, "userAgent", "antigravity")
@@ -3078,7 +3078,14 @@ func geminiToAntigravity(modelName string, payload []byte, projectID string) []b
 		template, _ = sjson.SetBytes(template, "requestId", generateImageGenRequestID())
 	} else if reqType != "web_search" {
 		template, _ = sjson.SetBytes(template, "requestId", generateRequestID())
-		template, _ = sjson.SetBytes(template, "request.sessionId", generateStableSessionID(payload))
+		sessionID := strings.TrimSpace(gjson.GetBytes(template, "request.sessionId").String())
+		if sessionID == "" && len(derivedSessionIDs) > 0 {
+			sessionID = strings.TrimSpace(derivedSessionIDs[0])
+		}
+		if sessionID == "" {
+			sessionID = generateStableSessionID(payload)
+		}
+		template, _ = sjson.SetBytes(template, "request.sessionId", sessionID)
 	}
 
 	template, _ = sjson.DeleteBytes(template, "request.safetySettings")

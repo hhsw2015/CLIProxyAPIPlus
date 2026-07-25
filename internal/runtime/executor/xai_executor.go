@@ -1293,9 +1293,11 @@ func xaiExecutionSessionID(req cliproxyexecutor.Request, opts cliproxyexecutor.O
 		return value
 	}
 	if promptCacheKey := gjson.GetBytes(req.Payload, "prompt_cache_key"); promptCacheKey.Exists() {
-		return strings.TrimSpace(promptCacheKey.String())
+		if value := strings.TrimSpace(promptCacheKey.String()); value != "" {
+			return value
+		}
 	}
-	return ""
+	return helps.DerivedSessionUUID("xai", opts.Metadata, req.Metadata)
 }
 
 func xaiRequiresIsolatedConversation(model string) bool {

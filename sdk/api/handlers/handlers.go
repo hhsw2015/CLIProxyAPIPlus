@@ -24,6 +24,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	coresession "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/session"
 	coreusage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
@@ -315,10 +316,24 @@ func requestExecutionMetadata(ctx context.Context) map[string]any {
 	if executionSessionID := executionSessionIDFromContext(ctx); executionSessionID != "" {
 		meta[coreexecutor.ExecutionSessionMetadataKey] = executionSessionID
 	}
+	if callerScope := requestCallerScope(ginCtx); callerScope != "" {
+		meta[coreexecutor.CallerScopeMetadataKey] = callerScope
+	}
 	if disallowFreeAuthFromContext(ctx) {
 		meta[coreexecutor.DisallowFreeAuthMetadataKey] = true
 	}
 	return meta
+}
+
+func requestCallerScope(ginCtx *gin.Context) string {
+	if ginCtx == nil {
+		return ""
+	}
+	value, exists := ginCtx.Get("userApiKey")
+	if !exists || value == nil {
+		return ""
+	}
+	return coresession.CallerScope(fmt.Sprint(value))
 }
 
 func addAuthSelectionModelMetadata(meta map[string]any, model string) {

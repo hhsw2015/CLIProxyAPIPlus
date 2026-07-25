@@ -1758,6 +1758,31 @@ func TestXAIExecutorComposerSessionIsolation(t *testing.T) {
 	}
 }
 
+func TestXAIExecutionSessionIDUsesDerivedStableUUID(t *testing.T) {
+	t.Parallel()
+
+	metadata := map[string]any{cliproxyexecutor.DerivedSessionIDMetadataKey: "ctx:v1:derived-root"}
+	req := cliproxyexecutor.Request{Metadata: metadata, Payload: []byte(`{"input":"hello"}`)}
+	first := xaiExecutionSessionID(req, cliproxyexecutor.Options{})
+	second := xaiExecutionSessionID(req, cliproxyexecutor.Options{})
+	if first == "" || first != second {
+		t.Fatalf("derived xAI session is not stable: first=%q second=%q", first, second)
+	}
+	if _, errParse := uuid.Parse(first); errParse != nil {
+		t.Fatalf("derived xAI session %q is not a UUID: %v", first, errParse)
+	}
+
+	req.Payload = []byte(`{"prompt_cache_key":"client-session","input":"hello"}`)
+	if got := xaiExecutionSessionID(req, cliproxyexecutor.Options{}); got != "client-session" {
+		t.Fatalf("explicit prompt_cache_key = %q, want client-session", got)
+	}
+
+	req.Payload = []byte(`{"prompt_cache_key":"   ","input":"hello"}`)
+	if got := xaiExecutionSessionID(req, cliproxyexecutor.Options{}); got != first {
+		t.Fatalf("blank prompt_cache_key session = %q, want derived UUID %q", got, first)
+	}
+}
+
 func TestXAIExecutorCompactUsesCompactEndpoint(t *testing.T) {
 	validEncryptedContent := testValidGrokEncryptedContent()
 	var gotPath string
