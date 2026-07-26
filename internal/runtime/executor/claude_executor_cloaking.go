@@ -296,7 +296,7 @@ func buildTextBlock(text string, cacheControl map[string]string) string {
 	return string(block)
 }
 
-// prependToFirstUserMessage prepends text content to the first user message.
+// prependToFirstUserMessage injects text content into the first user message.
 // This avoids putting non-Claude-Code system instructions in system[] which
 // triggers Anthropic's extra usage billing for OAuth-proxied requests.
 func prependToFirstUserMessage(payload []byte, text string) []byte {
@@ -333,9 +333,19 @@ IMPORTANT: this context may or may not be relevant to your tasks. You should not
 	if content.IsArray() {
 		newBlock := fmt.Sprintf(`{"type":"text","text":%q}`, prefixBlock)
 		var newArray string
-		if content.Raw == "[]" || content.Raw == "" {
+		switch {
+		case content.Raw == "[]" || content.Raw == "":
 			newArray = "[" + newBlock + "]"
-		} else {
+		case leadsWithToolResult(content):
+			// Anthropic requires the user message that immediately follows an
+			// assistant tool_use turn to lead with its tool_result blocks.
+			// Append the reminder so those blocks stay at the head.
+			if trimmed := strings.TrimRight(content.Raw, " \t\r\n"); strings.HasSuffix(trimmed, "]") {
+				newArray = trimmed[:len(trimmed)-1] + "," + newBlock + "]"
+			} else {
+				newArray = "[" + newBlock + "," + content.Raw[1:]
+			}
+		default:
 			newArray = "[" + newBlock + "," + content.Raw[1:]
 		}
 		payload, _ = sjson.SetRawBytes(payload, contentPath, []byte(newArray))
@@ -345,6 +355,14 @@ IMPORTANT: this context may or may not be relevant to your tasks. You should not
 	}
 
 	return payload
+}
+
+// leadsWithToolResult reports whether a message content array starts with a
+// tool_result block. Such a message answers a preceding assistant tool_use turn,
+// and Anthropic requires its tool_result blocks to remain first.
+func leadsWithToolResult(content gjson.Result) bool {
+	first := content.Get("0")
+	return first.Exists() && first.Get("type").String() == "tool_result"
 }
 
 // applyCloaking applies cloaking transformations to the payload based on config and client.
