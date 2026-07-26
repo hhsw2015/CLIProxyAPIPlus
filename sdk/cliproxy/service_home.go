@@ -491,9 +491,15 @@ func (s *Service) runHomeSubscriber(homeCtx context.Context, parentCtx context.C
 		close(supervisor.done)
 	}()
 
+	var previousClient *home.Client
 	for homeCtx.Err() == nil {
 		supervisor.setPublisherCompletion(nil)
-		client := home.New(homeCfg)
+		client := previousClient
+		if client == nil {
+			client = home.New(homeCfg)
+		} else {
+			client = client.NewLifetime()
+		}
 		client.SetManagedLifetime(true)
 		registry := executionregistry.New()
 		releaseCtx, releaseCancel := context.WithCancel(context.WithoutCancel(homeCtx))
@@ -577,6 +583,7 @@ func (s *Service) runHomeSubscriber(homeCtx context.Context, parentCtx context.C
 		if !published.Load() && errRun != nil && !waitForHomeSubscriberRetry(homeCtx, homeSubscriberPreAckRetryBackoff) {
 			return
 		}
+		previousClient = client
 	}
 }
 
