@@ -18,6 +18,12 @@ require (
 	github.com/joho/godotenv v1.5.1
 	github.com/klauspost/compress v1.18.2
 	github.com/minio/minio-go/v7 v7.0.66
+	github.com/pion/ice/v4 v4.3.0
+	github.com/pion/interceptor v0.1.45
+	github.com/pion/rtp v1.10.4
+	github.com/pion/sdp/v3 v3.0.19
+	github.com/pion/stun/v3 v3.1.6
+	github.com/pion/webrtc/v4 v4.2.17
 	github.com/pkg/browser v0.0.0-20240102092130-5ac0b6a4141c
 	github.com/redis/go-redis/v9 v9.19.0
 	github.com/refraction-networking/utls v1.8.2
@@ -78,6 +84,16 @@ require (
 	github.com/mitchellh/go-wordwrap v1.0.1 // indirect
 	github.com/mitchellh/mapstructure v1.5.0 // indirect
 	github.com/patrickmn/go-cache v2.1.0+incompatible // indirect
+	github.com/pion/datachannel v1.6.2 // indirect
+	github.com/pion/dtls/v3 v3.1.5 // indirect
+	github.com/pion/logging v0.2.4 // indirect
+	github.com/pion/mdns/v2 v2.1.0 // indirect
+	github.com/pion/randutil v0.1.0 // indirect
+	github.com/pion/rtcp v1.2.17 // indirect
+	github.com/pion/sctp v1.11.0 // indirect
+	github.com/pion/srtp/v3 v3.0.12 // indirect
+	github.com/pion/transport/v4 v4.0.2 // indirect
+	github.com/pion/turn/v5 v5.0.12 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/power-devops/perfstat v0.0.0-20210106213030-5aafc221ea8c // indirect
 	github.com/pquerna/otp v1.5.0 // indirect
@@ -105,6 +121,7 @@ require (
 	github.com/tklauser/go-sysconf v0.3.12 // indirect
 	github.com/tklauser/numcpus v0.6.1 // indirect
 	github.com/wechatpay-apiv3/wechatpay-go v0.2.21 // indirect
+	github.com/wlynxg/anet v0.0.5 // indirect
 	github.com/yusufpapurcu/wmi v1.2.4 // indirect
 	github.com/zclconf/go-cty v1.14.4 // indirect
 	github.com/zclconf/go-cty-yaml v1.1.0 // indirect
@@ -117,6 +134,7 @@ require (
 	golang.org/x/exp v0.0.0-20260312153236-7ab1446f8b90 // indirect
 	golang.org/x/image v0.39.0 // indirect
 	golang.org/x/mod v0.37.0 // indirect
+	golang.org/x/time v0.15.0 // indirect
 )
 
 require (
@@ -214,7 +232,6 @@ require (
 	github.com/txthinking/runnergroup v0.0.0-20210608031112-152c7c4432bf // indirect
 	github.com/txthinking/socks5 v0.0.0-20251011041537-5c31f201a10e // indirect
 	github.com/yosida95/uritemplate/v3 v3.0.2 // indirect
-	golang.org/x/time v0.15.0 // indirect
 	golang.zx2c4.com/wintun v0.0.0-20230126152724-0fa3db229ce2 // indirect
 	gvisor.dev/gvisor v0.0.0-20260408064518-65a410b0d584 // indirect
 	modernc.org/libc v1.67.6 // indirect
