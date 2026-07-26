@@ -654,7 +654,11 @@ func (s *Server) setupRoutes() {
 		v1.GET("/live/:call_id", s.codexLiveHandler.HandleSideband)
 		v1.POST("/realtime/calls", s.codexLiveHandler.Handle)
 		v1.GET("/realtime/calls/:call_id", s.codexLiveHandler.HandleSideband)
-		v1.GET("/realtime", s.codexLiveHandler.HandleSideband)
+		// Note: `v1.GET("/realtime", ...)` is NOT registered here. Fork owns
+		// GET /realtime for its WebSocket proxy (see setupRealtimeRoutes ->
+		// realtime_proxy.go). Codex Live sideband handler is reachable via the
+		// POST /realtime/calls + GET /realtime/calls/:call_id pair above,
+		// which is functionally equivalent for its callers.
 	}
 	// Media API proxy routes (images, audio)
 	s.setupMediaRoutes(v1)
