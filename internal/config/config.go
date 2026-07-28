@@ -179,6 +179,9 @@ type Config struct {
 	// Codex configures provider-wide Codex request behavior.
 	Codex CodexConfig `yaml:"codex" json:"codex"`
 
+	// XAI configures provider-wide xAI request behavior. Ported from upstream.
+	XAI XAIConfig `yaml:"xai" json:"xai"`
+
 	// CodexHeaderDefaults configures fallback headers for Codex OAuth model requests.
 	// These are used only when the client does not send its own headers.
 	CodexHeaderDefaults CodexHeaderDefaults `yaml:"codex-header-defaults" json:"codex-header-defaults"`
@@ -350,6 +353,12 @@ type CodexConfig struct {
 	OptimizeMultiAgentV2 bool `yaml:"optimize-multi-agent-v2" json:"optimize-multi-agent-v2"`
 	// LiveMediaRelay terminates and relays Codex Live WebRTC media in this process.
 	LiveMediaRelay CodexLiveMediaRelayConfig `yaml:"live-media-relay" json:"live-media-relay"`
+}
+
+// XAIConfig configures provider-wide xAI request behavior. Ported from upstream.
+type XAIConfig struct {
+	// InjectXSearch injects xAI's native x_search tool when the request does not declare it.
+	InjectXSearch bool `yaml:"inject-x-search" json:"inject-x-search"`
 }
 
 // CodexLiveMediaRelayConfig configures the in-process Codex Live WebRTC gateway.

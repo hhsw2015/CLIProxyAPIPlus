@@ -1636,7 +1636,7 @@ func (s *Server) handleHomeModels(c *gin.Context) {
 	isClaude := isAnthropicModelsRequest(c)
 
 	if isClaude {
-		c.JSON(http.StatusOK, claudemodels.BuildResponse(formatHomeClaudeModels(entries)))
+		c.JSON(http.StatusOK, claudemodels.BuildResponse(formatHomeClaudeModels(entries), false))
 		return
 	}
 
