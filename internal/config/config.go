@@ -353,6 +353,8 @@ type CodexConfig struct {
 	OptimizeMultiAgentV2 bool `yaml:"optimize-multi-agent-v2" json:"optimize-multi-agent-v2"`
 	// LiveMediaRelay terminates and relays Codex Live WebRTC media in this process.
 	LiveMediaRelay CodexLiveMediaRelayConfig `yaml:"live-media-relay" json:"live-media-relay"`
+	// DisableCodexCloaking disables client_id/user-agent cloaking for Codex requests.
+	DisableCodexCloaking bool `yaml:"disable-codex-cloaking" json:"disable-codex-cloaking"`
 }
 
 // XAIConfig configures provider-wide xAI request behavior. Ported from upstream.
@@ -681,6 +683,10 @@ type ClaudeKey struct {
 	// Higher values are preferred; defaults to 0.
 	Priority int `yaml:"priority,omitempty" json:"priority,omitempty"`
 
+	// Weight controls smooth weighted round-robin credential selection.
+	// An omitted value defaults to 1; non-positive values exclude this credential; maximum 1,000,000.
+	Weight *int `yaml:"weight,omitempty" json:"weight,omitempty"`
+
 	// Prefix optionally namespaces models for this credential (e.g., "teamA/claude-sonnet-4").
 	Prefix string `yaml:"prefix,omitempty" json:"prefix,omitempty"`
 
@@ -810,9 +816,12 @@ type ClaudeModel struct {
 
 	// ForceMapping rewrites upstream response model fields back to Alias.
 	ForceMapping bool `yaml:"force-mapping,omitempty" json:"force-mapping,omitempty"`
+	// Thinking configures the thinking/reasoning capability for this model.
+	Thinking *registry.ThinkingSupport `yaml:"thinking,omitempty" json:"thinking,omitempty"`
 }
 
 func (m ClaudeModel) GetName() string        { return m.Name }
+func (m ClaudeModel) GetThinking() *registry.ThinkingSupport { return m.Thinking }
 func (m ClaudeModel) GetAlias() string       { return m.Alias }
 func (m ClaudeModel) GetDisplayName() string { return m.DisplayName }
 func (m ClaudeModel) GetForceMapping() bool  { return m.ForceMapping }
@@ -826,6 +835,10 @@ type CodexKey struct {
 	// Priority controls selection preference when multiple credentials match.
 	// Higher values are preferred; defaults to 0.
 	Priority int `yaml:"priority,omitempty" json:"priority,omitempty"`
+
+	// Weight controls smooth weighted round-robin credential selection.
+	// An omitted value defaults to 1; non-positive values exclude this credential; maximum 1,000,000.
+	Weight *int `yaml:"weight,omitempty" json:"weight,omitempty"`
 
 	// Prefix optionally namespaces models for this credential (e.g., "teamA/gpt-5-codex").
 	Prefix string `yaml:"prefix,omitempty" json:"prefix,omitempty"`
@@ -880,9 +893,12 @@ type CodexModel struct {
 
 	// ForceMapping rewrites upstream response model fields back to Alias.
 	ForceMapping bool `yaml:"force-mapping,omitempty" json:"force-mapping,omitempty"`
+	// Thinking configures the thinking/reasoning capability for this model.
+	Thinking *registry.ThinkingSupport `yaml:"thinking,omitempty" json:"thinking,omitempty"`
 }
 
 func (m CodexModel) GetName() string        { return m.Name }
+func (m CodexModel) GetThinking() *registry.ThinkingSupport { return m.Thinking }
 func (m CodexModel) GetAlias() string       { return m.Alias }
 func (m CodexModel) GetDisplayName() string { return m.DisplayName }
 func (m CodexModel) GetForceMapping() bool  { return m.ForceMapping }
@@ -902,6 +918,10 @@ type GeminiKey struct {
 	// Priority controls selection preference when multiple credentials match.
 	// Higher values are preferred; defaults to 0.
 	Priority int `yaml:"priority,omitempty" json:"priority,omitempty"`
+
+	// Weight controls smooth weighted round-robin credential selection.
+	// An omitted value defaults to 1; non-positive values exclude this credential; maximum 1,000,000.
+	Weight *int `yaml:"weight,omitempty" json:"weight,omitempty"`
 
 	// Prefix optionally namespaces models for this credential (e.g., "teamA/gemini-3-pro-preview").
 	Prefix string `yaml:"prefix,omitempty" json:"prefix,omitempty"`
@@ -941,9 +961,12 @@ type GeminiModel struct {
 
 	// ForceMapping rewrites upstream response model fields back to Alias.
 	ForceMapping bool `yaml:"force-mapping,omitempty" json:"force-mapping,omitempty"`
+	// Thinking configures the thinking/reasoning capability for this model.
+	Thinking *registry.ThinkingSupport `yaml:"thinking,omitempty" json:"thinking,omitempty"`
 }
 
 func (m GeminiModel) GetName() string        { return m.Name }
+func (m GeminiModel) GetThinking() *registry.ThinkingSupport { return m.Thinking }
 func (m GeminiModel) GetAlias() string       { return m.Alias }
 func (m GeminiModel) GetDisplayName() string { return m.DisplayName }
 func (m GeminiModel) GetForceMapping() bool  { return m.ForceMapping }
@@ -1087,6 +1110,10 @@ type OpenAICompatibilityAPIKey struct {
 	// APIKey is the authentication key for accessing the external API services.
 	APIKey string `yaml:"api-key" json:"api-key"`
 
+	// Weight controls smooth weighted round-robin credential selection.
+	// An omitted value defaults to 1; non-positive values exclude this credential; maximum 1,000,000.
+	Weight *int `yaml:"weight,omitempty" json:"weight,omitempty"`
+
 	// ProxyURL overrides the global proxy setting for this API key if provided.
 	ProxyURL string `yaml:"proxy-url,omitempty" json:"proxy-url,omitempty"`
 }
@@ -1122,6 +1149,7 @@ type OpenAICompatibilityModel struct {
 }
 
 func (m OpenAICompatibilityModel) GetName() string        { return m.Name }
+func (m OpenAICompatibilityModel) GetThinking() *registry.ThinkingSupport { return m.Thinking }
 func (m OpenAICompatibilityModel) GetAlias() string       { return m.Alias }
 func (m OpenAICompatibilityModel) GetDisplayName() string { return m.DisplayName }
 func (m OpenAICompatibilityModel) GetForceMapping() bool  { return m.ForceMapping }
