@@ -70,7 +70,7 @@ func snapshotFileAuthsInDir(cfg *config.Config, authDir, targetDir string) []*co
 		if errRead != nil || len(data) == 0 {
 			continue
 		}
-		auths := synthesizer.SynthesizeAuthFile(ctx, fullPath, data)
+		auths, _ := synthesizer.SynthesizeAuthFile(ctx, fullPath, data)
 		if len(auths) == 0 {
 			continue
 		}

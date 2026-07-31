@@ -250,9 +250,8 @@ type Manager struct {
 	// oauthModelAlias stores global OAuth model alias mappings (alias -> upstream name) keyed by channel.
 	oauthModelAlias atomic.Value
 
-	// apiKeyModelAlias caches resolved model alias mappings for API-key auths.
-	// Keyed by auth.ID, value is alias(lower) -> upstream model (including suffix).
-	apiKeyModelAlias atomic.Value
+	// apiKeyModelRouting atomically publishes per-auth aliases and configured capabilities.
+	apiKeyModelRouting atomic.Value
 
 	// modelPoolOffsets tracks per-auth alias pool rotation state.
 	modelPoolOffsets map[string]int
@@ -296,7 +295,7 @@ func NewManager(store Store, selector Selector, hook Hook) *Manager {
 	}
 	// atomic.Value requires non-nil initial value.
 	manager.runtimeConfig.Store(&internalconfig.Config{})
-	manager.apiKeyModelAlias.Store(apiKeyModelAliasTable(nil))
+	manager.apiKeyModelRouting.Store(&apiKeyModelRoutingSnapshot{config: &internalconfig.Config{}})
 	defaultInFlightConfig, errInFlightConfig := HomeInFlightPublisherConfigFromConfig(internalconfig.DefaultCredentialInFlightConfig())
 	if errInFlightConfig == nil {
 		manager.ApplyHomeInFlightPublisherConfig(defaultInFlightConfig)
@@ -1217,7 +1216,11 @@ func (m *Manager) lookupAPIKeyUpstreamModel(authID, requestedModel string) strin
 	if requestedModel == "" {
 		return ""
 	}
-	table, _ := m.apiKeyModelAlias.Load().(apiKeyModelAliasTable)
+	snap, _ := m.apiKeyModelRouting.Load().(*apiKeyModelRoutingSnapshot)
+	var table apiKeyModelAliasTable
+	if snap != nil {
+		table = snap.aliases
+	}
 	if table == nil {
 		return ""
 	}
@@ -2299,7 +2302,11 @@ func (m *Manager) rebuildAPIKeyModelAliasLocked(cfg *internalconfig.Config) {
 		}
 	}
 
-	m.apiKeyModelAlias.Store(out)
+	if prev, ok := m.apiKeyModelRouting.Load().(*apiKeyModelRoutingSnapshot); ok && prev != nil {
+		m.apiKeyModelRouting.Store(&apiKeyModelRoutingSnapshot{config: prev.config, aliases: out, capabilities: prev.capabilities})
+	} else {
+		m.apiKeyModelRouting.Store(&apiKeyModelRoutingSnapshot{aliases: out})
+	}
 }
 
 func compileAPIKeyModelAliasForModels[T interface {
@@ -7600,4 +7607,53 @@ func (m *Manager) HttpRequest(ctx context.Context, auth *Auth, req *http.Request
 		return nil, &Error{Code: "provider_not_found", Message: "executor not registered for provider: " + providerKey}
 	}
 	return exec.HttpRequest(ctx, auth, req)
+}
+
+// resolveOpenAICompatConfigForAuth returns the OpenAICompatibility entry that
+// matches the given auth, preferring the exact config-index attribute when
+// available and falling back to name/provider matching.
+// Ported from upstream conductor_models.go for api_key_model_capabilities.go.
+func resolveOpenAICompatConfigForAuth(cfg *internalconfig.Config, auth *Auth, providerKey, compatName string) *internalconfig.OpenAICompatibility {
+	if cfg == nil {
+		return nil
+	}
+	if auth != nil && auth.AuthSourceKind() == AuthSourceConfig && auth.Attributes != nil {
+		if index, errIndex := strconv.Atoi(strings.TrimSpace(auth.Attributes[AttributeConfigIndex])); errIndex == nil && index >= 0 && index < len(cfg.OpenAICompatibility) && !cfg.OpenAICompatibility[index].Disabled {
+			return &cfg.OpenAICompatibility[index]
+		}
+	}
+	authProvider := ""
+	if auth != nil {
+		authProvider = auth.Provider
+	}
+	return resolveOpenAICompatConfigByName(cfg, providerKey, compatName, authProvider)
+}
+
+// resolveOpenAICompatConfigByName resolves an OpenAI-compat provider by name candidates.
+func resolveOpenAICompatConfigByName(cfg *internalconfig.Config, providerKey, compatName, authProvider string) *internalconfig.OpenAICompatibility {
+	if cfg == nil {
+		return nil
+	}
+	candidates := make([]string, 0, 3)
+	if v := strings.TrimSpace(compatName); v != "" {
+		candidates = append(candidates, v)
+	}
+	if v := strings.TrimSpace(providerKey); v != "" {
+		candidates = append(candidates, v)
+	}
+	if v := strings.TrimSpace(authProvider); v != "" {
+		candidates = append(candidates, v)
+	}
+	for i := range cfg.OpenAICompatibility {
+		compat := &cfg.OpenAICompatibility[i]
+		if compat.Disabled {
+			continue
+		}
+		for _, candidate := range candidates {
+			if candidate != "" && strings.EqualFold(strings.TrimSpace(candidate), compat.Name) {
+				return compat
+			}
+		}
+	}
+	return nil
 }
