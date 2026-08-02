@@ -3,6 +3,7 @@ package executor
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"regexp"
@@ -10,13 +11,14 @@ import (
 	"sync"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
-	kiroclaude "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/kiro/claude"
-
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/bedrockruntime"
 	"github.com/aws/aws-sdk-go-v2/service/bedrockruntime/types"
+	smithyhttp "github.com/aws/smithy-go/transport/http"
+
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
+	kiroclaude "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/kiro/claude"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	"github.com/tidwall/gjson"
@@ -801,7 +803,7 @@ func (e *ClaudeExecutor) executeBedrock(ctx context.Context, auth *cliproxyauth.
 	if err != nil {
 		helps.LogWithRequestID(ctx).Errorf("bedrock InvokeModel error model=%s modelID=%s region=%s body_bytes=%d: %v",
 			baseModel, modelID, region, len(body), err)
-		return resp, statusErr{code: http.StatusBadGateway, msg: fmt.Sprintf("bedrock invoke error: %v", err)}
+		return resp, statusErr{code: bedrockErrorHTTPStatus(err), msg: fmt.Sprintf("bedrock invoke error: %v", err)}
 	}
 
 	resp.Headers = http.Header{"Content-Type": {"application/json"}}
@@ -876,7 +878,7 @@ func (e *ClaudeExecutor) executeStreamBedrock(ctx context.Context, auth *cliprox
 	if err != nil {
 		helps.LogWithRequestID(ctx).Errorf("bedrock InvokeModelWithResponseStream error model=%s modelID=%s region=%s body_bytes=%d: %v",
 			baseModel, modelID, region, len(body), err)
-		return nil, statusErr{code: http.StatusBadGateway, msg: fmt.Sprintf("bedrock stream error: %v", err)}
+		return nil, statusErr{code: bedrockErrorHTTPStatus(err), msg: fmt.Sprintf("bedrock stream error: %v", err)}
 	}
 
 	stream := output.GetStream()
@@ -935,4 +937,23 @@ func (e *ClaudeExecutor) executeStreamBedrock(ctx context.Context, auth *cliprox
 		Headers: http.Header{"Content-Type": {"text/event-stream"}},
 		Chunks:  out,
 	}, nil
+}
+
+// bedrockErrorHTTPStatus extracts the upstream HTTP status from an AWS SDK
+// error. AWS SDK wraps HTTP responses inside smithyhttp.ResponseError; we peel
+// it off so the conductor sees the real status code (e.g. 403
+// AccessDeniedException from an SCP explicit-deny) and can apply the correct
+// cooldown/suspend policy instead of treating every failure as a transient 502.
+func bedrockErrorHTTPStatus(err error) int {
+	if err == nil {
+		return http.StatusBadGateway
+	}
+	var re *smithyhttp.ResponseError
+	if errors.As(err, &re) && re.Response != nil {
+		code := re.Response.StatusCode
+		if code >= 400 && code < 600 {
+			return code
+		}
+	}
+	return http.StatusBadGateway
 }
