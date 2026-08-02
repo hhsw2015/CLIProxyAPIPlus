@@ -11,8 +11,8 @@ import (
 )
 
 // skyworkGlobalCooldown tracks model failures across all Skywork accounts.
-// Since all Skywork accounts share the same upstream domain (desktop-llm.skywork.ai),
-// a model failure on one account means the same model will fail on all accounts.
+// All Skywork accounts share the same upstream (api.skywork.ai/skycowork-llm),
+// so a model failure on one account means the same model will fail on all.
 // Uses exponential backoff: 2min → 5min → 10min (cap), reset on success.
 var skyworkGlobalCooldown = struct {
 	mu            sync.RWMutex
@@ -340,7 +340,7 @@ func MapCrossFamilyReasoningEffort(effort, fromFamily, toFamily string) string {
 }
 
 // IsSkyworkFallbackAuth checks if an auth entry belongs to the Skywork provider
-// (skywork, skyclaw, or singularity with desktop-llm.skywork.ai base URL).
+// (skywork, skyclaw, or singularity with api.skywork.ai/skycowork-llm base URL).
 func IsSkyworkFallbackAuth(a *Auth) bool {
 	if a == nil {
 		return false
@@ -350,7 +350,7 @@ func IsSkyworkFallbackAuth(a *Auth) bool {
 		return true
 	}
 	if baseURL, ok := a.Attributes["base_url"]; ok {
-		if strings.Contains(strings.ToLower(baseURL), "desktop-llm.skywork.ai") {
+		if strings.Contains(strings.ToLower(baseURL), "api.skywork.ai/skycowork-llm") {
 			return true
 		}
 	}
