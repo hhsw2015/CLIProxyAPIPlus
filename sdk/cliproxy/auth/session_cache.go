@@ -9,10 +9,19 @@ import (
 const maxStableSessionAliases = 64
 
 // sessionEntry stores an auth binding, its identifier aliases, and expiration.
+//
+// expiresAt is the sliding TTL that GetAndRefresh advances on every access.
+// hardExpiresAt is a fixed ceiling from the first bind: even if the session
+// keeps sending traffic, the binding will be forcibly re-evaluated after this
+// point. This lets a session that got demoted to a lower-priority auth during
+// a transient outage climb back to P10 once it recovers, without requiring a
+// process restart. Without a hard ceiling the sliding TTL kept the demoted
+// binding alive indefinitely.
 type sessionEntry struct {
-	authID    string
-	expiresAt time.Time
-	aliases   []string
+	authID        string
+	expiresAt     time.Time
+	hardExpiresAt time.Time
+	aliases       []string
 }
 
 // SessionCache provides TTL-based session to auth mapping with automatic cleanup.
@@ -20,11 +29,13 @@ type SessionCache struct {
 	mu      sync.RWMutex
 	entries map[string]sessionEntry
 	ttl     time.Duration
+	hardTTL time.Duration
 	stopCh  chan struct{}
 }
 
 // NewSessionCache creates a cache with the specified TTL.
 // A background goroutine periodically cleans expired entries.
+// The hard-TTL ceiling defaults to 15 minutes.
 func NewSessionCache(ttl time.Duration) *SessionCache {
 	if ttl <= 0 {
 		ttl = 30 * time.Minute
@@ -32,6 +43,7 @@ func NewSessionCache(ttl time.Duration) *SessionCache {
 	c := &SessionCache{
 		entries: make(map[string]sessionEntry),
 		ttl:     ttl,
+		hardTTL: 15 * time.Minute,
 		stopCh:  make(chan struct{}),
 	}
 	go c.cleanupLoop()
@@ -86,9 +98,15 @@ func (c *SessionCache) GetAndRefresh(sessionID string) (string, bool) {
 		c.removeAliasGroupLocked(entry)
 		return "", false
 	}
+	// Enforce the hard ceiling from first bind so a session that got demoted
+	// to a low-priority auth doesn't stay pinned there forever via sliding TTL.
+	if !entry.hardExpiresAt.IsZero() && !now.Before(entry.hardExpiresAt) {
+		c.removeAliasGroupLocked(entry)
+		return "", false
+	}
 
 	aliases := compactSessionAliases(mergeSessionAliases([]string{sessionID}, entry.aliases...))
-	c.replaceAliasGroupsLocked(entry.authID, now.Add(c.ttl), aliases, entry)
+	c.replaceAliasGroupsLockedWithHard(entry.authID, now.Add(c.ttl), entry.hardExpiresAt, aliases, entry)
 	return entry.authID, true
 }
 
@@ -125,14 +143,34 @@ func (c *SessionCache) SetAliases(authID string, sessionIDs ...string) {
 	if len(aliases) == 0 {
 		return
 	}
-	c.replaceAliasGroupsLocked(authID, now.Add(c.ttl), aliases, previousGroups...)
+	// Hard ceiling from first bind: preserve if a previous group carried one,
+	// otherwise anchor to now+hardTTL. Sessions that switch auth via SetAliases
+	// (e.g. selector rebinding) start a fresh hard ceiling since the underlying
+	// binding actually changed.
+	var hardExpiresAt time.Time
+	if len(previousGroups) > 0 {
+		for _, prev := range previousGroups {
+			if prev.authID == authID && !prev.hardExpiresAt.IsZero() {
+				hardExpiresAt = prev.hardExpiresAt
+				break
+			}
+		}
+	}
+	if hardExpiresAt.IsZero() {
+		hardExpiresAt = now.Add(c.hardTTL)
+	}
+	c.replaceAliasGroupsLockedWithHard(authID, now.Add(c.ttl), hardExpiresAt, aliases, previousGroups...)
 }
 
 func (c *SessionCache) replaceAliasGroupsLocked(authID string, expiresAt time.Time, aliases []string, previousGroups ...sessionEntry) {
+	c.replaceAliasGroupsLockedWithHard(authID, expiresAt, time.Time{}, aliases, previousGroups...)
+}
+
+func (c *SessionCache) replaceAliasGroupsLockedWithHard(authID string, expiresAt time.Time, hardExpiresAt time.Time, aliases []string, previousGroups ...sessionEntry) {
 	for _, previous := range previousGroups {
 		c.removeAliasGroupLocked(previous)
 	}
-	entry := sessionEntry{authID: authID, expiresAt: expiresAt, aliases: aliases}
+	entry := sessionEntry{authID: authID, expiresAt: expiresAt, hardExpiresAt: hardExpiresAt, aliases: aliases}
 	for _, alias := range aliases {
 		c.entries[alias] = entry
 	}
@@ -278,7 +316,19 @@ func (c *SessionCache) Stop() {
 }
 
 func (c *SessionCache) cleanupLoop() {
-	ticker := time.NewTicker(c.ttl / 2)
+	// Tick at min(ttl/2, hardTTL/2, 1min) so hard-expiry evictions are prompt
+	// and the pinning-a-demoted-auth window is bounded.
+	interval := c.ttl / 2
+	if c.hardTTL > 0 && c.hardTTL/2 < interval {
+		interval = c.hardTTL / 2
+	}
+	if interval > time.Minute {
+		interval = time.Minute
+	}
+	if interval < 10*time.Second {
+		interval = 10 * time.Second
+	}
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
 		select {
@@ -295,6 +345,10 @@ func (c *SessionCache) cleanup() {
 	c.mu.Lock()
 	for sid, entry := range c.entries {
 		if !now.Before(entry.expiresAt) {
+			delete(c.entries, sid)
+			continue
+		}
+		if !entry.hardExpiresAt.IsZero() && !now.Before(entry.hardExpiresAt) {
 			delete(c.entries, sid)
 		}
 	}
