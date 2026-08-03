@@ -676,23 +676,6 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 			}
 		}
 		if cachedAuth != nil {
-			// Cache hit AND cached auth is available. Before returning it, ask
-			// the fallback selector (fill-first) what it would pick right now.
-			// If fallback picks something ELSE that isn't the cached auth, the
-			// cached auth is only "available" thanks to round-robin fallthrough;
-			// the fallback's higher-priority tier has come back and the session
-			// should climb back to it. Rebind so a session that got demoted to
-			// P9/P8 during a transient P10 outage returns to P10 automatically.
-			//
-			// Guard: only rebind when the fallback pick is stable (would pick
-			// the same auth twice) to avoid ping-ponging under round-robin.
-			if best, err := s.fallback.Pick(ctx, provider, model, opts, auths); err == nil && best != nil && best.ID != cachedAuth.ID {
-				if best2, err2 := s.fallback.Pick(ctx, provider, model, opts, auths); err2 == nil && best2 != nil && best2.ID == best.ID {
-					s.cache.Set(cacheKey, best.ID)
-					entry.Infof("session-affinity: rebind to preferred auth | session=%s from=%s to=%s provider=%s model=%s", truncateSessionID(primaryID), authLabel(cachedAuth), authLabel(best), provider, model)
-					return best, nil
-				}
-			}
 			entry.Infof("session-affinity: cache hit | session=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), authLabel(cachedAuth), provider, model)
 			return cachedAuth, nil
 		}
