@@ -227,7 +227,7 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 		if httpResp.StatusCode == http.StatusBadRequest && isThinkingErrorMessage(string(b)) {
 			markSessionNeedsThinkingStrip(ctx)
 		}
-		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
+		err = statusErr{code: classifyOpenAICompatStatus(httpResp.StatusCode, b), msg: string(b)}
 		return resp, err
 	}
 	body, err := io.ReadAll(httpResp.Body)
@@ -325,7 +325,7 @@ func (e *OpenAICompatExecutor) executeImages(ctx context.Context, auth *cliproxy
 
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), body))
-		err = statusErr{code: httpResp.StatusCode, msg: string(body)}
+		err = statusErr{code: classifyOpenAICompatStatus(httpResp.StatusCode, body), msg: string(body)}
 		return resp, err
 	}
 
@@ -481,7 +481,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		if errClose := httpResp.Body.Close(); errClose != nil {
 			log.Errorf("openai compat executor: close response body error: %v", errClose)
 		}
-		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
+		err = statusErr{code: classifyOpenAICompatStatus(httpResp.StatusCode, b), msg: string(b)}
 		return nil, err
 	}
 	out := make(chan cliproxyexecutor.StreamChunk)
@@ -1137,4 +1137,31 @@ func renameMaxTokensForReasoningModels(body []byte) []byte {
 	}
 	out, _ = sjson.DeleteBytes(out, "max_tokens")
 	return out
+}
+
+// classifyOpenAICompatStatus maps upstream HTTP status + error body to the
+// status code the conductor should see. A 403 whose body describes a
+// structural denial (account tier, team allow-list, model access) is remapped
+// to 402 so the (auth, model) pair gets a long 24h cooldown instead of the
+// 5-minute retry a transient 403 receives; that pair is not coming back on
+// its own within minutes.
+func classifyOpenAICompatStatus(status int, body []byte) int {
+	if status != http.StatusForbidden {
+		return status
+	}
+	lower := strings.ToLower(string(body))
+	structural := []string{
+		"team not allowed to access model",
+		"not authorized to access model",
+		"model not authorized",
+		"access denied for model",
+		"team can only access",
+		"not in the allowed model list",
+	}
+	for _, needle := range structural {
+		if strings.Contains(lower, needle) {
+			return http.StatusPaymentRequired
+		}
+	}
+	return status
 }
