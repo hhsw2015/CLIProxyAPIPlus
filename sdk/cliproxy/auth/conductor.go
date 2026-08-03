@@ -4379,15 +4379,29 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 								suspendReason = "unauthorized"
 								shouldSuspendModel = true
 							}
-						case 402, 403:
-							// 403 is per-(auth, model): AWS Bedrock SCP can deny a
-							// specific inference profile / region / model while the
-							// same auth still serves other models. Suspending the
-							// entire auth (via NextRetryAfter) empties the pool when
-							// several auths fail on the same model, so keep the auth
-							// available and only suspend the failing model.
-							state.NextRetryAfter = time.Time{}
-							if !disableCooling {
+						case 402:
+							// Structural denial (Bedrock SCP explicit-deny, tagged
+							// as 402 by the executor). Won't clear on its own —
+							// hold the (auth, model) out of rotation for 24h and
+							// let a manual retry after that surface any policy
+							// change. Keep the auth alive; other models on the
+							// same AK may still work.
+							if disableCooling {
+								state.NextRetryAfter = time.Time{}
+							} else {
+								state.NextRetryAfter = now.Add(24 * time.Hour)
+								suspendReason = "payment_required"
+								shouldSuspendModel = true
+							}
+						case 403:
+							// Transient authorization failure (quota / rate /
+							// model-access tier). Short 5min cooldown so the
+							// (auth, model) is retried and can resume once the
+							// upstream clears.
+							if disableCooling {
+								state.NextRetryAfter = time.Time{}
+							} else {
+								state.NextRetryAfter = now.Add(5 * time.Minute)
 								suspendReason = "payment_required"
 								shouldSuspendModel = true
 							}
@@ -5244,12 +5258,24 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 		} else {
 			auth.NextRetryAfter = now.Add(30 * time.Minute)
 		}
-	case 402, 403:
+	case 402:
+		// Structural denial (Bedrock SCP explicit-deny). Long cooldown; a
+		// stable-state policy change is unlikely to clear within minutes.
 		auth.StatusMessage = "payment_required"
-		// See the parallel case in MarkResult: 403 is per-model on providers
-		// like Bedrock (SCP explicit-deny on one inference profile), so keep the
-		// auth available; per-model suspension happens on the ModelState side.
-		auth.NextRetryAfter = time.Time{}
+		if disableCooling {
+			auth.NextRetryAfter = time.Time{}
+		} else {
+			auth.NextRetryAfter = now.Add(24 * time.Hour)
+		}
+	case 403:
+		// Transient authorization failure. Short cooldown so retries surface
+		// recovery quickly.
+		auth.StatusMessage = "payment_required"
+		if disableCooling {
+			auth.NextRetryAfter = time.Time{}
+		} else {
+			auth.NextRetryAfter = now.Add(5 * time.Minute)
+		}
 	case 404:
 		auth.StatusMessage = "not_found"
 		if disableCooling {

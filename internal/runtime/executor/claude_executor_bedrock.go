@@ -940,10 +940,14 @@ func (e *ClaudeExecutor) executeStreamBedrock(ctx context.Context, auth *cliprox
 }
 
 // bedrockErrorHTTPStatus extracts the upstream HTTP status from an AWS SDK
-// error. AWS SDK wraps HTTP responses inside smithyhttp.ResponseError; we peel
-// it off so the conductor sees the real status code (e.g. 403
-// AccessDeniedException from an SCP explicit-deny) and can apply the correct
-// cooldown/suspend policy instead of treating every failure as a transient 502.
+// error and distinguishes structural denials from transient failures.
+//
+//   - 403 with "explicit deny in a service control policy" -> 402
+//     Signals a stable AWS Organizations SCP denial for this (auth, region,
+//     model). Won't clear on its own; conductor should apply a long cooldown.
+//   - Any other 4xx/5xx -> real HTTP status. 403 (e.g. quota / model access
+//     tier issues) gets a short retry cooldown.
+//   - No smithyhttp.ResponseError attached -> fall back to 502.
 func bedrockErrorHTTPStatus(err error) int {
 	if err == nil {
 		return http.StatusBadGateway
@@ -951,6 +955,9 @@ func bedrockErrorHTTPStatus(err error) int {
 	var re *smithyhttp.ResponseError
 	if errors.As(err, &re) && re.Response != nil {
 		code := re.Response.StatusCode
+		if code == http.StatusForbidden && strings.Contains(err.Error(), "explicit deny in a service control policy") {
+			return http.StatusPaymentRequired
+		}
 		if code >= 400 && code < 600 {
 			return code
 		}
