@@ -2596,12 +2596,19 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 
 	var lastErr error
 	retryModel := authSelectionModelFromOptions(opts, req.Model)
+	emergencyReset := false
 	for attempt := 0; ; attempt++ {
 		resp, errExec := m.executeMixedOnce(ctx, normalized, req, opts, maxRetryCredentials)
 		if errExec == nil {
 			return resp, nil
 		}
 		lastErr = errExec
+		if !emergencyReset && isNoAuthAvailableError(errExec) {
+			if m.emergencyResetTransientCooldowns(ctx, normalized, retryModel) {
+				emergencyReset = true
+				continue
+			}
+		}
 		wait, shouldRetry := m.shouldRetryAfterError(errExec, attempt, normalized, retryModel, maxWait)
 		if !shouldRetry {
 			break
@@ -2618,6 +2625,7 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 				return resp, nil
 			}
 		}
+		m.emergencyResetTransientCooldowns(ctx, normalized, retryModel)
 		return cliproxyexecutor.Response{}, lastErr
 	}
 	return cliproxyexecutor.Response{}, &Error{Code: "auth_not_found", Message: "no auth available"}
@@ -2674,12 +2682,26 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 
 	var lastErr error
 	retryModel := authSelectionModelFromOptions(opts, req.Model)
+	emergencyReset := false
 	for attempt := 0; ; attempt++ {
 		result, errStream := m.executeStreamMixedOnce(ctx, normalized, req, opts, maxRetryCredentials)
 		if errStream == nil {
 			return result, nil
 		}
 		lastErr = errStream
+		// Emergency reset: when every auth in the tier is on short (transient)
+		// cooldown at the same time and the whole rotation returned "no auth
+		// available", wipe the transient cooldowns once and try again. This
+		// simulates the effect of a process restart without actually killing
+		// the process: sessions can climb straight back to the top-priority
+		// tier the moment upstream health flickers back on. Permanent 402
+		// (SCP explicit-deny, team not allowed) cooldowns are preserved.
+		if !emergencyReset && isNoAuthAvailableError(errStream) {
+			if m.emergencyResetTransientCooldowns(ctx, normalized, retryModel) {
+				emergencyReset = true
+				continue
+			}
+		}
 		wait, shouldRetry := m.shouldRetryAfterError(errStream, attempt, normalized, retryModel, maxWait)
 		if !shouldRetry {
 			break
@@ -2696,6 +2718,11 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 				return result, nil
 			}
 		}
+		// Before surfacing the error to the client, wipe transient cooldowns
+		// so the NEXT request from any client isn't dragged into the same
+		// wait loop. This gives the pool an immediate second chance instead
+		// of forcing a minute-long re-cool for everyone.
+		m.emergencyResetTransientCooldowns(ctx, normalized, retryModel)
 		var bootstrapErr *streamBootstrapError
 		if errors.As(lastErr, &bootstrapErr) && bootstrapErr != nil {
 			return streamErrorResult(bootstrapErr.Headers(), bootstrapErr.cause), nil
@@ -2703,6 +2730,84 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 		return nil, lastErr
 	}
 	return nil, &Error{Code: "auth_not_found", Message: "no auth available"}
+}
+
+// isNoAuthAvailableError detects the "every auth in the pool is currently
+// unavailable" signal that both executeExhausted and the executor layers
+// produce when rotation fails to find any usable credential.
+func isNoAuthAvailableError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var authErr *Error
+	if errors.As(err, &authErr) && authErr != nil {
+		if strings.EqualFold(authErr.Code, "auth_not_found") ||
+			strings.EqualFold(authErr.Code, "auth_unavailable") {
+			return true
+		}
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "no auth available") ||
+		strings.Contains(msg, "auth_unavailable") ||
+		strings.Contains(msg, "auth_not_found")
+}
+
+// emergencyResetTransientCooldowns clears state.NextRetryAfter on any auth
+// whose current cooldown was set by a *transient* signal (5-min band from a
+// generic 403/429/5xx). Auths locked by an explicit 402 payment_required
+// (SCP / team not allowed / structural denial) keep their 24h ceiling — those
+// really can't come back on their own. Returns true if at least one auth was
+// unlocked so the caller can decide whether a retry is worth attempting.
+func (m *Manager) emergencyResetTransientCooldowns(ctx context.Context, providers []string, model string) bool {
+	if m == nil {
+		return false
+	}
+	now := time.Now()
+	providerSet := make(map[string]struct{}, len(providers))
+	for _, p := range providers {
+		key := strings.TrimSpace(strings.ToLower(p))
+		if key == "" {
+			continue
+		}
+		providerSet[key] = struct{}{}
+	}
+	reset := 0
+	m.mu.Lock()
+	for _, auth := range m.auths {
+		if auth == nil {
+			continue
+		}
+		if len(providerSet) > 0 {
+			if _, ok := providerSet[strings.ToLower(auth.Provider)]; !ok {
+				continue
+			}
+		}
+		// Skip permanent denials (24h ceilings from 402).
+		if auth.StatusMessage == "payment_required" && !auth.NextRetryAfter.IsZero() {
+			if auth.NextRetryAfter.Sub(now) > time.Hour {
+				continue
+			}
+		}
+		if !auth.NextRetryAfter.IsZero() && auth.NextRetryAfter.After(now) {
+			auth.NextRetryAfter = time.Time{}
+			auth.Unavailable = false
+			reset++
+		}
+		if model != "" {
+			if state, ok := auth.ModelStates[model]; ok && state != nil {
+				if state.StatusMessage == "payment_required" && !state.NextRetryAfter.IsZero() && state.NextRetryAfter.Sub(now) > time.Hour {
+					continue
+				}
+				if !state.NextRetryAfter.IsZero() && state.NextRetryAfter.After(now) {
+					state.NextRetryAfter = time.Time{}
+					state.Unavailable = false
+					reset++
+				}
+			}
+		}
+	}
+	m.mu.Unlock()
+	return reset > 0
 }
 
 func (m *Manager) executeHome(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, countTokens bool) (cliproxyexecutor.Response, error) {
