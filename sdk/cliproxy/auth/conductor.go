@@ -4395,15 +4395,16 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 							}
 						case 403:
 							// Transient authorization failure (quota / rate /
-							// model-access tier). Short 5min cooldown so the
-							// (auth, model) is retried and can resume once the
-							// upstream clears.
+							// model-access tier). Rely on state.NextRetryAfter
+							// (which the selector honors and auto-expires) rather
+							// than ModelRegistry.SuspendedClients, which has no
+							// TTL — the latter would keep the (auth, model) out
+							// of rotation forever because ResumeClientModel only
+							// fires on a successful call that never comes.
 							if disableCooling {
 								state.NextRetryAfter = time.Time{}
 							} else {
 								state.NextRetryAfter = now.Add(5 * time.Minute)
-								suspendReason = "payment_required"
-								shouldSuspendModel = true
 							}
 						case 404:
 							if disableCooling {
