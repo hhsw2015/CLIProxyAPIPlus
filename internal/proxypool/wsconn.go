@@ -106,12 +106,23 @@ func (c *wsConn) keepAlive() {
 	}
 }
 
-// net.Conn interface stubs
-func (c *wsConn) LocalAddr() net.Addr                { return wsAddr{c.name} }
-func (c *wsConn) RemoteAddr() net.Addr               { return wsAddr{c.target} }
-func (c *wsConn) SetDeadline(t time.Time) error      { return nil }
-func (c *wsConn) SetReadDeadline(t time.Time) error  { return nil }
-func (c *wsConn) SetWriteDeadline(t time.Time) error { return nil }
+// net.Conn interface — deadlines forward to the underlying WebSocket so
+// http.Transport can detect dead idle connections and evict them. Returning
+// nil (the previous stub) turned SetDeadline into a no-op, which let idle
+// WebSockets die silently on the tunnel end; the next request pulled the
+// zombie conn from the transport pool and wrote HTTP plaintext into a
+// half-closed tunnel, triggering upstream "400 plain HTTP to HTTPS port".
+func (c *wsConn) LocalAddr() net.Addr  { return wsAddr{c.name} }
+func (c *wsConn) RemoteAddr() net.Addr { return wsAddr{c.target} }
+
+func (c *wsConn) SetDeadline(t time.Time) error {
+	if err := c.ws.SetReadDeadline(t); err != nil {
+		return err
+	}
+	return c.ws.SetWriteDeadline(t)
+}
+func (c *wsConn) SetReadDeadline(t time.Time) error  { return c.ws.SetReadDeadline(t) }
+func (c *wsConn) SetWriteDeadline(t time.Time) error { return c.ws.SetWriteDeadline(t) }
 
 type wsAddr struct{ s string }
 
