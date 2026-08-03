@@ -5079,7 +5079,17 @@ func isClientCanceledResultError(err *Error) bool {
 }
 
 func isRequestScopedResultError(err *Error) bool {
-	return err != nil && (err.IsRequestScoped() || isRequestScopedNotFoundResultError(err))
+	if err == nil {
+		return false
+	}
+	// 501 Not Implemented means the auth's provider does not support this
+	// particular operation (e.g. count_tokens on Bedrock, on Vertex Anthropic).
+	// The auth itself is healthy — do not penalize it. The caller falls back
+	// to heuristic counting.
+	if err.HTTPStatus == http.StatusNotImplemented {
+		return true
+	}
+	return err.IsRequestScoped() || isRequestScopedNotFoundResultError(err)
 }
 
 func isCountTokensEndpointNotFoundError(err error, requestedModel string) bool {

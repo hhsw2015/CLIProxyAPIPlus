@@ -1046,6 +1046,18 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	if isVertexClaudeAuth(auth) {
 		return cliproxyexecutor.Response{}, statusErr{code: http.StatusNotImplemented, msg: "count_tokens not supported on Vertex AI Anthropic endpoint"}
 	}
+	// Bedrock InvokeModel has no count_tokens equivalent. Without this guard,
+	// CountTokens would fall through to claudeCreds(auth), which returns an
+	// empty API key for a Bedrock auth (Bedrock stores aws_access_key_id, not
+	// api_key), then POST to https://api.anthropic.com/v1/messages/count_tokens
+	// without an Authorization header, get 401, and the conductor would mark
+	// the whole Bedrock auth as unavailable. That's why /v1/messages was
+	// stable but every /v1/messages/count_tokens rotation drained the P10
+	// direct auths. Returning 501 leaves the auth intact and forces the
+	// caller onto heuristic token counting for Bedrock-backed models.
+	if isBedrockAuth(auth) {
+		return cliproxyexecutor.Response{}, statusErr{code: http.StatusNotImplemented, msg: "count_tokens not supported on Bedrock"}
+	}
 	// Some third-party Anthropic-compatible relays do not implement count_tokens
 	// (e.g. qinghuaapi). Returning a hard error here marks the entire auth as
 	// unavailable, killing real /v1/messages traffic too. Treat 404 as
