@@ -1621,6 +1621,24 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": errSet.Error()})
 			return
 		}
+		if fieldPath == "weight" {
+			if value == nil {
+				delete(targetAuth.Metadata, coreauth.AttributeWeight)
+				if targetAuth.Attributes != nil {
+					delete(targetAuth.Attributes, coreauth.AttributeWeight)
+				}
+			} else {
+				// Weight must be a JSON number, not a quoted string.
+				if _, isString := value.(string); isString {
+					c.JSON(http.StatusBadRequest, gin.H{"error": "weight must be an integer"})
+					return
+				}
+				if errWeight := coreauth.ApplyAuthWeightMetadata(targetAuth, targetAuth.Metadata); errWeight != nil {
+					c.JSON(http.StatusBadRequest, gin.H{"error": errWeight.Error()})
+					return
+				}
+			}
+		}
 		if root := rootAuthFileField(fieldPath); root != "" {
 			touchedRoots[root] = struct{}{}
 		}

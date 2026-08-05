@@ -76,6 +76,7 @@ warp-pool/data/
 .serena/*
 .agent/*
 .agents
+.pi
 .agents/*
 .opencode/*
 .idea/*
@@ -98,3 +99,11 @@ _bmad-output/*
 scripts/generated/
 .gocache/
 cpa-linux
+
+# fork-local credential probe state (never commit)
+scripts/probe_state.json
+scripts/probe_state.watermark
+
+# fork-local build artifacts and generated content
+scripts/probe_state.json
+scripts/probe_state.watermark

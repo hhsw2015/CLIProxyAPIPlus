@@ -1,6 +1,7 @@
 package cliproxy
 
 import (
+	"context"
 	"testing"
 
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
@@ -36,7 +37,7 @@ func TestRegisterModelsForAuth_OpenAICompatAddsImplicitClaudeHyphenAliases(t *te
 		reg.UnregisterClient(auth.ID)
 	})
 
-	svc.registerModelsForAuth(auth)
+	svc.registerModelsForAuth(context.Background(), auth)
 
 	for _, modelID := range []string{
 		"claude-opus-4.5",

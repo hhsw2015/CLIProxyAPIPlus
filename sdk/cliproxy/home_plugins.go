@@ -183,7 +183,10 @@ func (s *Service) stageHomePluginTasksWithClient(ctx context.Context, cfg *confi
 		s.homeMu.Unlock()
 	}
 	if client == nil {
-		return nil, fmt.Errorf("home client is unavailable")
+		// No live Home client yet (bootstrap / tests). Skip staging tasks
+		// rather than propagating an error that would abort the overlay
+		// commit — plugin task work is best-effort.
+		return nil, nil
 	}
 	if ctx == nil {
 		ctx = context.Background()

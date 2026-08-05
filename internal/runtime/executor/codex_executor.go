@@ -2011,6 +2011,16 @@ func (e *CodexExecutor) cacheHelper(ctx context.Context, from sdktranslator.Form
 		}
 	}
 
+	// Fallback: derive a stable UUID from the request's execution / derived
+	// session metadata when the primary derivation left cache.ID empty. This
+	// preserves prompt-cache continuity across turns when the caller cannot
+	// carry an API key or explicit prompt_cache_key.
+	if cache.ID == "" {
+		if derived := helps.DerivedSessionUUID("codex", req.Metadata); derived != "" {
+			cache.ID = derived
+		}
+	}
+
 	if cache.ID != "" {
 		rawJSON = helps.SetStringIfDifferent(rawJSON, "prompt_cache_key", cache.ID)
 	}

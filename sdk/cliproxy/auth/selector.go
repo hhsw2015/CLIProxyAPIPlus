@@ -22,7 +22,32 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	cliproxysession "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/session"
 )
+
+func normalizedSessionCandidate(raw string) string {
+	return cliproxysession.NormalizeExplicitID(raw)
+}
+
+func sessionHeaderValue(headers http.Header, name string) string {
+	if headers == nil {
+		return ""
+	}
+	if value := normalizedSessionCandidate(headers.Get(name)); value != "" {
+		return value
+	}
+	for key, values := range headers {
+		if !strings.EqualFold(key, name) {
+			continue
+		}
+		for _, raw := range values {
+			if value := normalizedSessionCandidate(raw); value != "" {
+				return value
+			}
+		}
+	}
+	return ""
+}
 
 // RoundRobinSelector provides a simple provider scoped round-robin selection strategy.
 type RoundRobinSelector struct {
@@ -823,6 +848,11 @@ func ExtractSessionID(headers http.Header, payload []byte, metadata map[string]a
 // primaryID: full hash including assistant response (stable after first turn)
 // fallbackID: short hash without assistant (used to inherit binding from first turn)
 func extractSessionIDs(headers http.Header, payload []byte, metadata map[string]any) (string, string) {
+	// 0. X-Claude-Code-Session-Id header (highest priority for native Claude Code)
+	if sid := sessionHeaderValue(headers, "X-Claude-Code-Session-Id"); sid != "" {
+		return "claude:" + sid, ""
+	}
+
 	// 1. metadata.user_id with Claude Code session format (highest priority)
 	if len(payload) > 0 {
 		userID := gjson.GetBytes(payload, "metadata.user_id").String()
@@ -866,19 +896,30 @@ func extractSessionIDs(headers http.Header, payload []byte, metadata map[string]
 		}
 	}
 
+	// 5. metadata.user_id (non-Claude Code format)
+	if len(payload) > 0 {
+		if userID := gjson.GetBytes(payload, "metadata.user_id").String(); userID != "" {
+			return "user:" + userID, ""
+		}
+		if convID := gjson.GetBytes(payload, "conversation_id").String(); convID != "" {
+			return "conv:" + convID, ""
+		}
+	}
+
+	// 6. Explicit execution session metadata
+	if executionID, ok := metadata[cliproxyexecutor.ExecutionSessionMetadataKey].(string); ok {
+		if executionID = normalizedSessionCandidate(executionID); executionID != "" {
+			return "execution:" + executionID, ""
+		}
+	}
+
+	// 7. Derived stable session identity from higher-order context signals
+	if derivedID := normalizedSessionCandidate(cliproxysession.DerivedID(metadata)); derivedID != "" {
+		return "derived:" + derivedID, ""
+	}
+
 	if len(payload) == 0 {
 		return "", ""
-	}
-
-	// 6. metadata.user_id (non-Claude Code format)
-	userID := gjson.GetBytes(payload, "metadata.user_id").String()
-	if userID != "" {
-		return "user:" + userID, ""
-	}
-
-	// 7. conversation_id field
-	if convID := gjson.GetBytes(payload, "conversation_id").String(); convID != "" {
-		return "conv:" + convID, ""
 	}
 
 	// 8. Hash-based fallback from message content

@@ -194,6 +194,7 @@ func baselineExecutorAuths() []*coreauth.Auth {
 		"codex",
 		"claude",
 		constant.Gemini,
+		"gemini-cli",
 		constant.GeminiInteractions,
 		"vertex",
 		"aistudio",
@@ -275,6 +276,8 @@ func (s *Service) registerExecutorForAuth(a *coreauth.Auth, forceReplace bool) {
 	switch strings.ToLower(a.Provider) {
 	case constant.Gemini:
 		s.coreManager.RegisterExecutor(executor.NewGeminiExecutor(cfg))
+	case "gemini-cli":
+		s.coreManager.RegisterExecutor(executor.NewGeminiCLIExecutor(cfg))
 	case constant.GeminiInteractions:
 		s.coreManager.RegisterExecutor(executor.NewGeminiInteractionsExecutor(cfg))
 	case "vertex":

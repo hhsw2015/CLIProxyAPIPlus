@@ -45,7 +45,10 @@ func cloneRuntimeValue(v reflect.Value) reflect.Value {
 		for i := 0; i < v.NumField(); i++ {
 			dst := out.Field(i)
 			if !dst.CanSet() {
-				return v
+				// Unexported field: leave as zero value in the clone. Deep copy
+				// only covers the exported public surface; runtime callers do
+				// not depend on unexported state.
+				continue
 			}
 			dst.Set(cloneRuntimeValue(v.Field(i)))
 		}

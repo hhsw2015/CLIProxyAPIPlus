@@ -139,11 +139,8 @@ func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) ([
 			return auths, nil
 		}
 	}
-	if provider == "" || provider == "gemini-cli" {
+	if provider == "" {
 		return nil, nil
-	}
-	if provider == "gemini" {
-		provider = "gemini-cli"
 	}
 	label := provider
 	if email, _ := metadata["email"].(string); email != "" {

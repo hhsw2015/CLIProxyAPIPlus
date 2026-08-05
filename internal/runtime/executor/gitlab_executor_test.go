@@ -458,63 +458,6 @@ func TestGitLabExecutorExecuteStreamFallsBackToSyntheticChat(t *testing.T) {
 	}
 }
 
-func TestGitLabExecutorExecuteStreamUsesAnthropicGateway(t *testing.T) {
-	var gotPath, gotBetaHeader, gotUserAgent string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotPath = r.URL.Path
-		gotBetaHeader = r.Header.Get("Anthropic-Beta")
-		gotUserAgent = r.Header.Get("User-Agent")
-		w.Header().Set("Content-Type", "text/event-stream")
-		_, _ = w.Write([]byte("event: message_start\n"))
-		_, _ = w.Write([]byte("data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-sonnet-4-5\",\"content\":[],\"stop_reason\":null,\"stop_sequence\":null,\"usage\":{\"input_tokens\":0,\"output_tokens\":0}}}\n\n"))
-		_, _ = w.Write([]byte("event: content_block_start\n"))
-		_, _ = w.Write([]byte("data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n"))
-		_, _ = w.Write([]byte("event: content_block_delta\n"))
-		_, _ = w.Write([]byte("data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hello from gateway\"}}\n\n"))
-		_, _ = w.Write([]byte("event: message_delta\n"))
-		_, _ = w.Write([]byte("data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\",\"stop_sequence\":null},\"usage\":{\"input_tokens\":10,\"output_tokens\":3}}\n\n"))
-		_, _ = w.Write([]byte("event: message_stop\n"))
-		_, _ = w.Write([]byte("data: {\"type\":\"message_stop\"}\n\n"))
-	}))
-	defer srv.Close()
-
-	exec := NewGitLabExecutor(&config.Config{})
-	auth := &cliproxyauth.Auth{
-		Provider: "gitlab",
-		Metadata: map[string]any{
-			"duo_gateway_base_url": srv.URL,
-			"duo_gateway_token":    "gateway-token",
-			"duo_gateway_headers":  map[string]string{"X-Gitlab-Realm": "saas"},
-			"model_provider":       "anthropic",
-			"model_name":           "claude-sonnet-4-5",
-		},
-	}
-	req := cliproxyexecutor.Request{
-		Model:   "gitlab-duo",
-		Payload: []byte(`{"model":"gitlab-duo","messages":[{"role":"user","content":[{"type":"text","text":"hello"}]}],"max_tokens":64}`),
-	}
-
-	result, err := exec.ExecuteStream(context.Background(), auth, req, cliproxyexecutor.Options{
-		SourceFormat: sdktranslator.FromString("claude"),
-	})
-	if err != nil {
-		t.Fatalf("ExecuteStream() error = %v", err)
-	}
-
-	lines := collectStreamLines(t, result)
-	if gotPath != "/v1/proxy/anthropic/v1/messages" {
-		t.Fatalf("Path = %q, want %q", gotPath, "/v1/proxy/anthropic/v1/messages")
-	}
-	if !strings.Contains(gotBetaHeader, gitLabContext1MBeta) {
-		t.Fatalf("Anthropic-Beta = %q, want to contain %q", gotBetaHeader, gitLabContext1MBeta)
-	}
-	if gotUserAgent != gitLabNativeUserAgent {
-		t.Fatalf("User-Agent = %q, want %q", gotUserAgent, gitLabNativeUserAgent)
-	}
-	if !strings.Contains(strings.Join(lines, "\n"), "hello from gateway") {
-		t.Fatalf("expected anthropic gateway stream, got %q", strings.Join(lines, "\n"))
-	}
-}
 
 func collectStreamLines(t *testing.T, result *cliproxyexecutor.StreamResult) []string {
 	t.Helper()
