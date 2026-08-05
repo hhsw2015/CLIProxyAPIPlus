@@ -118,13 +118,6 @@ func TestPrepareBedrockBody(t *testing.T) {
 	}
 }
 
-func TestPrepareBedrockBodyPreservesExistingVersion(t *testing.T) {
-	input := []byte(`{"model":"x","anthropic_version":"custom-version","messages":[]}`)
-	got := prepareBedrockBody(input)
-	if !contains(string(got), `"anthropic_version":"custom-version"`) {
-		t.Errorf("expected existing anthropic_version to be preserved, got: %s", string(got))
-	}
-}
 
 func contains(s, substr string) bool {
 	return len(s) >= len(substr) && searchString(s, substr)

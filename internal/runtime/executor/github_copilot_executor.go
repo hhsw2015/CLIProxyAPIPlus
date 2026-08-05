@@ -719,14 +719,18 @@ func isAgentInitiated(body []byte) bool {
 			return true
 		}
 
-		// If last item is user-role, check for prior non-user items
-		for _, item := range arr {
-			if role := item.Get("role").String(); role == "assistant" {
-				return true
-			}
-			switch item.Get("type").String() {
+		// If last item is user-role, check whether the item immediately before
+		// it looks like an agent turn (tool call, function output, or another
+		// assistant message). A plain multi-turn user reply after an assistant
+		// message is user-initiated, so we only escalate when the item just
+		// prior to the last user is a tool-loop artifact.
+		if role := last.Get("role").String(); role == "user" && len(arr) >= 2 {
+			prev := arr[len(arr)-2]
+			switch prev.Get("type").String() {
 			case "function_call", "function_call_output", "function_call_response",
 				"function_call_arguments", "computer_call", "computer_call_output":
+				return true
+			case "tool_result":
 				return true
 			}
 		}

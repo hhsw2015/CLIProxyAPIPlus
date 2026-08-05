@@ -40,6 +40,36 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+// claudeToolPrefix is empty to match real Claude Code behavior (no tool name prefix).
+const claudeToolPrefix = ""
+
+// claudeOAuthProfileFetcher retrieves an OAuth profile for the given credentials.
+type claudeOAuthProfileFetcher func(context.Context, *cliproxyauth.Auth, string) (*claudeauth.OAuthProfile, error)
+
+// oauthToolRenameMap maps OpenCode-style (lowercase) tool names to Claude Code-style
+// (TitleCase) names. Anthropic fingerprints tool names on OAuth traffic; renaming to
+// official names avoids extra-usage billing.
+var oauthToolRenameMap = map[string]string{
+	"bash":         "Bash",
+	"read":         "Read",
+	"write":        "Write",
+	"edit":         "Edit",
+	"glob":         "Glob",
+	"grep":         "Grep",
+	"task":         "Task",
+	"webfetch":     "WebFetch",
+	"todowrite":    "TodoWrite",
+	"question":     "Question",
+	"skill":        "Skill",
+	"ls":           "LS",
+	"todoread":     "TodoRead",
+	"notebookedit": "NotebookEdit",
+}
+
+// oauthToolsToRemove lists tool names that must be stripped from OAuth requests
+// even after remapping. Currently empty — all tools are mapped instead of removed.
+var oauthToolsToRemove = map[string]bool{}
+
 // ClaudeExecutor is a stateless executor for Anthropic Claude over the messages API.
 // If api_key is unavailable on auth, it falls back to legacy via ClientAdapter.
 type ClaudeExecutor struct {
@@ -47,11 +77,44 @@ type ClaudeExecutor struct {
 	bedrockClients          sync.Map // key: "ak:region" → *bedrockruntime.Client
 	requestLogProvider      string
 	upstreamModelNormalizer func(string) string
+	oauthProfileFetcher     claudeOAuthProfileFetcher
 }
 
-// claudeToolPrefix is empty to match real Claude Code behavior (no tool name prefix).
-// Previously "proxy_" was used but this is a detectable fingerprint difference.
-const claudeToolPrefix = ""
+type claudeOAuthCancellationError struct {
+	cause error
+}
+
+func (e *claudeOAuthCancellationError) Error() string {
+	if e == nil || e.cause == nil {
+		return ""
+	}
+	return e.cause.Error()
+}
+
+func (e *claudeOAuthCancellationError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.cause
+}
+
+func (e *claudeOAuthCancellationError) IsRequestScoped() bool {
+	return e != nil
+}
+
+func newClaudeOAuthCancellationError(ctx context.Context, oauth bool, err error) error {
+	if !oauth {
+		return nil
+	}
+	cause := err
+	if ctx != nil && ctx.Err() != nil {
+		cause = ctx.Err()
+	}
+	if !errors.Is(cause, context.Canceled) {
+		return nil
+	}
+	return &claudeOAuthCancellationError{cause: cause}
+}
 
 func shouldSanitizeClaudeMessagesForUpstream(baseModel string) bool {
 	return sigcompat.SignatureProviderFromModelName(baseModel) == sigcompat.SignatureProviderClaude
@@ -120,38 +183,6 @@ func logClaudeSignatureSanitizeReport(ctx context.Context, baseModel string, rep
 
 	helps.LogWithRequestID(ctx).WithFields(fields).Debug("claude executor: sanitized signature history before upstream")
 }
-
-// oauthToolRenameMap maps OpenCode-style (lowercase) tool names to Claude Code-style
-// (TitleCase) names. Anthropic uses tool name fingerprinting to detect third-party
-// clients on OAuth traffic. Renaming to official names avoids extra-usage billing.
-// All tools are mapped to TitleCase equivalents to match Claude Code naming patterns.
-var oauthToolRenameMap = map[string]string{
-	"bash":         "Bash",
-	"read":         "Read",
-	"write":        "Write",
-	"edit":         "Edit",
-	"glob":         "Glob",
-	"grep":         "Grep",
-	"task":         "Task",
-	"webfetch":     "WebFetch",
-	"todowrite":    "TodoWrite",
-	"question":     "Question",
-	"skill":        "Skill",
-	"ls":           "LS",
-	"todoread":     "TodoRead",
-	"notebookedit": "NotebookEdit",
-}
-
-// The reverse map is now computed per-request in remapOAuthToolNames so that
-// only names the client actually caused us to rewrite are restored on the
-// response. A global reverse map — as used previously — corrupted responses
-// for clients that sent mixed casing (e.g. `Bash` TitleCase alongside `glob`
-// lowercase; the request flagged renames via `glob` -> `Glob`, then the global
-// reverse map incorrectly rewrote every `Bash` in the response to `bash`).
-
-// oauthToolsToRemove lists tool names that must be stripped from OAuth requests
-// even after remapping. Currently empty — all tools are mapped instead of removed.
-var oauthToolsToRemove = map[string]bool{}
 
 // Anthropic-compatible upstreams may reject or even crash when Claude models
 // omit max_tokens. Prefer registered model metadata before using a fallback.
@@ -237,7 +268,7 @@ func (e *ClaudeExecutor) PrepareRequest(req *http.Request, auth *cliproxyauth.Au
 		return nil
 	}
 	useAPIKey := auth != nil && auth.Attributes != nil && strings.TrimSpace(auth.Attributes["api_key"]) != ""
-	isAnthropicBase := req.URL != nil && strings.EqualFold(req.URL.Scheme, "https") && strings.EqualFold(req.URL.Host, "api.anthropic.com")
+	isAnthropicBase := helps.IsAnthropicUpstreamURL(req.URL)
 	if isAnthropicBase && useAPIKey {
 		req.Header.Del("Authorization")
 		req.Header.Set("x-api-key", apiKey)
@@ -377,7 +408,9 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	// Enable cch signing by default for OAuth tokens (not just experimental flag).
 	// Claude Code always computes cch; missing or invalid cch is a detectable fingerprint.
 	if oauthToken || experimentalCCHSigningEnabled(e.cfg, auth) {
-		bodyForUpstream = signAnthropicMessagesBody(bodyForUpstream)
+		if signed, errSign := signAnthropicMessagesBody(bodyForUpstream); errSign == nil {
+			bodyForUpstream = signed
+		}
 	}
 	reporter.SetTranslatedReasoningEffort(bodyForUpstream, to.String())
 
@@ -412,7 +445,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		}
 		applyVertexClaudeHeaders(httpReq, token)
 	} else {
-		if errHeaders := applyClaudeHeaders(httpReq, auth, apiKey, false, extraBetas, e.cfg, opts.Headers); errHeaders != nil {
+		if errHeaders := applyClaudeHeaders(httpReq, auth, apiKey, false, extraBetas, nil, e.cfg, opts.Headers, false); errHeaders != nil {
 			return resp, errHeaders
 		}
 	}
@@ -631,7 +664,9 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	bodyForUpstream = sanitizeClaudeMessagesForClaudeUpstreamWithDebug(ctx, bodyForUpstream, baseModel)
 	// Enable cch signing by default for OAuth tokens (not just experimental flag).
 	if oauthToken || experimentalCCHSigningEnabled(e.cfg, auth) {
-		bodyForUpstream = signAnthropicMessagesBody(bodyForUpstream)
+		if signed, errSign := signAnthropicMessagesBody(bodyForUpstream); errSign == nil {
+			bodyForUpstream = signed
+		}
 	}
 	reporter.SetTranslatedReasoningEffort(bodyForUpstream, to.String())
 
@@ -662,7 +697,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		}
 		applyVertexClaudeHeaders(httpReq, token)
 	} else {
-		if errHeaders := applyClaudeHeaders(httpReq, auth, apiKey, true, extraBetas, e.cfg, opts.Headers); errHeaders != nil {
+		if errHeaders := applyClaudeHeaders(httpReq, auth, apiKey, true, extraBetas, nil, e.cfg, opts.Headers, false); errHeaders != nil {
 			return nil, errHeaders
 		}
 	}
@@ -1105,7 +1140,7 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	if err != nil {
 		return cliproxyexecutor.Response{}, err
 	}
-	if errHeaders := applyClaudeHeaders(httpReq, auth, apiKey, false, extraBetas, e.cfg, opts.Headers); errHeaders != nil {
+	if errHeaders := applyClaudeHeaders(httpReq, auth, apiKey, false, extraBetas, nil, e.cfg, opts.Headers, false); errHeaders != nil {
 		return cliproxyexecutor.Response{}, errHeaders
 	}
 	var authID, authLabel, authType, authValue string
@@ -1580,7 +1615,10 @@ func decodeResponseBody(body io.ReadCloser, contentEncoding string) (io.ReadClos
 	return body, nil
 }
 
-func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string, stream bool, extraBetas []string, cfg *config.Config, incomingHeaders http.Header) error {
+// applyClaudeHeaders adapts the upstream 9-parameter signature so tests port
+// cleanly. Fork ignores body / confirmedClaudeCode today; the extra params are
+// accepted for signature compatibility.
+func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string, stream bool, extraBetas []string, _ []byte, cfg *config.Config, incomingHeaders http.Header, _ bool) error {
 	if r == nil {
 		return nil
 	}
@@ -1726,7 +1764,7 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 	if stabilizeDeviceProfile {
 		helps.ApplyClaudeDeviceProfileHeaders(r, deviceProfile)
 	} else {
-		helps.ApplyClaudeLegacyDeviceHeaders(r, incomingHeaders, cfg)
+		helps.ApplyClaudeLegacyDeviceHeaders(r, incomingHeaders, cfg, false)
 	}
 	var attrs map[string]string
 	if auth != nil {

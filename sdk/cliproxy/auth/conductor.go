@@ -1442,11 +1442,12 @@ func (m *Manager) preparedExecutionModels(auth *Auth, routeModel string) ([]stri
 }
 
 func (m *Manager) preparedExecutionModelsWithAlias(auth *Auth, routeModel string) ([]string, bool, OAuthModelAliasResult) {
-	candidates, pooled, aliasResult := m.executionModelCandidatesWithAlias(auth, routeModel)
+	candidates, pooled, aliasResult, _ := m.executionModelCandidatesWithAlias(auth, routeModel)
 	return m.filterExecutionModels(auth, routeModel, candidates, pooled), pooled, aliasResult
 }
 
-func (m *Manager) executionModelCandidatesWithAlias(auth *Auth, routeModel string) ([]string, bool, OAuthModelAliasResult) {
+func (m *Manager) executionModelCandidatesWithAlias(auth *Auth, routeModel string) ([]string, bool, OAuthModelAliasResult, *apiKeyModelRoutingSnapshot) {
+	routing := m.loadAPIKeyModelRouting()
 	requestedModel := rewriteModelForAuth(routeModel, auth)
 	aliasResult := m.resolveExecutionAliasResultForRequested(auth, requestedModel)
 	if aliasResult.ForceMapping && auth != nil && auth.Attributes != nil && strings.EqualFold(strings.TrimSpace(auth.Attributes[homeForceMappingAttributeKey]), "true") {
@@ -1477,7 +1478,7 @@ func (m *Manager) executionModelCandidatesWithAlias(auth *Auth, routeModel strin
 		}
 	}
 	pooled := len(candidates) > 1
-	return candidates, pooled, aliasResult
+	return candidates, pooled, aliasResult, routing
 }
 
 func (m *Manager) resolveExecutionAliasResult(auth *Auth, routeModel string) OAuthModelAliasResult {
@@ -2105,6 +2106,9 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 		}
 		execOpts := opts
 		execReq, execOpts = applyRequestAfterAuthInterceptor(ctx, executor, provider, execReq, execOpts, requestedModelAliasFromOptions(execOpts, routeModel))
+		if executionModel == "" {
+			execReq = m.attachResolvedAPIKeyModelInfo(execReq, auth, routeModel, execModel)
+		}
 		if errCtx := ctx.Err(); errCtx != nil {
 			return nil, errCtx
 		}
@@ -2244,6 +2248,7 @@ func (m *Manager) rebuildAPIKeyModelAliasLocked(cfg *internalconfig.Config) {
 	}
 
 	out := make(apiKeyModelAliasTable)
+	capabilities := make(apiKeyModelCapabilityTable)
 	for _, auth := range m.auths {
 		if auth == nil {
 			continue
@@ -2300,13 +2305,16 @@ func (m *Manager) rebuildAPIKeyModelAliasLocked(cfg *internalconfig.Config) {
 		if len(byAlias) > 0 {
 			out[auth.ID] = byAlias
 		}
+		if byCapability := compileAPIKeyModelCapabilitiesForAuth(cfg, auth); len(byCapability) > 0 {
+			capabilities[auth.ID] = byCapability
+		}
 	}
 
-	if prev, ok := m.apiKeyModelRouting.Load().(*apiKeyModelRoutingSnapshot); ok && prev != nil {
-		m.apiKeyModelRouting.Store(&apiKeyModelRoutingSnapshot{config: prev.config, aliases: out, capabilities: prev.capabilities})
-	} else {
-		m.apiKeyModelRouting.Store(&apiKeyModelRoutingSnapshot{aliases: out})
-	}
+	m.apiKeyModelRouting.Store(&apiKeyModelRoutingSnapshot{
+		config:       cfg,
+		aliases:      out,
+		capabilities: capabilities,
+	})
 }
 
 func compileAPIKeyModelAliasForModels[T interface {
@@ -2893,6 +2901,9 @@ func (m *Manager) executeHome(ctx context.Context, providers []string, req clipr
 			execOpts := opts
 			execOpts.ExecutionLifecycle = selection
 			execReq, execOpts = applyRequestAfterAuthInterceptor(execCtx, selection.Executor, selection.Provider, execReq, execOpts, requestedModelAliasFromOptions(execOpts, routeModel))
+			if !restoreExecutionModel {
+				execReq = m.attachResolvedAPIKeyModelInfo(execReq, preparedAuth, routeModel, upstreamModel)
+			}
 			if errCtx := execCtx.Err(); errCtx != nil {
 				releaseAttempt()
 				selection.End("attempt_canceled")
@@ -2904,6 +2915,19 @@ func (m *Manager) executeHome(ctx context.Context, providers []string, req clipr
 				response, errExecute = selection.Executor.CountTokens(execCtx, preparedAuth, execReq, execOpts)
 			} else {
 				response, errExecute = selection.Executor.Execute(execCtx, preparedAuth, execReq, execOpts)
+			}
+			// After a 401, refresh the pinned Home selection once and retry the
+			// same executor. Only redispatch when refresh fails or the retry
+			// itself still returns unauthorized.
+			if errExecute != nil && isUnauthorizedError(errExecute) {
+				if refreshed, didRefresh, errRefresh := m.RefreshHomeSelectionAfterUnauthorized(execCtx, selection, preparedAuth); errRefresh == nil && didRefresh && refreshed != nil {
+					preparedAuth = refreshed
+					if countTokens {
+						response, errExecute = selection.Executor.CountTokens(execCtx, preparedAuth, execReq, execOpts)
+					} else {
+						response, errExecute = selection.Executor.Execute(execCtx, preparedAuth, execReq, execOpts)
+					}
+				}
 			}
 			result := Result{AuthID: preparedAuth.ID, Provider: selection.Provider, Model: resultModel, Success: errExecute == nil}
 			if errExecute == nil {
@@ -3093,6 +3117,9 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			}
 			execOpts := opts
 			execReq, execOpts = applyRequestAfterAuthInterceptor(execCtx, executor, provider, execReq, execOpts, requestedModelAliasFromOptions(execOpts, routeModel))
+			if !restoreExecutionModel {
+				execReq = m.attachResolvedAPIKeyModelInfo(execReq, auth, routeModel, upstreamModel)
+			}
 			resp, errExec := executor.Execute(execCtx, auth, execReq, execOpts)
 			if errExec != nil {
 				if errCtx := execCtx.Err(); errCtx != nil {
@@ -3206,6 +3233,9 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 			}
 			execOpts := opts
 			execReq, execOpts = applyRequestAfterAuthInterceptor(execCtx, executor, provider, execReq, execOpts, requestedModelAliasFromOptions(execOpts, routeModel))
+			if !restoreExecutionModel {
+				execReq = m.attachResolvedAPIKeyModelInfo(execReq, auth, routeModel, upstreamModel)
+			}
 			resp, errExec := executor.CountTokens(execCtx, auth, execReq, execOpts)
 			if errExec != nil {
 				if errCtx := execCtx.Err(); errCtx != nil {
@@ -6960,7 +6990,7 @@ func (m *Manager) tryAntigravityCreditsExecute(ctx context.Context, req cliproxy
 		}
 		c.auth = preparedAuth
 		publishSelectedAuthMetadata(creditsOpts.Metadata, c.auth)
-		models, pooled, aliasResult := m.executionModelCandidatesWithAlias(c.auth, routeModel)
+		models, pooled, aliasResult, _ := m.executionModelCandidatesWithAlias(c.auth, routeModel)
 		if len(models) == 0 {
 			continue
 		}
@@ -7014,7 +7044,7 @@ func (m *Manager) tryAntigravityCreditsExecuteStream(ctx context.Context, req cl
 		}
 		c.auth = preparedAuth
 		publishSelectedAuthMetadata(creditsOpts.Metadata, c.auth)
-		models, pooled, aliasResult := m.executionModelCandidatesWithAlias(c.auth, routeModel)
+		models, pooled, aliasResult, _ := m.executionModelCandidatesWithAlias(c.auth, routeModel)
 		if len(models) == 0 {
 			continue
 		}

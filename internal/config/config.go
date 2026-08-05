@@ -153,6 +153,9 @@ type Config struct {
 
 	AntigravitySignatureBypassStrict *bool `yaml:"antigravity-signature-bypass-strict,omitempty" json:"antigravity-signature-bypass-strict,omitempty"`
 
+	// Antigravity configures provider-wide Antigravity request behavior.
+	Antigravity AntigravityConfig `yaml:"antigravity" json:"antigravity"`
+
 	// GeminiKey defines Gemini API key configurations with optional routing overrides.
 	GeminiKey []GeminiKey `yaml:"gemini-api-key" json:"gemini-api-key"`
 
@@ -335,6 +338,7 @@ type ClaudeHeaderDefaults struct {
 	OS                     string `yaml:"os" json:"os"`
 	Arch                   string `yaml:"arch" json:"arch"`
 	Timeout                string `yaml:"timeout" json:"timeout"`
+	Timezone               string `yaml:"timezone,omitempty" json:"timezone,omitempty"`
 	StabilizeDeviceProfile *bool  `yaml:"stabilize-device-profile,omitempty" json:"stabilize-device-profile,omitempty"`
 }
 
@@ -361,6 +365,12 @@ type CodexConfig struct {
 type XAIConfig struct {
 	// InjectXSearch injects xAI's native x_search tool when the request does not declare it.
 	InjectXSearch bool `yaml:"inject-x-search" json:"inject-x-search"`
+}
+
+// AntigravityConfig configures provider-wide Antigravity request behavior.
+type AntigravityConfig struct {
+	// SensitiveWords is a list of words to obfuscate with zero-width characters in system instructions.
+	SensitiveWords []string `yaml:"sensitive-words,omitempty" json:"sensitive-words,omitempty"`
 }
 
 // CodexLiveMediaRelayConfig configures the in-process Codex Live WebRTC gateway.
@@ -818,12 +828,16 @@ type ClaudeModel struct {
 	ForceMapping bool `yaml:"force-mapping,omitempty" json:"force-mapping,omitempty"`
 	// Thinking configures the thinking/reasoning capability for this model.
 	Thinking *registry.ThinkingSupport `yaml:"thinking,omitempty" json:"thinking,omitempty"`
+
+	// MaxContextLength overrides the context window advertised to clients.
+	MaxContextLength int `yaml:"max-context-length,omitempty" json:"max-context-length,omitempty"`
 }
 
 func (m ClaudeModel) GetName() string                        { return m.Name }
 func (m ClaudeModel) GetThinking() *registry.ThinkingSupport { return m.Thinking }
 func (m ClaudeModel) GetAlias() string                       { return m.Alias }
 func (m ClaudeModel) GetDisplayName() string                 { return m.DisplayName }
+func (m ClaudeModel) GetMaxContextLength() int               { return m.MaxContextLength }
 func (m ClaudeModel) GetForceMapping() bool                  { return m.ForceMapping }
 
 // CodexKey represents the configuration for a Codex API key,
@@ -898,6 +912,9 @@ type CodexModel struct {
 	ForceMapping bool `yaml:"force-mapping,omitempty" json:"force-mapping,omitempty"`
 	// Thinking configures the thinking/reasoning capability for this model.
 	Thinking *registry.ThinkingSupport `yaml:"thinking,omitempty" json:"thinking,omitempty"`
+
+	// MaxContextLength overrides the context window advertised to clients.
+	MaxContextLength int `yaml:"max-context-length,omitempty" json:"max-context-length,omitempty"`
 }
 
 func (m CodexModel) GetName() string                        { return m.Name }
@@ -905,6 +922,7 @@ func (m CodexModel) GetThinking() *registry.ThinkingSupport { return m.Thinking 
 func (m CodexModel) GetAlias() string                       { return m.Alias }
 func (m CodexModel) GetDisplayName() string                 { return m.DisplayName }
 func (m CodexModel) GetForceMapping() bool                  { return m.ForceMapping }
+func (m CodexModel) GetMaxContextLength() int               { return m.MaxContextLength }
 
 // XAIKey uses the Codex API key structure for native xAI execution.
 type XAIKey = CodexKey
@@ -1516,6 +1534,7 @@ func (cfg *Config) SanitizeClaudeHeaderDefaults() {
 	cfg.ClaudeHeaderDefaults.OS = strings.TrimSpace(cfg.ClaudeHeaderDefaults.OS)
 	cfg.ClaudeHeaderDefaults.Arch = strings.TrimSpace(cfg.ClaudeHeaderDefaults.Arch)
 	cfg.ClaudeHeaderDefaults.Timeout = strings.TrimSpace(cfg.ClaudeHeaderDefaults.Timeout)
+	cfg.ClaudeHeaderDefaults.Timezone = strings.TrimSpace(cfg.ClaudeHeaderDefaults.Timezone)
 }
 
 // SanitizeOAuthModelAlias normalizes and deduplicates global OAuth model name aliases.
@@ -1627,12 +1646,16 @@ func (cfg *Config) SanitizeCodexKeys() {
 }
 
 // SanitizeXAIKeys removes xAI API key entries missing a BaseURL.
-// It applies the same normalization rules as codex-api-key.
+// It applies the same normalization rules as codex-api-key. Alpha Search is a
+// Codex-only capability, so any AlphaSearch bit set on an XAI key alias is cleared.
 func (cfg *Config) SanitizeXAIKeys() {
 	if cfg == nil {
 		return
 	}
 	cfg.XAIKey = sanitizeCodexKeyEntries(cfg.XAIKey)
+	for i := range cfg.XAIKey {
+		cfg.XAIKey[i].AlphaSearch = false
+	}
 }
 
 func sanitizeCodexKeyEntries(entries []CodexKey) []CodexKey {
@@ -2124,6 +2147,12 @@ func appendPath(path []string, key string) []string {
 // represents a known default value that should not be written to the config file.
 // This prevents non-zero defaults from polluting the config.
 func isKnownDefaultValue(path []string, node *yaml.Node) bool {
+	// Explicit `weight: 0` on API-key entries is a sentinel meaning "disabled",
+	// not a zero-default. Preserve it verbatim.
+	if len(path) >= 1 && strings.HasSuffix(path[len(path)-1], "weight") &&
+		node != nil && node.Kind == yaml.ScalarNode && node.Tag == "!!int" && node.Value == "0" {
+		return false
+	}
 	// First check if it's a zero value
 	if isZeroValueNode(node) {
 		return true
