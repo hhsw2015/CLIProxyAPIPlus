@@ -363,10 +363,11 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	body = disableThinkingIfToolChoiceForced(body)
 	body = normalizeClaudeSamplingForUpstream(body)
 	// context_management is Claude Code's compaction hint. api.anthropic.com
-	// accepts it, but third-party relays (TaijiAI, OpenRouter, etc.) return
-	// 400 "context_management: Extra inputs are not permitted." Strip on
-	// non-Anthropic bases only so real Anthropic keeps the field.
-	if !isAnthropicHostBaseURL(baseURL) {
+	// accepts it, but third-party relays (TaijiAI, OpenRouter, mirage, etc.)
+	// return 400 "context_management: Extra inputs are not permitted." Strip
+	// on non-Anthropic bases OR when the auth style is mirage (which has an
+	// empty base_url but egresses to a Worker upstream via full_url).
+	if !isAnthropicHostBaseURL(baseURL) || isMirageAuth(auth) {
 		body, _ = sjson.DeleteBytes(body, "context_management")
 	}
 	// Claude OAuth (and this executor's redact-thinking beta) returns signature-only
@@ -634,10 +635,11 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	body = disableThinkingIfToolChoiceForced(body)
 	body = normalizeClaudeSamplingForUpstream(body)
 	// context_management is Claude Code's compaction hint. api.anthropic.com
-	// accepts it, but third-party relays (TaijiAI, OpenRouter, etc.) return
-	// 400 "context_management: Extra inputs are not permitted." Strip on
-	// non-Anthropic bases only so real Anthropic keeps the field.
-	if !isAnthropicHostBaseURL(baseURL) {
+	// accepts it, but third-party relays (TaijiAI, OpenRouter, mirage, etc.)
+	// return 400 "context_management: Extra inputs are not permitted." Strip
+	// on non-Anthropic bases OR when the auth style is mirage (which has an
+	// empty base_url but egresses to a Worker upstream via full_url).
+	if !isAnthropicHostBaseURL(baseURL) || isMirageAuth(auth) {
 		body, _ = sjson.DeleteBytes(body, "context_management")
 	}
 	// Claude OAuth (and this executor's redact-thinking beta) returns signature-only
