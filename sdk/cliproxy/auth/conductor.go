@@ -4466,8 +4466,17 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 				if !skipUnavailable && !isRequestScopedResultError(result.Error) {
 					disableCooling := m.cooldownDisabledForAuth(auth)
 					state := ensureModelState(auth, result.Model)
-					state.Unavailable = true
-					state.Status = StatusError
+					// Self-healing auths (disable-cooling: true, e.g. mirage
+					// where 429 triggers UUID rotation and the very next
+					// request works on a fresh quota bucket) must not get
+					// stuck Unavailable. Record LastError for observability
+					// but keep Status=Active so the selector picks it again.
+					if !disableCooling {
+						state.Unavailable = true
+						state.Status = StatusError
+					} else {
+						state.Status = StatusActive
+					}
 					state.UpdatedAt = now
 					if result.Error != nil {
 						state.LastError = cloneError(result.Error)

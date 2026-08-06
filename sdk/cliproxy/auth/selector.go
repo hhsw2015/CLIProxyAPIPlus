@@ -572,6 +572,15 @@ func isAuthBlockedForModel(auth *Auth, model string, now time.Time) (bool, block
 	if auth.Disabled || auth.Status == StatusDisabled {
 		return true, blockReasonDisabled, time.Time{}
 	}
+	// disable-cooling auths are self-healing (e.g. mirage: 429 → executor's
+	// forceRotate installs a fresh UUID/quota bucket, so the very next call
+	// works). The stale Unavailable/Quota state on such an auth is only kept
+	// for observability — the selector must not treat it as blocking or the
+	// caller sees auth_unavailable until process restart. StatusDisabled is
+	// still respected above; everything else here is a soft signal we drop.
+	if v, ok := auth.DisableCoolingOverride(); ok && v {
+		return false, blockReasonNone, time.Time{}
+	}
 	if model != "" {
 		if len(auth.ModelStates) > 0 {
 			state, ok := auth.ModelStates[model]
