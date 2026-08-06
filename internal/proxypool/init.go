@@ -85,6 +85,30 @@ func GetDialContext() func(ctx context.Context, network, addr string) (net.Conn,
 	return globalPool.DialContext
 }
 
+// GetWARPDialContext returns a DialContext that routes only through WARP
+// tunnels (skipping ECH). Returns nil when the pool is empty or has no WARP
+// dialers -- caller should fall back to a direct connection in that case.
+func GetWARPDialContext() func(ctx context.Context, network, addr string) (net.Conn, error) {
+	mu.RLock()
+	defer mu.RUnlock()
+	if !initialized || globalPool == nil {
+		return nil
+	}
+	return globalPool.WARPDialContext
+}
+
+// GetWARPTransport returns a WARP-only http.Transport (round-robin over the
+// available WARP tunnels). Prefer this when the caller wants Go's standard
+// TLS + connection reuse instead of hand-wiring DialContext.
+func GetWARPTransport() *http.Transport {
+	mu.RLock()
+	defer mu.RUnlock()
+	if !initialized || globalPool == nil {
+		return nil
+	}
+	return globalPool.NextWARPTransport()
+}
+
 // GetProxyURL is kept for backward compat but returns "" since we no longer use SOCKS5.
 // utls_client should use GetDialContext instead.
 func GetProxyURL() string {

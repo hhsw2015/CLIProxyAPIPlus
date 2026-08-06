@@ -14,6 +14,7 @@ import (
 
 	usqueapi "github.com/hhsw2015/usque/v3/api"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	log "github.com/sirupsen/logrus"
 	"golang.zx2c4.com/wireguard/tun/netstack"
 )
 
@@ -81,8 +82,23 @@ func NewWARPDialer(parent context.Context, inst WARPInstance) (*WARPDialer, erro
 		return nil, fmt.Errorf("warp %s: tls config: %w", inst.Name, err)
 	}
 
-	const mtu = 1280
-	dnsAddrs := []netip.Addr{netip.MustParseAddr("1.1.1.1"), netip.MustParseAddr("1.0.0.1")}
+	// MTU 1280 is Cloudflare WARP's documented spec, but MASQUE + connect-ip
+	// capsule overhead makes the effective QUIC DATAGRAM payload budget ~1240
+	// bytes. TLS handshake segments (~3-4KB) exceed that, and even with the
+	// upstream PR #103 ICMP-handling fix (v3.0.1-cpa.3, no longer deadlocks
+	// the pump), gVisor netstack still does not respond to ICMP Packet Too
+	// Big — so TCP retransmits full-size segments in a loop until the
+	// caller times out. MTU 1200 leaves comfortable headroom under the
+	// DATAGRAM ceiling and keeps TLS handshakes flowing.
+	const mtu = 1200
+	// Use Quad9 rather than 1.1.1.1 for tunnel-internal DNS. 1.1.1.1 is
+	// Cloudflare's resolver — sending DNS through a Cloudflare WARP tunnel
+	// to Cloudflare's own resolver can hit internal-routing edge cases that
+	// silently drop responses. Matches upstream usque's socks-mode defaults.
+	dnsAddrs := []netip.Addr{
+		netip.MustParseAddr("9.9.9.9"),
+		netip.MustParseAddr("149.112.112.112"),
+	}
 	tunDev, tunNet, err := netstack.CreateNetTUN(localAddrs, dnsAddrs, mtu)
 	if err != nil {
 		return nil, fmt.Errorf("warp %s: create netstack tun: %w", inst.Name, err)
@@ -119,8 +135,26 @@ func (d *WARPDialer) Dial(addr string) (net.Conn, error) {
 
 // DialContext is the http.Transport-friendly form. It feeds straight into
 // the netstack net which handles SYN/ACK over the MASQUE tunnel.
+//
+// Force IPv4 for TCP: gVisor netstack IPv6 flow can stall the TLS handshake
+// under MASQUE MTU 1280 (observed with aegis-proxy on Cloudflare Workers).
+// Sticking to IPv4 keeps handshake bytes fragmented in a way the tunnel is
+// verified to forward reliably.
 func (d *WARPDialer) DialContext(ctx context.Context, network, addr string) (net.Conn, error) {
-	return d.tunNet.DialContext(ctx, network, addr)
+	forcedNetwork := network
+	if network == "tcp" {
+		forcedNetwork = "tcp4"
+	}
+	start := time.Now()
+	log.Infof("[warp] %s dial start network=%s addr=%s", d.name, forcedNetwork, addr)
+	conn, err := d.tunNet.DialContext(ctx, forcedNetwork, addr)
+	elapsed := time.Since(start)
+	if err != nil {
+		log.Warnf("[warp] %s dial FAIL network=%s addr=%s elapsed=%s err=%v", d.name, forcedNetwork, addr, elapsed, err)
+		return nil, err
+	}
+	log.Infof("[warp] %s dial OK network=%s addr=%s elapsed=%s local=%s remote=%s", d.name, forcedNetwork, addr, elapsed, conn.LocalAddr(), conn.RemoteAddr())
+	return conn, nil
 }
 
 // Close cancels the MaintainTunnel goroutine. The netstack TUN closes when

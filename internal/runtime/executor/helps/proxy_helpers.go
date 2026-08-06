@@ -92,12 +92,46 @@ func NewProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *clip
 	defer func() { result = applyResponseHeaderTimeout(result, ttfbTimeout(cfg)) }()
 	// Priority 1: Use auth.ProxyURL if configured
 	var proxyURL string
+	bypassPool := false
+	warpOnly := false
 	if auth != nil {
 		proxyURL = strings.TrimSpace(auth.ProxyURL)
+		// Sentinel "direct" forces raw direct connection, skipping the ECH
+		// pool. Needed when the target refuses CF-Worker-to-CF-Worker tunnels.
+		if strings.EqualFold(proxyURL, "direct") {
+			proxyURL = ""
+			bypassPool = true
+		} else if strings.EqualFold(proxyURL, "warp") {
+			// Sentinel "warp" routes only through WARP tunnels.
+			proxyURL = ""
+			warpOnly = true
+		}
+	}
+
+	if warpOnly {
+		if transport := proxypool.GetWARPTransport(); transport != nil {
+			client := &http.Client{Transport: transport}
+			if timeout > 0 {
+				client.Timeout = timeout
+			}
+			return client
+		}
+		// Fail closed rather than leak the host IP to a target that
+		// specifically refused non-WARP callers.
+		authID := ""
+		if auth != nil {
+			authID = auth.ID
+		}
+		log.Errorf("[proxy_helpers] WARP-only requested but no WARP transport available for auth=%s; failing closed", authID)
+		client := &http.Client{Transport: warpUnavailableTransport{}}
+		if timeout > 0 {
+			client.Timeout = timeout
+		}
+		return client
 	}
 
 	// Priority 2: proxy pool (when enabled, replaces global proxy)
-	if proxyURL == "" {
+	if proxyURL == "" && !bypassPool {
 		if transport := proxypool.GetTransport(); transport != nil {
 			client := &http.Client{Transport: transport}
 			if timeout > 0 {
@@ -108,7 +142,7 @@ func NewProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *clip
 	}
 
 	// Priority 3: Use cfg.ProxyURL if auth proxy is not configured
-	if proxyURL == "" && cfg != nil {
+	if proxyURL == "" && !bypassPool && cfg != nil {
 		proxyURL = strings.TrimSpace(cfg.ProxyURL)
 	}
 

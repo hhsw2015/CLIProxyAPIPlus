@@ -214,6 +214,9 @@ func (s *ConfigSynthesizer) synthesizeClaudeKeys(ctx *SynthesisContext) []*corea
 		if v := strings.TrimSpace(ck.AuthStyle); v != "" {
 			attrs["auth_style"] = strings.ToLower(v)
 		}
+		if v := strings.TrimSpace(ck.FullURL); v != "" {
+			attrs["full_url"] = v
+		}
 		if len(ck.NonRetryableSubstrings) > 0 {
 			if encoded, err := json.Marshal(ck.NonRetryableSubstrings); err == nil {
 				attrs["non_retryable_substrings"] = string(encoded)
