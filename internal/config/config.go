@@ -704,6 +704,11 @@ type ClaudeKey struct {
 	// If empty, the default Claude API URL will be used.
 	BaseURL string `yaml:"base-url" json:"base-url"`
 
+	// FullURL, when non-empty, overrides the default `{base-url}/v1/messages` path
+	// construction and sends the POST directly to this exact URL. Useful for
+	// proxies that expose a non-standard endpoint path.
+	FullURL string `yaml:"full-url,omitempty" json:"full-url,omitempty"`
+
 	// ProxyURL overrides the global proxy setting for this API key if provided.
 	ProxyURL string `yaml:"proxy-url" json:"proxy-url"`
 

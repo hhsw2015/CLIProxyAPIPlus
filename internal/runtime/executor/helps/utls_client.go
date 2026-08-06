@@ -21,6 +21,16 @@ import (
 	"golang.org/x/net/proxy"
 )
 
+// warpUnavailableTransport is a fail-closed http.RoundTripper used when an
+// auth explicitly requested WARP-only egress but no WARP tunnels are healthy.
+// Falling through to a direct dial would leak the host's public IP to targets
+// that specifically refuse non-WARP callers.
+type warpUnavailableTransport struct{}
+
+func (warpUnavailableTransport) RoundTrip(*http.Request) (*http.Response, error) {
+	return nil, fmt.Errorf("warp-only egress requested but no WARP tunnels are available")
+}
+
 // utlsRoundTripper implements http.RoundTripper using a Chrome fingerprint for
 // providers that require a browser-like TLS and HTTP/2 transport.
 type utlsRoundTripper struct {
@@ -363,16 +373,51 @@ func (f *fallbackRoundTripper) RoundTrip(req *http.Request) (*http.Response, err
 // fallback for other hosts.
 func NewUtlsHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, timeout time.Duration) *http.Client {
 	var proxyURL string
+	bypassPool := false
+	warpOnly := false
 	if auth != nil {
 		proxyURL = strings.TrimSpace(auth.ProxyURL)
+		// Sentinel "direct" forces a raw direct connection, skipping the ECH
+		// pool. Needed for upstreams that reject CF-Worker-to-CF-Worker raw
+		// TCP tunnels (e.g. workers.dev targets that only accept fetch()).
+		if strings.EqualFold(proxyURL, "direct") {
+			proxyURL = ""
+			bypassPool = true
+		} else if strings.EqualFold(proxyURL, "warp") {
+			// Sentinel "warp" routes only through WARP tunnels (real WARP IPs),
+			// skipping ECH entries whose Worker origin some upstreams refuse.
+			proxyURL = ""
+			warpOnly = true
+		}
 	}
-	if proxyURL == "" {
+	if warpOnly {
+		if transport := proxypool.GetWARPTransport(); transport != nil {
+			log.Infof("[utls_client] using WARP-only transport for auth=%s", auth.ID)
+			client := &http.Client{Transport: transport}
+			if timeout > 0 {
+				client.Timeout = timeout
+			}
+			return client
+		}
+		// WARP-only was explicitly requested but no WARP tunnels are up.
+		// Return a client whose transport fails every request: silently
+		// falling back to a direct dial would leak the host's public IP
+		// to targets that specifically refuse non-WARP callers (e.g.
+		// aegis-proxy on Cloudflare Workers).
+		log.Errorf("[utls_client] WARP-only requested but no WARP transport available for auth=%s; failing closed", auth.ID)
+		client := &http.Client{Transport: warpUnavailableTransport{}}
+		if timeout > 0 {
+			client.Timeout = timeout
+		}
+		return client
+	}
+	if proxyURL == "" && !bypassPool {
 		if dialCtx := proxypool.GetDialContext(); dialCtx != nil {
 			// Pool provides in-process ECH tunnel dialer -- use it directly
 			return buildUtlsClientWithDialer(dialCtx, timeout)
 		}
 	}
-	if proxyURL == "" && cfg != nil {
+	if proxyURL == "" && !bypassPool && cfg != nil {
 		proxyURL = strings.TrimSpace(cfg.ProxyURL)
 	}
 
@@ -411,7 +456,10 @@ func NewUtlsHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyau
 // The ECH tunnel provides the connection; TLS is handled within the tunnel.
 func buildUtlsClientWithDialer(dialCtx func(ctx context.Context, network, addr string) (net.Conn, error), timeout time.Duration) *http.Client {
 	transport := &http.Transport{
-		DialContext: dialCtx,
+		DialContext:           dialCtx,
+		TLSHandshakeTimeout:   15 * time.Second,
+		ResponseHeaderTimeout: 30 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
 	}
 	client := &http.Client{Transport: transport}
 	if timeout > 0 {

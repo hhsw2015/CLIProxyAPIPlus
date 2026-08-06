@@ -188,6 +188,64 @@ func (p *Pool) DialContext(ctx context.Context, network, addr string) (net.Conn,
 	return nil, net.ErrClosed
 }
 
+// NextWARPTransport returns a pre-configured http.Transport wired to one WARP
+// tunnel, chosen round-robin. Prefer this over WARPDialContext when the caller
+// wants Go's standard TLS handling with correct timeouts.
+func (p *Pool) NextWARPTransport() *http.Transport {
+	warpEntries := make([]*entry, 0, len(p.entries))
+	for _, e := range p.entries {
+		if e.warp != nil {
+			warpEntries = append(warpEntries, e)
+		}
+	}
+	if len(warpEntries) == 0 {
+		return nil
+	}
+	start := p.counter.Add(1)
+	for attempts := 0; attempts < len(warpEntries)*2; attempts++ {
+		e := warpEntries[(start+uint64(attempts))%uint64(len(warpEntries))]
+		if !e.healthy.Load() {
+			continue
+		}
+		return e.transport
+	}
+	return warpEntries[0].transport
+}
+
+// WARPDialContext dials target through the next healthy WARP tunnel, skipping
+// ECH entries entirely. Used when the target rejects raw TCP tunnels from
+// Cloudflare Worker sources (e.g. workers.dev-hosted upstreams).
+func (p *Pool) WARPDialContext(ctx context.Context, network, addr string) (net.Conn, error) {
+	warpEntries := make([]*entry, 0, len(p.entries))
+	for _, e := range p.entries {
+		if e.warp != nil {
+			warpEntries = append(warpEntries, e)
+		}
+	}
+	log.Infof("[proxypool] WARP dial requested addr=%s warp_entries=%d", addr, len(warpEntries))
+	if len(warpEntries) == 0 {
+		// No WARP tunnels configured -- fall back to direct dial rather than
+		// silently routing through ECH (which is what the caller was trying
+		// to avoid).
+		return (&net.Dialer{Timeout: 10 * time.Second}).DialContext(ctx, network, addr)
+	}
+	start := p.counter.Add(1)
+	for attempts := 0; attempts < len(warpEntries)*2; attempts++ {
+		e := warpEntries[(start+uint64(attempts))%uint64(len(warpEntries))]
+		if !e.healthy.Load() {
+			continue
+		}
+		conn, err := e.warp.DialContext(ctx, network, addr)
+		if err != nil {
+			log.Warnf("[proxypool] %s WARP dial failed: %v", e.name, err)
+			continue
+		}
+		log.Infof("[proxypool] %s WARP dial ok addr=%s", e.name, addr)
+		return conn, nil
+	}
+	return nil, net.ErrClosed
+}
+
 // isTargetSideDialError returns true when the dial failure is attributable to
 // the target address (NXDOMAIN, connection refused, HTTP-scheme target rejected
 // by the proxy, etc.) rather than the tunnel worker being unhealthy. In these

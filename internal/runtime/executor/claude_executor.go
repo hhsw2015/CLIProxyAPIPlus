@@ -431,6 +431,8 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 			return resp, fmt.Errorf("vertex-claude: failed to build URL (location=%s project=%s model=%s)", location, project, baseModel)
 		}
 		bodyForUpstream = prepareVertexClaudeBody(bodyForUpstream)
+	} else if fullURL := claudeFullURL(auth); fullURL != "" {
+		url = fullURL
 	} else {
 		url = fmt.Sprintf("%s/v1/messages?beta=true", baseURL)
 	}
@@ -458,7 +460,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
 		URL:       url,
 		Method:    http.MethodPost,
-		Headers:   httpReq.Header.Clone(),
+		Headers:   sanitizeHeadersForLog(httpReq.Header.Clone(), auth),
 		Body:      bodyForUpstream,
 		Provider:  e.upstreamRequestLogProvider(),
 		AuthID:    authID,
@@ -503,6 +505,15 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		// session cache works on the second call.
 		if httpResp.StatusCode == http.StatusBadRequest && isThinkingErrorMessage(string(b)) {
 			markSessionNeedsThinkingStrip(ctx)
+		}
+		// Mirage: 429 means the current UUID hit its daily cap. Rotate to a
+		// fresh device-id so the next request starts a new quota bucket. The
+		// current request still fails (we don't inline-retry) but the pool
+		// won't be wedged by the exhausted UUID.
+		if httpResp.StatusCode == http.StatusTooManyRequests && isMirageAuth(auth) {
+			if entry := mirageEntryFor(auth); entry != nil {
+				entry.forceRotate()
+			}
 		}
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
 		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
@@ -683,6 +694,8 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			return nil, fmt.Errorf("vertex-claude: failed to build URL (location=%s project=%s model=%s)", location, project, baseModel)
 		}
 		bodyForUpstream = prepareVertexClaudeBody(bodyForUpstream)
+	} else if fullURL := claudeFullURL(auth); fullURL != "" {
+		url = fullURL
 	} else {
 		url = fmt.Sprintf("%s/v1/messages?beta=true", baseURL)
 	}
@@ -710,7 +723,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
 		URL:       url,
 		Method:    http.MethodPost,
-		Headers:   httpReq.Header.Clone(),
+		Headers:   sanitizeHeadersForLog(httpReq.Header.Clone(), auth),
 		Body:      bodyForUpstream,
 		Provider:  e.upstreamRequestLogProvider(),
 		AuthID:    authID,
@@ -761,6 +774,13 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		// session cache works on the second call.
 		if httpResp.StatusCode == http.StatusBadRequest && isThinkingErrorMessage(string(b)) {
 			markSessionNeedsThinkingStrip(ctx)
+		}
+		// Mirage: rotate UUID on 429 so the next request starts a new daily
+		// quota bucket. See non-streaming branch for full rationale.
+		if httpResp.StatusCode == http.StatusTooManyRequests && isMirageAuth(auth) {
+			if entry := mirageEntryFor(auth); entry != nil {
+				entry.forceRotate()
+			}
 		}
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
 		if errClose := errBody.Close(); errClose != nil {
@@ -1152,7 +1172,7 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
 		URL:       url,
 		Method:    http.MethodPost,
-		Headers:   httpReq.Header.Clone(),
+		Headers:   sanitizeHeadersForLog(httpReq.Header.Clone(), auth),
 		Body:      body,
 		Provider:  e.upstreamRequestLogProvider(),
 		AuthID:    authID,
@@ -1661,6 +1681,14 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 		if apiKey != "" {
 			r.Header.Set("Authorization", apiKey)
 		}
+	case mirageAuthStyle:
+		// Upstream identifies callers only by an opaque device-id header.
+		// Never leak Authorization / x-api-key; those aren't part of the
+		// protocol and would confuse third-party proxies.
+		r.Header.Del("Authorization")
+		r.Header.Del("x-api-key")
+		deviceID := mirageEntryFor(auth).next()
+		r.Header.Set(mirageDeviceHeader, deviceID)
 	default: // auto / "" — legacy behavior
 		if isAnthropicBase && useAPIKey {
 			r.Header.Del("Authorization")
@@ -1801,6 +1829,15 @@ func isAnthropicHostBaseURL(baseURL string) bool {
 	}
 	lower := strings.ToLower(baseURL)
 	return strings.Contains(lower, "anthropic.com")
+}
+
+// claudeFullURL returns the per-auth `full_url` override when set. When empty,
+// the caller falls back to the default `{baseURL}/v1/messages?beta=true` path.
+func claudeFullURL(a *cliproxyauth.Auth) string {
+	if a == nil || a.Attributes == nil {
+		return ""
+	}
+	return strings.TrimSpace(a.Attributes["full_url"])
 }
 
 func claudeCreds(a *cliproxyauth.Auth) (apiKey, baseURL string) {
