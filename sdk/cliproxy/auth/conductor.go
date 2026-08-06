@@ -4561,13 +4561,23 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 								}
 							}
 							state.NextRetryAfter = next
-							state.Quota = QuotaState{
-								Exceeded:      true,
-								Reason:        "quota",
-								NextRecoverAt: next,
-								BackoffLevel:  backoffLevel,
-							}
-							if !disableCooling {
+							// disable-cooling clears both NextRetryAfter AND
+							// Quota.Exceeded — otherwise the selector's
+							// availability gate (Unavailable || retry-after ||
+							// Quota.Exceeded) still refuses the auth and the
+							// caller sees auth_unavailable forever. For mirage,
+							// 429 means "this UUID is done"; the executor's
+							// forceRotate() call has already swapped in a fresh
+							// UUID, so the auth is immediately usable again.
+							if disableCooling {
+								state.Quota = QuotaState{}
+							} else {
+								state.Quota = QuotaState{
+									Exceeded:      true,
+									Reason:        "quota",
+									NextRecoverAt: next,
+									BackoffLevel:  backoffLevel,
+								}
 								suspendReason = "quota"
 								shouldSuspendModel = true
 								setModelQuota = true
@@ -5363,6 +5373,22 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 		return
 	}
 	if isRequestScopedResultError(resultErr) {
+		return
+	}
+	// disable-cooling auths are self-healing (e.g. mirage: 429 → forceRotate
+	// on the next request gives a fresh UUID / quota bucket). Marking them
+	// Unavailable makes the selector refuse to pick them again and there is
+	// no clean recovery signal — the auth simply gets stuck. Record the last
+	// error for observability but keep the auth pickable.
+	if disableCooling {
+		auth.Status = StatusActive
+		auth.UpdatedAt = now
+		if resultErr != nil {
+			auth.LastError = cloneError(resultErr)
+			if resultErr.Message != "" {
+				auth.StatusMessage = resultErr.Message
+			}
+		}
 		return
 	}
 	auth.Unavailable = true
