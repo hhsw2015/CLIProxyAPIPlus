@@ -1716,19 +1716,39 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 			"User-Agent",
 			"Accept-Encoding",
 			"Accept",
+			// Preserved with canonical case above just for delete; also
+			// scrub the lowercase forms in case anyone wrote them directly
+			// into the map via r.Header[k] = ... .
+			"content-type",
+			"anthropic-version",
+			"user-agent",
+			"accept",
+			"accept-encoding",
 		} {
 			r.Header.Del(name)
+			delete(r.Header, name)
 		}
-		r.Header.Set("Content-Type", "application/json")
-		r.Header.Set("Anthropic-Version", "2023-06-01")
-		r.Header.Set(mirageDeviceHeader, mirageEntryFor(auth).next())
-		r.Header.Set("User-Agent", "reqwest/0.13.4")
-		r.Header.Set("Accept", "*/*")
-		// Go's http.Transport auto-adds Accept-Encoding: gzip unless the
-		// header is explicitly set. Setting an empty slice (vs deleting)
-		// tells the transport "don't touch this" — the request goes out
-		// with no Accept-Encoding at all, matching reqwest 0.13.4.
-		r.Header["Accept-Encoding"] = nil
+		// Reqwest 0.13.4 sends header names lowercase on the wire; hyper
+		// preserves the caller-provided case. Go's http.Header.Set uses
+		// textproto.CanonicalMIMEHeaderKey ("Content-Type"), which is fine
+		// over HTTP/2 (HPACK forces lowercase on the wire) but leaks a
+		// distinct fingerprint over HTTP/1.1. Bypass canonicalization by
+		// writing directly to the header map.
+		lower := map[string][]string{
+			"content-type":       {"application/json"},
+			"anthropic-version":  {"2023-06-01"},
+			mirageDeviceHeader:   {mirageEntryFor(auth).next()},
+			"user-agent":         {"reqwest/0.13.4"},
+			"accept":             {"*/*"},
+			// Nil slice: Go's http.Transport auto-adds Accept-Encoding: gzip
+			// unless the caller sets the key explicitly. Nil says "user set
+			// no value" so the transport leaves it alone; reqwest 0.13.4
+			// without compression features omits the header entirely.
+			"accept-encoding":    nil,
+		}
+		for k, v := range lower {
+			r.Header[k] = v
+		}
 		return nil
 	default: // auto / "" — legacy behavior
 		if isAnthropicBase && useAPIKey {

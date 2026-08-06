@@ -174,6 +174,17 @@ func (m *mirageAlpnRouter) RoundTrip(req *http.Request) (*http.Response, error) 
 	if host == "" {
 		host = req.Host
 	}
+	// Cloudflare Workers (*.workers.dev) always accept h2 and mirage's whole
+	// premise is that the upstream is a Worker. Skip the probe handshake for
+	// them: it costs a second TLS round-trip on cold start and pins the
+	// first request into a slower path.
+	hostname := host
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		hostname = h
+	}
+	if strings.HasSuffix(strings.ToLower(hostname), ".workers.dev") {
+		return m.h2.RoundTrip(req)
+	}
 	m.mu.Lock()
 	if m.alpnByHost == nil {
 		m.alpnByHost = map[string]string{}

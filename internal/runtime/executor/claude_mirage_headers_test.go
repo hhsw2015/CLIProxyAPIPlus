@@ -43,35 +43,37 @@ func TestApplyClaudeHeaders_MirageWireFormat(t *testing.T) {
 		t.Fatalf("applyClaudeHeaders returned error: %v", err)
 	}
 
+	// Header keys must be exact-case lowercase in the map — Go's
+	// http.Header.Set canonicalizes ("Content-Type"), but reqwest 0.13.4
+	// emits lowercase on the wire. Over HTTP/2 HPACK normalizes anyway;
+	// over HTTP/1.1 canonical case would fingerprint us.
 	want := map[string]string{
-		"Content-Type":      "application/json",
-		mirageDeviceHeader:  "", // present but value is a UUID
-		"Anthropic-Version": "2023-06-01",
-		"User-Agent":        "reqwest/0.13.4",
-		"Accept":            "*/*",
+		"content-type":       "application/json",
+		mirageDeviceHeader:   "", // present but value is a UUID
+		"anthropic-version":  "2023-06-01",
+		"user-agent":         "reqwest/0.13.4",
+		"accept":             "*/*",
 	}
 
-	got := map[string]string{}
-	for k, v := range req.Header {
-		if len(v) > 0 {
-			got[http.CanonicalHeaderKey(k)] = v[0]
-		}
-	}
-
-	// Confirm every "want" key is present.
+	// Confirm every "want" key is present with exact case.
 	for k, wantVal := range want {
-		canon := http.CanonicalHeaderKey(k)
-		gotVal, ok := got[canon]
+		vals, ok := req.Header[k]
 		if !ok {
-			t.Errorf("header %q missing; got %v", canon, sortedKeys(got))
+			t.Errorf("header %q missing (exact lowercase case required); got keys=%v", k, headerKeys(req.Header))
 			continue
 		}
-		if wantVal != "" && gotVal != wantVal {
-			t.Errorf("header %q = %q, want %q", canon, gotVal, wantVal)
+		if len(vals) == 0 {
+			t.Errorf("header %q present but empty", k)
+			continue
+		}
+		if wantVal != "" && vals[0] != wantVal {
+			t.Errorf("header %q = %q, want %q", k, vals[0], wantVal)
 		}
 	}
 
-	// Confirm no fingerprint header survived.
+	// Confirm no fingerprint header survived. Check both canonical and
+	// lowercase forms — someone might reintroduce either via Set() or map
+	// write.
 	forbidden := []string{
 		"Authorization",
 		"X-Api-Key",
@@ -91,33 +93,45 @@ func TestApplyClaudeHeaders_MirageWireFormat(t *testing.T) {
 		"Anthropic-Dangerous-Direct-Browser-Access",
 	}
 	for _, k := range forbidden {
-		canon := http.CanonicalHeaderKey(k)
-		if _, present := got[canon]; present {
-			t.Errorf("forbidden fingerprint header still present: %q = %q", canon, got[canon])
+		if _, present := req.Header[k]; present {
+			t.Errorf("forbidden fingerprint header (canonical case) present: %q", k)
+		}
+		if _, present := req.Header[strings.ToLower(k)]; present {
+			t.Errorf("forbidden fingerprint header (lowercase) present: %q", strings.ToLower(k))
 		}
 	}
 
-	// Confirm the UA is the reqwest one, not any leftover claude-cli UA.
-	if ua := req.Header.Get("User-Agent"); ua != "reqwest/0.13.4" {
-		t.Errorf("User-Agent = %q, want reqwest/0.13.4", ua)
+	// Confirm no canonical-case aliases of our wire-format headers slipped in
+	// via Set(). We wrote lowercase directly to the map, so canonical forms
+	// must be absent.
+	for _, canon := range []string{"Content-Type", "Anthropic-Version", "User-Agent", "Accept", "Accept-Encoding"} {
+		if _, present := req.Header[canon]; present {
+			t.Errorf("canonical-case duplicate leaked: %q (should only be lowercase)", canon)
+		}
 	}
 
-	// Confirm Accept-Encoding suppression: reqwest 0.13.4 without gzip
-	// feature omits the header, and Go http.Transport would auto-add
-	// Accept-Encoding: gzip unless we set the header map entry to nil.
-	// After the mirage branch runs, req.Header["Accept-Encoding"] must be
-	// present-but-nil so http.Transport treats it as "user set no value".
-	if ae, ok := req.Header["Accept-Encoding"]; !ok {
-		t.Error("Accept-Encoding must be present in the map (nil slice) to suppress Go auto-gzip")
+	// Accept-Encoding must be present-but-nil so Go http.Transport does not
+	// auto-add "gzip".
+	if ae, ok := req.Header["accept-encoding"]; !ok {
+		t.Error("accept-encoding must be present (nil slice) to suppress Go auto-gzip")
 	} else if ae != nil {
-		t.Errorf("Accept-Encoding = %v, want nil slice", ae)
+		t.Errorf("accept-encoding = %v, want nil slice", ae)
 	}
 
 	// Confirm the device-id is a plausible UUID (36 chars, 4 dashes).
-	deviceID := req.Header.Get(mirageDeviceHeader)
+	deviceID := req.Header[mirageDeviceHeader][0]
 	if len(deviceID) != 36 || strings.Count(deviceID, "-") != 4 {
 		t.Errorf("mirage device-id header = %q, want a UUID v4 string", deviceID)
 	}
+}
+
+func headerKeys(h http.Header) []string {
+	out := make([]string, 0, len(h))
+	for k := range h {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // TestApplyClaudeHeaders_MirageStreamSuppressesAcceptEncoding confirms that
@@ -135,11 +149,11 @@ func TestApplyClaudeHeaders_MirageStreamSuppressesAcceptEncoding(t *testing.T) {
 	if err := applyClaudeHeaders(req, auth, "unused", true, nil, nil, &config.Config{}, nil, false); err != nil {
 		t.Fatalf("applyClaudeHeaders(stream=true) returned error: %v", err)
 	}
-	ae, ok := req.Header["Accept-Encoding"]
+	ae, ok := req.Header["accept-encoding"]
 	if !ok {
-		t.Error("stream: Accept-Encoding must be present (nil slice) to suppress Go auto-gzip")
+		t.Error("stream: accept-encoding must be present (nil slice) to suppress Go auto-gzip")
 	} else if ae != nil {
-		t.Errorf("stream: Accept-Encoding = %v, want nil slice (no explicit value)", ae)
+		t.Errorf("stream: accept-encoding = %v, want nil slice (no explicit value)", ae)
 	}
 }
 
@@ -167,18 +181,14 @@ func TestApplyClaudeHeaders_MirageRotatesDeviceIDAcrossCalls(t *testing.T) {
 		if err := applyClaudeHeaders(req, auth, "", false, nil, nil, &config.Config{}, nil, false); err != nil {
 			t.Fatalf("applyClaudeHeaders err on iter %d: %v", i, err)
 		}
-		seen[req.Header.Get(mirageDeviceHeader)]++
+		vals := req.Header[mirageDeviceHeader]
+		if len(vals) == 0 {
+			t.Fatalf("iter %d: %q header missing (case-sensitive lookup)", i, mirageDeviceHeader)
+		}
+		seen[vals[0]]++
 	}
 	if len(seen) < 2 {
 		t.Fatalf("expected multiple UUIDs from rotating pool, got %d unique: %v", len(seen), seen)
 	}
 }
 
-func sortedKeys(m map[string]string) []string {
-	out := make([]string, 0, len(m))
-	for k := range m {
-		out = append(out, k)
-	}
-	sort.Strings(out)
-	return out
-}
