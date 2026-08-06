@@ -447,7 +447,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		}
 		applyVertexClaudeHeaders(httpReq, token)
 	} else {
-		if errHeaders := applyClaudeHeaders(httpReq, auth, apiKey, false, extraBetas, nil, e.cfg, opts.Headers, false); errHeaders != nil {
+		if errHeaders := applyClaudeHeaders(httpReq, auth, apiKey, false, extraBetas, bodyForUpstream, e.cfg, opts.Headers, false); errHeaders != nil {
 			return resp, errHeaders
 		}
 	}
@@ -710,7 +710,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		}
 		applyVertexClaudeHeaders(httpReq, token)
 	} else {
-		if errHeaders := applyClaudeHeaders(httpReq, auth, apiKey, true, extraBetas, nil, e.cfg, opts.Headers, false); errHeaders != nil {
+		if errHeaders := applyClaudeHeaders(httpReq, auth, apiKey, true, extraBetas, bodyForUpstream, e.cfg, opts.Headers, false); errHeaders != nil {
 			return nil, errHeaders
 		}
 	}
@@ -1160,7 +1160,7 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	if err != nil {
 		return cliproxyexecutor.Response{}, err
 	}
-	if errHeaders := applyClaudeHeaders(httpReq, auth, apiKey, false, extraBetas, nil, e.cfg, opts.Headers, false); errHeaders != nil {
+	if errHeaders := applyClaudeHeaders(httpReq, auth, apiKey, false, extraBetas, body, e.cfg, opts.Headers, false); errHeaders != nil {
 		return cliproxyexecutor.Response{}, errHeaders
 	}
 	var authID, authLabel, authType, authValue string
@@ -1638,7 +1638,7 @@ func decodeResponseBody(body io.ReadCloser, contentEncoding string) (io.ReadClos
 // applyClaudeHeaders adapts the upstream 9-parameter signature so tests port
 // cleanly. Fork ignores body / confirmedClaudeCode today; the extra params are
 // accepted for signature compatibility.
-func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string, stream bool, extraBetas []string, _ []byte, cfg *config.Config, incomingHeaders http.Header, _ bool) error {
+func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string, stream bool, extraBetas []string, body []byte, cfg *config.Config, incomingHeaders http.Header, _ bool) error {
 	if r == nil {
 		return nil
 	}
@@ -1744,7 +1744,18 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 			// unless the caller sets the key explicitly. Nil says "user set
 			// no value" so the transport leaves it alone; reqwest 0.13.4
 			// without compression features omits the header entirely.
-			"accept-encoding":    nil,
+			"accept-encoding": nil,
+		}
+		// Only add anthropic-beta when the body actually invokes a feature
+		// that requires it. The mirage upstream forwards betas verbatim; if
+		// we send interleaved-thinking without a thinking block in the body,
+		// the upstream's underlying account may reject the request. Detect
+		// the two dynamic thinking shapes the pipeline emits:
+		//   - {"thinking":{"type":"adaptive"|"enabled",...}}  → any Claude 4+ model
+		//   - {"output_config":{"effort":"low|medium|high|max"}} → adaptive path
+		// The set of required betas grows here as we discover more features.
+		if body != nil && mirageThinkingActive(body) {
+			lower["anthropic-beta"] = []string{"interleaved-thinking-2025-05-14"}
 		}
 		for k, v := range lower {
 			r.Header[k] = v

@@ -8,6 +8,7 @@ import (
 
 	"github.com/google/uuid"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	"github.com/tidwall/gjson"
 )
 
 // mirage is a stateful UUID rotator for auth entries whose upstream identifies
@@ -93,6 +94,38 @@ func (e *mirageEntry) forceRotate() string {
 	e.deviceID = uuid.NewString()
 	e.counter = 1
 	return e.deviceID
+}
+
+// mirageThinkingActive reports whether the request body invokes a Claude
+// thinking feature that requires the interleaved-thinking beta. Two shapes
+// come out of the thinking pipeline:
+//
+//   - thinking.type is "enabled" or "adaptive" (adaptive is the Claude 4+
+//     shape; enabled is the older Claude 3.7 shape).
+//   - output_config.effort is set (low/medium/high/max) — the adaptive
+//     path uses effort instead of budget_tokens.
+//
+// A budget_tokens > 0 also implies thinking; we accept it as a fallback for
+// callers that skipped output_config.
+func mirageThinkingActive(body []byte) bool {
+	if len(body) == 0 {
+		return false
+	}
+	if t := gjson.GetBytes(body, "thinking.type"); t.Exists() {
+		switch strings.ToLower(strings.TrimSpace(t.String())) {
+		case "enabled", "adaptive":
+			return true
+		}
+	}
+	if e := gjson.GetBytes(body, "output_config.effort"); e.Exists() {
+		if strings.TrimSpace(e.String()) != "" {
+			return true
+		}
+	}
+	if bt := gjson.GetBytes(body, "thinking.budget_tokens"); bt.Exists() && bt.Int() > 0 {
+		return true
+	}
+	return false
 }
 
 // isMirageAuth reports whether this auth uses the mirage-uuid rotation scheme.

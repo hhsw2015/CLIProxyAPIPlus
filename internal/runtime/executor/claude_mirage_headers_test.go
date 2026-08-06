@@ -134,6 +134,54 @@ func headerKeys(h http.Header) []string {
 	return out
 }
 
+// TestApplyClaudeHeaders_MirageThinkingBeta verifies dynamic emission of
+// anthropic-beta: interleaved-thinking-2025-05-14 based on the request body.
+// The beta must NOT be sent when the body has no thinking fields, and MUST
+// be sent for adaptive/enabled/effort/budget_tokens shapes (including xhigh
+// on Opus 4.7+).
+func TestApplyClaudeHeaders_MirageThinkingBeta(t *testing.T) {
+	auth := &cliproxyauth.Auth{
+		ID:         "test-thinking-beta",
+		Attributes: map[string]string{"auth_style": mirageAuthStyle},
+	}
+	cases := []struct {
+		name string
+		body string
+		want bool
+	}{
+		{"no thinking", `{"model":"claude-fable-5","messages":[]}`, false},
+		{"adaptive + max", `{"thinking":{"type":"adaptive"},"output_config":{"effort":"max"}}`, true},
+		{"adaptive + xhigh", `{"thinking":{"type":"adaptive"},"output_config":{"effort":"xhigh"}}`, true},
+		{"adaptive + low", `{"thinking":{"type":"adaptive"},"output_config":{"effort":"low"}}`, true},
+		{"enabled + budget", `{"thinking":{"type":"enabled","budget_tokens":8000}}`, true},
+		{"effort only", `{"output_config":{"effort":"high"}}`, true},
+		{"budget only", `{"thinking":{"budget_tokens":16384}}`, true},
+		{"empty body", ``, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "https://mirage-upstream.example/v1/anthropic/messages", strings.NewReader(tc.body))
+			var bodyBytes []byte
+			if tc.body != "" {
+				bodyBytes = []byte(tc.body)
+			}
+			if err := applyClaudeHeaders(req, auth, "", false, nil, bodyBytes, &config.Config{}, nil, false); err != nil {
+				t.Fatalf("applyClaudeHeaders err: %v", err)
+			}
+			vals, present := req.Header["anthropic-beta"]
+			if tc.want && !present {
+				t.Errorf("anthropic-beta missing (want interleaved-thinking beta for body %q)", tc.body)
+			}
+			if !tc.want && present {
+				t.Errorf("anthropic-beta unexpectedly present: %v (body has no thinking)", vals)
+			}
+			if tc.want && present && len(vals) > 0 && !strings.Contains(vals[0], "interleaved-thinking-2025-05-14") {
+				t.Errorf("anthropic-beta = %q, want to contain interleaved-thinking-2025-05-14", vals[0])
+			}
+		})
+	}
+}
+
 // TestApplyClaudeHeaders_MirageStreamSuppressesAcceptEncoding confirms that
 // streaming requests still leave Accept-Encoding as a nil-slice sentinel so
 // Go's http.Transport does not auto-add its gzip default. reqwest 0.13.4
