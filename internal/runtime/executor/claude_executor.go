@@ -348,9 +348,16 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 
 	// Apply cloaking (system prompt injection, fake user ID, sensitive word obfuscation)
 	// based on client type and configuration.
-	body, err = applyCloaking(ctx, e.cfg, auth, body, baseModel, apiKey)
-	if err != nil {
-		return resp, err
+	// Mirage skips cloaking entirely: the upstream sees us as a reqwest/rustls
+	// client, not Claude Code, so injecting Claude Code's system-instructions
+	// preamble both bloats input tokens and shifts the cache_control breakpoint —
+	// invalidating the upstream prompt-cache hash. Header sanitization + wire
+	// format already do all the impersonation mirage needs.
+	if !isMirageAuth(auth) {
+		body, err = applyCloaking(ctx, e.cfg, auth, body, baseModel, apiKey)
+		if err != nil {
+			return resp, err
+		}
 	}
 
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
@@ -376,7 +383,9 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 
 	// Auto-inject cache_control if missing (optimization for ClawdBot/clients without caching support)
 	if countCacheControls(body) == 0 {
+		if !isMirageAuth(auth) {
 		body = ensureCacheControl(body)
+	}
 	}
 
 	// Enforce Anthropic's cache_control block limit (max 4 breakpoints per request).
@@ -386,7 +395,12 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 
 	// Normalize TTL values to prevent ordering violations under prompt-caching-scope-2026-01-05.
 	// A 1h-TTL block must not appear after a 5m-TTL block in evaluation order (tools→system→messages).
-	body = normalizeCacheControlTTL(body)
+	// Mirage upstream doesn't advertise prompt-caching-scope beta by default, and normalization
+	// currently over-eager-strips 1h TTLs when ensureCacheControl injected preceding 5m blocks —
+	// downgrading legitimate 1h cache hints to 5m and wasting the caller's budget.
+	if !isMirageAuth(auth) {
+		body = normalizeCacheControlTTL(body)
+	}
 
 	// Extract betas from body and convert to header
 	var extraBetas []string
@@ -648,7 +662,9 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 
 	// Auto-inject cache_control if missing (optimization for ClawdBot/clients without caching support)
 	if countCacheControls(body) == 0 {
+		if !isMirageAuth(auth) {
 		body = ensureCacheControl(body)
+	}
 	}
 
 	// Enforce Anthropic's cache_control block limit (max 4 breakpoints per request).
