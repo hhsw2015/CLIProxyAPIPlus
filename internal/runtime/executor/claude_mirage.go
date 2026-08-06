@@ -96,6 +96,54 @@ func (e *mirageEntry) forceRotate() string {
 	return e.deviceID
 }
 
+// mirageExtendedCacheTTLActive reports whether any cache_control block in
+// the body carries a non-empty "ttl" (typically "1h"). Without the
+// extended-cache-ttl-2025-04-11 beta the upstream silently downgrades to
+// the 5-minute default, wasting the client's cache budget.
+func mirageExtendedCacheTTLActive(body []byte) bool {
+	if len(body) == 0 {
+		return false
+	}
+	hasTTL := func(arrPath string) bool {
+		arr := gjson.GetBytes(body, arrPath)
+		if !arr.IsArray() {
+			return false
+		}
+		found := false
+		arr.ForEach(func(_, item gjson.Result) bool {
+			if ttl := item.Get("cache_control.ttl"); ttl.Exists() && strings.TrimSpace(ttl.String()) != "" {
+				found = true
+				return false
+			}
+			return true
+		})
+		return found
+	}
+	if hasTTL("system") || hasTTL("tools") {
+		return true
+	}
+	msgs := gjson.GetBytes(body, "messages")
+	if !msgs.IsArray() {
+		return false
+	}
+	found := false
+	msgs.ForEach(func(_, msg gjson.Result) bool {
+		content := msg.Get("content")
+		if !content.IsArray() {
+			return true
+		}
+		content.ForEach(func(_, block gjson.Result) bool {
+			if ttl := block.Get("cache_control.ttl"); ttl.Exists() && strings.TrimSpace(ttl.String()) != "" {
+				found = true
+				return false
+			}
+			return true
+		})
+		return !found
+	})
+	return found
+}
+
 // mirageThinkingActive reports whether the request body invokes a Claude
 // thinking feature that requires the interleaved-thinking beta. Two shapes
 // come out of the thinking pipeline:

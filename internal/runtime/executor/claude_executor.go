@@ -1752,12 +1752,22 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 		// that requires it. The mirage upstream forwards betas verbatim; if
 		// we send interleaved-thinking without a thinking block in the body,
 		// the upstream's underlying account may reject the request. Detect
-		// the two dynamic thinking shapes the pipeline emits:
-		//   - {"thinking":{"type":"adaptive"|"enabled",...}}  → any Claude 4+ model
-		//   - {"output_config":{"effort":"low|medium|high|max"}} → adaptive path
+		// dynamic shapes the pipeline emits:
+		//   - {"thinking":{"type":"adaptive"|"enabled",...}}  → interleaved-thinking
+		//   - {"output_config":{"effort":"low|medium|high|xhigh|max"}} → interleaved-thinking
+		//   - any cache_control.ttl on system/tools/messages content → extended-cache-ttl
 		// The set of required betas grows here as we discover more features.
-		if body != nil && mirageThinkingActive(body) {
-			lower["anthropic-beta"] = []string{"interleaved-thinking-2025-05-14"}
+		if body != nil {
+			var betas []string
+			if mirageThinkingActive(body) {
+				betas = append(betas, "interleaved-thinking-2025-05-14")
+			}
+			if mirageExtendedCacheTTLActive(body) {
+				betas = append(betas, "extended-cache-ttl-2025-04-11")
+			}
+			if len(betas) > 0 {
+				lower["anthropic-beta"] = []string{strings.Join(betas, ",")}
+			}
 		}
 		for k, v := range lower {
 			r.Header[k] = v

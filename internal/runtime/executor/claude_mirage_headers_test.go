@@ -182,6 +182,47 @@ func TestApplyClaudeHeaders_MirageThinkingBeta(t *testing.T) {
 	}
 }
 
+// TestApplyClaudeHeaders_MirageExtendedCacheTTLBeta verifies that cache_control
+// blocks with ttl trigger the extended-cache-ttl-2025-04-11 beta so the
+// upstream honors 1h caching instead of silently downgrading to 5min.
+func TestApplyClaudeHeaders_MirageExtendedCacheTTLBeta(t *testing.T) {
+	auth := &cliproxyauth.Auth{
+		ID:         "test-cache-ttl",
+		Attributes: map[string]string{"auth_style": mirageAuthStyle},
+	}
+	cases := []struct {
+		name        string
+		body        string
+		wantBeta    bool
+		wantContain string
+	}{
+		{"no cache_control", `{"messages":[{"role":"user","content":"hi"}]}`, false, ""},
+		{"cache_control but no ttl", `{"system":[{"type":"text","text":"x","cache_control":{"type":"ephemeral"}}]}`, false, ""},
+		{"system ttl 1h", `{"system":[{"type":"text","text":"x","cache_control":{"type":"ephemeral","ttl":"1h"}}]}`, true, "extended-cache-ttl-2025-04-11"},
+		{"tools ttl", `{"tools":[{"name":"t","cache_control":{"ttl":"1h"}}]}`, true, "extended-cache-ttl-2025-04-11"},
+		{"messages content ttl", `{"messages":[{"role":"user","content":[{"type":"text","text":"x","cache_control":{"ttl":"1h"}}]}]}`, true, "extended-cache-ttl-2025-04-11"},
+		{"thinking + ttl → both betas", `{"thinking":{"type":"adaptive"},"output_config":{"effort":"max"},"system":[{"type":"text","text":"x","cache_control":{"ttl":"1h"}}]}`, true, "extended-cache-ttl-2025-04-11"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "https://mirage-upstream.example/v1/anthropic/messages", strings.NewReader(tc.body))
+			if err := applyClaudeHeaders(req, auth, "", false, nil, []byte(tc.body), &config.Config{}, nil, false); err != nil {
+				t.Fatalf("applyClaudeHeaders err: %v", err)
+			}
+			vals, present := req.Header["anthropic-beta"]
+			if tc.wantBeta && !present {
+				t.Errorf("anthropic-beta missing for %s", tc.name)
+			}
+			if !tc.wantBeta && present {
+				t.Errorf("anthropic-beta unexpectedly present: %v", vals)
+			}
+			if tc.wantBeta && present && tc.wantContain != "" && !strings.Contains(vals[0], tc.wantContain) {
+				t.Errorf("anthropic-beta = %q, want to contain %q", vals[0], tc.wantContain)
+			}
+		})
+	}
+}
+
 // TestApplyClaudeHeaders_MirageStreamSuppressesAcceptEncoding confirms that
 // streaming requests still leave Accept-Encoding as a nil-slice sentinel so
 // Go's http.Transport does not auto-add its gzip default. reqwest 0.13.4
