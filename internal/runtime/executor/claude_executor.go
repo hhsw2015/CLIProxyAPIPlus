@@ -1682,13 +1682,51 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 			r.Header.Set("Authorization", apiKey)
 		}
 	case mirageAuthStyle:
-		// Upstream identifies callers only by an opaque device-id header.
-		// Never leak Authorization / x-api-key; those aren't part of the
-		// protocol and would confuse third-party proxies.
-		r.Header.Del("Authorization")
-		r.Header.Del("x-api-key")
-		deviceID := mirageEntryFor(auth).next()
-		r.Header.Set(mirageDeviceHeader, deviceID)
+		// Peeky's aegis-proxy client sends only a minimal 4-header set with
+		// a reqwest user agent. Emitting Claude Code's X-Stainless-*, X-App,
+		// Anthropic-Beta, X-Claude-Code-Session-Id, x-client-request-id, or
+		// device profile stabilization would fingerprint us as claude-cli
+		// and defeat the whole point of the anonymous UUID rotation. Do the
+		// minimum wire-format headers here and return early — every path
+		// below this switch is intentionally skipped.
+		if incomingHeaders == nil {
+			if ginCtx, ok := r.Context().Value("gin").(*gin.Context); ok && ginCtx != nil && ginCtx.Request != nil {
+				incomingHeaders = ginCtx.Request.Header
+			}
+		}
+		// Purge any header the upstream framework may have already set on
+		// this request. The wire format is opinionated about which headers
+		// are present.
+		for _, name := range []string{
+			"Authorization",
+			"x-api-key",
+			"Anthropic-Beta",
+			"Anthropic-Dangerous-Direct-Browser-Access",
+			"X-App",
+			"X-Stainless-Retry-Count",
+			"X-Stainless-Runtime",
+			"X-Stainless-Lang",
+			"X-Stainless-Timeout",
+			"X-Stainless-Package-Version",
+			"X-Stainless-Runtime-Version",
+			"X-Stainless-Arch",
+			"X-Stainless-Os",
+			"X-Stainless-Helper-Method",
+			"X-Claude-Code-Session-Id",
+			"x-client-request-id",
+			"User-Agent",
+		} {
+			r.Header.Del(name)
+		}
+		r.Header.Set("Content-Type", "application/json")
+		r.Header.Set(mirageDeviceHeader, mirageEntryFor(auth).next())
+		misc.EnsureHeader(r.Header, incomingHeaders, "Anthropic-Version", "2023-06-01")
+		r.Header.Set("User-Agent", "reqwest/0.12.24")
+		r.Header.Set("Accept", "*/*")
+		if stream {
+			r.Header.Set("Accept-Encoding", "identity")
+		}
+		return nil
 	default: // auto / "" — legacy behavior
 		if isAnthropicBase && useAPIKey {
 			r.Header.Del("Authorization")
