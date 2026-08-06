@@ -15,7 +15,10 @@ import (
 // After `threshold` uses the pool auto-rotates to a fresh UUID; a 429 signal
 // can also force rotation on demand.
 const (
-	mirageAuthStyle       = "mirage-uuid"
+	mirageAuthStyle = "mirage-uuid"
+	// mirageDeviceHeader is the wire-format header name the upstream uses
+	// to identify callers. Do not rename — the string value is dictated by
+	// the remote service and any change breaks the protocol.
 	mirageDeviceHeader    = "x-peeky-device-id"
 	mirageDefaultRotateAt = 19
 )

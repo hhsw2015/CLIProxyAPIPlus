@@ -1682,24 +1682,23 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 			r.Header.Set("Authorization", apiKey)
 		}
 	case mirageAuthStyle:
-		// Peeky's aegis-proxy client sends only a minimal 4-header set with
-		// a reqwest user agent. Emitting Claude Code's X-Stainless-*, X-App,
-		// Anthropic-Beta, X-Claude-Code-Session-Id, x-client-request-id, or
-		// device profile stabilization would fingerprint us as claude-cli
-		// and defeat the whole point of the anonymous UUID rotation. Do the
-		// minimum wire-format headers here and return early — every path
-		// below this switch is intentionally skipped.
-		if incomingHeaders == nil {
-			if ginCtx, ok := r.Context().Value("gin").(*gin.Context); ok && ginCtx != nil && ginCtx.Request != nil {
-				incomingHeaders = ginCtx.Request.Header
-			}
-		}
-		// Purge any header the upstream framework may have already set on
-		// this request. The wire format is opinionated about which headers
-		// are present.
+		// The mirage upstream expects reqwest 0.13.4 without gzip/brotli
+		// features. The wire fingerprint is minimal and opinionated:
+		//   Content-Type: application/json
+		//   <device-header>: <uuid>
+		//   Anthropic-Version: 2023-06-01
+		//   User-Agent: reqwest/0.13.4
+		//   Accept: */*
+		//   (no Accept-Encoding — reqwest omits it when compression is off,
+		//   Go http.Transport auto-adds Accept-Encoding: gzip so it must be
+		//   suppressed by setting an explicit nil slice on the header map.)
+		// Anything else (X-Stainless-*, X-App, Anthropic-Beta, session ids,
+		// x-client-request-id, an identity Accept-Encoding, a claude-cli UA)
+		// correlates the rotating UUIDs back to CPA and defeats the whole
+		// point of mirage. Do the minimum here and return early.
 		for _, name := range []string{
 			"Authorization",
-			"x-api-key",
+			"X-Api-Key",
 			"Anthropic-Beta",
 			"Anthropic-Dangerous-Direct-Browser-Access",
 			"X-App",
@@ -1713,19 +1712,23 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 			"X-Stainless-Os",
 			"X-Stainless-Helper-Method",
 			"X-Claude-Code-Session-Id",
-			"x-client-request-id",
+			"X-Client-Request-Id",
 			"User-Agent",
+			"Accept-Encoding",
+			"Accept",
 		} {
 			r.Header.Del(name)
 		}
 		r.Header.Set("Content-Type", "application/json")
+		r.Header.Set("Anthropic-Version", "2023-06-01")
 		r.Header.Set(mirageDeviceHeader, mirageEntryFor(auth).next())
-		misc.EnsureHeader(r.Header, incomingHeaders, "Anthropic-Version", "2023-06-01")
-		r.Header.Set("User-Agent", "reqwest/0.12.24")
+		r.Header.Set("User-Agent", "reqwest/0.13.4")
 		r.Header.Set("Accept", "*/*")
-		if stream {
-			r.Header.Set("Accept-Encoding", "identity")
-		}
+		// Go's http.Transport auto-adds Accept-Encoding: gzip unless the
+		// header is explicitly set. Setting an empty slice (vs deleting)
+		// tells the transport "don't touch this" — the request goes out
+		// with no Accept-Encoding at all, matching reqwest 0.13.4.
+		r.Header["Accept-Encoding"] = nil
 		return nil
 	default: // auto / "" — legacy behavior
 		if isAnthropicBase && useAPIKey {

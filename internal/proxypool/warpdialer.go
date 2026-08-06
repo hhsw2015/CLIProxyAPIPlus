@@ -137,7 +137,7 @@ func (d *WARPDialer) Dial(addr string) (net.Conn, error) {
 // the netstack net which handles SYN/ACK over the MASQUE tunnel.
 //
 // Force IPv4 for TCP: gVisor netstack IPv6 flow can stall the TLS handshake
-// under MASQUE MTU 1280 (observed with aegis-proxy on Cloudflare Workers).
+// under MASQUE MTU 1280 (observed with third-party CF Workers upstreams).
 // Sticking to IPv4 keeps handshake bytes fragmented in a way the tunnel is
 // verified to forward reliably.
 func (d *WARPDialer) DialContext(ctx context.Context, network, addr string) (net.Conn, error) {

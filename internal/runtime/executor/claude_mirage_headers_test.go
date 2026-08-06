@@ -12,24 +12,24 @@ import (
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 )
 
-// TestApplyClaudeHeaders_MirageEmitsPeekyWireFormat verifies that the
-// mirage-uuid auth path emits *only* the header set the Peeky client uses
-// against aegis-proxy. Any additional Claude Code fingerprint headers
+// TestApplyClaudeHeaders_MirageWireFormat verifies that the mirage-uuid auth
+// path emits *only* the header set the mirage upstream expects (reqwest 0.13.4
+// wire format). Any additional Claude Code fingerprint header
 // (X-Stainless-*, X-App, Anthropic-Beta, X-Claude-Code-Session-Id) would
 // defeat the anonymous UUID rotation and let the upstream correlate our
 // requests to claude-cli.
-func TestApplyClaudeHeaders_MirageEmitsPeekyWireFormat(t *testing.T) {
+func TestApplyClaudeHeaders_MirageWireFormat(t *testing.T) {
 	auth := &cliproxyauth.Auth{
 		ID: "test-mirage-auth",
 		Attributes: map[string]string{
 			"auth_style": mirageAuthStyle,
-			"full_url":   "https://aegis-proxy.example.workers.dev/v1/anthropic/messages",
+			"full_url":   "https://mirage-upstream.example/v1/anthropic/messages",
 		},
 	}
 
 	// Seed the request with a bunch of fingerprint headers to confirm they
 	// get scrubbed on the way out.
-	req := httptest.NewRequest(http.MethodPost, "https://aegis-proxy.example.workers.dev/v1/anthropic/messages", strings.NewReader(`{}`))
+	req := httptest.NewRequest(http.MethodPost, "https://mirage-upstream.example/v1/anthropic/messages", strings.NewReader(`{}`))
 	req = req.WithContext(context.Background())
 	req.Header.Set("Authorization", "Bearer leaked")
 	req.Header.Set("x-api-key", "leaked")
@@ -44,11 +44,11 @@ func TestApplyClaudeHeaders_MirageEmitsPeekyWireFormat(t *testing.T) {
 	}
 
 	want := map[string]string{
-		"Content-Type":       "application/json",
-		mirageDeviceHeader:   "", // present but value is a UUID
-		"Anthropic-Version":  "2023-06-01",
-		"User-Agent":         "reqwest/0.12.24",
-		"Accept":             "*/*",
+		"Content-Type":      "application/json",
+		mirageDeviceHeader:  "", // present but value is a UUID
+		"Anthropic-Version": "2023-06-01",
+		"User-Agent":        "reqwest/0.13.4",
+		"Accept":            "*/*",
 	}
 
 	got := map[string]string{}
@@ -98,8 +98,19 @@ func TestApplyClaudeHeaders_MirageEmitsPeekyWireFormat(t *testing.T) {
 	}
 
 	// Confirm the UA is the reqwest one, not any leftover claude-cli UA.
-	if ua := req.Header.Get("User-Agent"); ua != "reqwest/0.12.24" {
-		t.Errorf("User-Agent = %q, want reqwest/0.12.24", ua)
+	if ua := req.Header.Get("User-Agent"); ua != "reqwest/0.13.4" {
+		t.Errorf("User-Agent = %q, want reqwest/0.13.4", ua)
+	}
+
+	// Confirm Accept-Encoding suppression: reqwest 0.13.4 without gzip
+	// feature omits the header, and Go http.Transport would auto-add
+	// Accept-Encoding: gzip unless we set the header map entry to nil.
+	// After the mirage branch runs, req.Header["Accept-Encoding"] must be
+	// present-but-nil so http.Transport treats it as "user set no value".
+	if ae, ok := req.Header["Accept-Encoding"]; !ok {
+		t.Error("Accept-Encoding must be present in the map (nil slice) to suppress Go auto-gzip")
+	} else if ae != nil {
+		t.Errorf("Accept-Encoding = %v, want nil slice", ae)
 	}
 
 	// Confirm the device-id is a plausible UUID (36 chars, 4 dashes).
@@ -109,10 +120,11 @@ func TestApplyClaudeHeaders_MirageEmitsPeekyWireFormat(t *testing.T) {
 	}
 }
 
-// TestApplyClaudeHeaders_MirageStreamAddsAcceptEncoding confirms streaming
-// requests add Accept-Encoding: identity so the aegis-proxy SSE body isn't
-// double-encoded (Peeky's client sends this).
-func TestApplyClaudeHeaders_MirageStreamAddsAcceptEncoding(t *testing.T) {
+// TestApplyClaudeHeaders_MirageStreamSuppressesAcceptEncoding confirms that
+// streaming requests still leave Accept-Encoding as a nil-slice sentinel so
+// Go's http.Transport does not auto-add its gzip default. reqwest 0.13.4
+// omits Accept-Encoding entirely when compression is disabled.
+func TestApplyClaudeHeaders_MirageStreamSuppressesAcceptEncoding(t *testing.T) {
 	auth := &cliproxyauth.Auth{
 		ID:         "test-mirage-stream",
 		Attributes: map[string]string{"auth_style": mirageAuthStyle},
@@ -123,8 +135,11 @@ func TestApplyClaudeHeaders_MirageStreamAddsAcceptEncoding(t *testing.T) {
 	if err := applyClaudeHeaders(req, auth, "unused", true, nil, nil, &config.Config{}, nil, false); err != nil {
 		t.Fatalf("applyClaudeHeaders(stream=true) returned error: %v", err)
 	}
-	if got := req.Header.Get("Accept-Encoding"); got != "identity" {
-		t.Errorf("stream Accept-Encoding = %q, want identity", got)
+	ae, ok := req.Header["Accept-Encoding"]
+	if !ok {
+		t.Error("stream: Accept-Encoding must be present (nil slice) to suppress Go auto-gzip")
+	} else if ae != nil {
+		t.Errorf("stream: Accept-Encoding = %v, want nil slice (no explicit value)", ae)
 	}
 }
 

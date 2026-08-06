@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	stdcrypttls "crypto/tls"
 	tls "github.com/refraction-networking/utls"
 	internalcache "github.com/router-for-me/CLIProxyAPI/v7/internal/cache"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
@@ -29,6 +30,175 @@ type warpUnavailableTransport struct{}
 
 func (warpUnavailableTransport) RoundTrip(*http.Request) (*http.Response, error) {
 	return nil, fmt.Errorf("warp-only egress requested but no WARP tunnels are available")
+}
+
+// mirageRustlsClientHelloSpec reproduces the ClientHello emitted by
+// reqwest 0.13.4 + rustls 0.23.42 + ring — the exact TLS stack the mirage
+// upstream expects. Emitted for mirage-uuid auths so the JA3 fingerprint
+// matches an ordinary rust HTTP client.
+//
+// Derived from rustls source rather than a packet capture:
+//   - Cipher suite order: rustls/crypto/ring/mod.rs ALL_CIPHER_SUITES
+//   - KX groups: rustls/crypto/ring/mod.rs ALL_KX_GROUPS
+//   - Signature schemes: rustls/crypto/ring/mod.rs ALL_SIGNATURE_SCHEMES
+//   - Extension order: rustls/msgs/handshake.rs ClientExtensions field order
+//   - Extension population: rustls/client/hs.rs
+//
+// The only randomness in this spec is the ClientRandom, key_share pubkey,
+// and legacy_session_id — which are supposed to be fresh per handshake.
+func mirageRustlsClientHelloSpec() *tls.ClientHelloSpec {
+	return &tls.ClientHelloSpec{
+		CipherSuites: []uint16{
+			tls.TLS_AES_256_GCM_SHA384,
+			tls.TLS_AES_128_GCM_SHA256,
+			tls.TLS_CHACHA20_POLY1305_SHA256,
+			tls.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
+			tls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
+			tls.TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256,
+			tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
+			tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+			tls.TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256,
+		},
+		CompressionMethods: []uint8{0},
+		Extensions: []tls.TLSExtension{
+			&tls.SNIExtension{},
+			&tls.StatusRequestExtension{},
+			&tls.SupportedCurvesExtension{Curves: []tls.CurveID{
+				tls.X25519, tls.CurveP256, tls.CurveP384,
+			}},
+			&tls.SupportedPointsExtension{SupportedPoints: []byte{0}},
+			&tls.SignatureAlgorithmsExtension{
+				SupportedSignatureAlgorithms: []tls.SignatureScheme{
+					tls.ECDSAWithP384AndSHA384,
+					tls.ECDSAWithP256AndSHA256,
+					tls.Ed25519,
+					tls.PSSWithSHA512,
+					tls.PSSWithSHA384,
+					tls.PSSWithSHA256,
+					tls.PKCS1WithSHA512,
+					tls.PKCS1WithSHA384,
+					tls.PKCS1WithSHA256,
+				},
+			},
+			&tls.ALPNExtension{AlpnProtocols: []string{"h2", "http/1.1"}},
+			&tls.ExtendedMasterSecretExtension{},
+			&tls.SupportedVersionsExtension{Versions: []uint16{
+				tls.VersionTLS13, tls.VersionTLS12,
+			}},
+			&tls.PSKKeyExchangeModesExtension{Modes: []uint8{tls.PskModeDHE}},
+			&tls.KeyShareExtension{KeyShares: []tls.KeyShare{
+				{Group: tls.X25519},
+			}},
+		},
+	}
+}
+
+// newMirageRustlsRoundTripper returns a RoundTripper that dials the given
+// upstream through the provided DialContext and performs a rustls-compatible
+// ClientHello. Used for mirage auths that must present a reqwest/rustls JA3.
+//
+// ALPN routing: reqwest 0.13.4 offers ["h2", "http/1.1"] in that order and
+// upgrades to HTTP/2 whenever the server accepts it. Cloudflare Workers
+// always accept h2. We route the negotiated protocol at the transport
+// level: h2 → http2.Transport, http/1.1 → net/http.Transport.
+func newMirageRustlsRoundTripper(dialCtx func(ctx context.Context, network, addr string) (net.Conn, error)) http.RoundTripper {
+	sessionCache := tls.NewLRUClientSessionCache(32)
+	dialTLS := func(ctx context.Context, network, addr string) (net.Conn, string, error) {
+		rawConn, err := dialCtx(ctx, network, addr)
+		if err != nil {
+			return nil, "", fmt.Errorf("mirage-rustls: dial upstream: %w", err)
+		}
+		host, _, errSplit := net.SplitHostPort(addr)
+		if errSplit != nil {
+			_ = rawConn.Close()
+			return nil, "", fmt.Errorf("mirage-rustls: split addr: %w", errSplit)
+		}
+		cfg := &tls.Config{
+			ServerName:         host,
+			NextProtos:         []string{"h2", "http/1.1"},
+			ClientSessionCache: sessionCache,
+		}
+		tlsConn := tls.UClient(rawConn, cfg, tls.HelloCustom)
+		if errPreset := tlsConn.ApplyPreset(mirageRustlsClientHelloSpec()); errPreset != nil {
+			_ = tlsConn.Close()
+			return nil, "", fmt.Errorf("mirage-rustls: apply preset: %w", errPreset)
+		}
+		if errHandshake := tlsConn.HandshakeContext(ctx); errHandshake != nil {
+			_ = tlsConn.Close()
+			return nil, "", fmt.Errorf("mirage-rustls: handshake: %w", errHandshake)
+		}
+		return tlsConn, tlsConn.ConnectionState().NegotiatedProtocol, nil
+	}
+
+	h2 := &http2.Transport{
+		AllowHTTP: false,
+		DialTLSContext: func(ctx context.Context, network, addr string, _ *stdcrypttls.Config) (net.Conn, error) {
+			conn, alpn, err := dialTLS(ctx, network, addr)
+			if err != nil {
+				return nil, err
+			}
+			if alpn != "h2" {
+				_ = conn.Close()
+				return nil, fmt.Errorf("mirage-rustls: expected ALPN h2, got %q", alpn)
+			}
+			return conn, nil
+		},
+	}
+	h1 := &http.Transport{
+		DialTLSContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			conn, _, err := dialTLS(ctx, network, addr)
+			return conn, err
+		},
+		TLSHandshakeTimeout:   15 * time.Second,
+		ResponseHeaderTimeout: 30 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+	}
+	return &mirageAlpnRouter{h2: h2, h1: h1, dial: dialTLS}
+}
+
+// mirageAlpnRouter picks the right protocol transport per request based on
+// the ALPN outcome of a probe handshake. Real requests reuse pooled conns
+// inside each protocol transport; the probe conn is discarded (worth it
+// once per host to avoid speaking the wrong protocol).
+type mirageAlpnRouter struct {
+	h2   *http2.Transport
+	h1   *http.Transport
+	dial func(ctx context.Context, network, addr string) (net.Conn, string, error)
+	mu   sync.Mutex
+	// alpnByHost caches the negotiated ALPN so we don't probe every request.
+	alpnByHost map[string]string
+}
+
+func (m *mirageAlpnRouter) RoundTrip(req *http.Request) (*http.Response, error) {
+	host := req.URL.Host
+	if host == "" {
+		host = req.Host
+	}
+	m.mu.Lock()
+	if m.alpnByHost == nil {
+		m.alpnByHost = map[string]string{}
+	}
+	alpn, cached := m.alpnByHost[host]
+	m.mu.Unlock()
+	if !cached {
+		addr := host
+		if _, _, errSplit := net.SplitHostPort(addr); errSplit != nil {
+			addr = net.JoinHostPort(host, "443")
+		}
+		conn, negotiated, err := m.dial(req.Context(), "tcp", addr)
+		if err != nil {
+			return nil, err
+		}
+		_ = conn.Close()
+		alpn = negotiated
+		m.mu.Lock()
+		m.alpnByHost[host] = alpn
+		m.mu.Unlock()
+	}
+	if alpn == "h2" {
+		return m.h2.RoundTrip(req)
+	}
+	return m.h1.RoundTrip(req)
 }
 
 // utlsRoundTripper implements http.RoundTripper using a Chrome fingerprint for
@@ -391,9 +561,12 @@ func NewUtlsHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyau
 		}
 	}
 	if warpOnly {
-		if transport := proxypool.GetWARPTransport(); transport != nil {
-			log.Infof("[utls_client] using WARP-only transport for auth=%s", auth.ID)
-			client := &http.Client{Transport: transport}
+		// WARP tunnels give us the exit IP; the rustls-compatible round
+		// tripper gives us the TLS fingerprint. Both are required to look
+		// like an ordinary rust HTTP client end to end (IP + JA3).
+		if dialCtx := proxypool.GetWARPDialContext(); dialCtx != nil {
+			log.Infof("[utls_client] using WARP+rustls transport for auth=%s", auth.ID)
+			client := &http.Client{Transport: newMirageRustlsRoundTripper(dialCtx)}
 			if timeout > 0 {
 				client.Timeout = timeout
 			}
@@ -403,7 +576,7 @@ func NewUtlsHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyau
 		// Return a client whose transport fails every request: silently
 		// falling back to a direct dial would leak the host's public IP
 		// to targets that specifically refuse non-WARP callers (e.g.
-		// aegis-proxy on Cloudflare Workers).
+		// third-party Cloudflare Worker upstreams).
 		log.Errorf("[utls_client] WARP-only requested but no WARP transport available for auth=%s; failing closed", auth.ID)
 		client := &http.Client{Transport: warpUnavailableTransport{}}
 		if timeout > 0 {
