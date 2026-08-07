@@ -201,9 +201,20 @@ func (s *ConfigSynthesizer) synthesizeClaudeKeys(ctx *SynthesisContext) []*corea
 		if v := strings.TrimSpace(ck.VertexLocation); v != "" {
 			attrs["vertex_location"] = v
 		}
+		if v := strings.TrimSpace(ck.CredentialsB64); v != "" {
+			attrs["credentials_b64"] = v
+		}
 		if len(ck.ModelProjectPool) > 0 {
 			if encoded, err := json.Marshal(ck.ModelProjectPool); err == nil {
 				attrs["model_project_pool"] = string(encoded)
+			}
+			// Also flatten per-model project lists to the comma-separated
+			// attribute form pickVertexClaudeProject expects at runtime.
+			for m, projects := range ck.ModelProjectPool {
+				if len(projects) == 0 {
+					continue
+				}
+				attrs["model-project-pool/"+m] = strings.Join(projects, ",")
 			}
 		}
 		if len(ck.ErrorPassList) > 0 {

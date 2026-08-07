@@ -771,8 +771,18 @@ type ClaudeKey struct {
 	GCPCredentialsFile string `yaml:"gcp-credentials-file,omitempty" json:"gcp-credentials-file,omitempty"`
 
 	// VertexLocation is the GCP region used in the Vertex URL template (default
-	// "us-east5"). Only used when GCPCredentialsFile is set.
+	// "us-east5"). Special value "global" targets the region-less
+	// aiplatform.googleapis.com endpoint whose quota pool is the only place
+	// the newest Claude models (opus-4-7 / opus-4-8 / sonnet-5 / fable-5)
+	// reliably respond without per-region 429 for third-party service accounts.
 	VertexLocation string `yaml:"vertex-location,omitempty" json:"vertex-location,omitempty"`
+
+	// CredentialsB64 is a base64-encoded service account JSON. When set, CPA
+	// mints Vertex access tokens from this SA (via google.CredentialsFromJSON)
+	// instead of falling back to Application Default Credentials on the host.
+	// This lets non-GCP hosts (VPS, other clouds) use Vertex-Anthropic without
+	// running gcloud auth application-default login.
+	CredentialsB64 string `yaml:"credentials-b64,omitempty" json:"credentials-b64,omitempty"`
 
 	// ModelProjectPool maps a model name to a list of GCP project IDs. At request
 	// time one project is picked at random (equal weight) from the list to build
