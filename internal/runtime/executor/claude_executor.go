@@ -206,6 +206,32 @@ func (e *ClaudeExecutor) upstreamModel(baseModel string) string {
 	return baseModel
 }
 
+// canonicalizeClaudeModelForMirage rewrites a caller-provided model to the
+// hyphenated canonical form the mirage upstream expects. Aegis 404s on
+// `claude-opus-4.8` (dot) but accepts `claude-opus-4-8` (hyphen).
+// Iterates registry.ClaudeModelEquivalents (which handles dot/hyphen +
+// case + vendor prefix) and picks the version that looks hyphenated.
+func canonicalizeClaudeModelForMirage(model string) string {
+	m := strings.TrimSpace(model)
+	if m == "" {
+		return m
+	}
+	// Prefer the fully-hyphenated lowercase form.
+	for _, alt := range registry.ClaudeModelEquivalents(m) {
+		lc := strings.ToLower(alt)
+		if strings.Contains(lc, ".") {
+			continue
+		}
+		// Skip variants that still carry vendor prefixes ("aws-claude-*",
+		// "anthropic/claude-*") — aegis wants the bare Anthropic id.
+		if !strings.HasPrefix(lc, "claude-") {
+			continue
+		}
+		return lc
+	}
+	return m
+}
+
 func (e *ClaudeExecutor) restoreResponseModel(payload []byte, model string) []byte {
 	if e.upstreamModelNormalizer == nil || strings.TrimSpace(model) == "" {
 		return payload
@@ -309,6 +335,9 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	}
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 	upstreamModel := e.upstreamModel(baseModel)
+	if isMirageAuth(auth) {
+		upstreamModel = canonicalizeClaudeModelForMirage(upstreamModel)
+	}
 
 	apiKey, baseURL := claudeCreds(auth)
 	if baseURL == "" {
@@ -597,6 +626,9 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	}
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 	upstreamModel := e.upstreamModel(baseModel)
+	if isMirageAuth(auth) {
+		upstreamModel = canonicalizeClaudeModelForMirage(upstreamModel)
+	}
 
 	apiKey, baseURL := claudeCreds(auth)
 	if baseURL == "" {
@@ -1140,6 +1172,9 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	}
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 	upstreamModel := e.upstreamModel(baseModel)
+	if isMirageAuth(auth) {
+		upstreamModel = canonicalizeClaudeModelForMirage(upstreamModel)
+	}
 
 	apiKey, baseURL := claudeCreds(auth)
 	if baseURL == "" {

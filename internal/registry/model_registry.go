@@ -788,16 +788,33 @@ func ClaudeModelEquivalents(modelID string) []string {
 	if trimmed == "" {
 		return nil
 	}
+	seen := map[string]struct{}{trimmed: {}}
 	out := []string{trimmed}
-	// Some Claude model names ship in two interchangeable orthographies on the
-	// upstream catalog: dot form ("claude-opus-4.7") and dash form
-	// ("claude-opus-4-7"). Different providers (Bedrock direct vs OAuth vs
-	// third-party proxies) register different forms in their own configs, but
-	// for routing purposes they refer to the exact same model. Compute a
-	// version flipped at the trailing -X-Y / -X.Y boundary.
-	flipped := flipClaudeVersionSeparator(trimmed)
-	if flipped != "" && flipped != trimmed {
-		out = append(out, flipped)
+	push := func(v string) {
+		if v == "" {
+			return
+		}
+		if _, ok := seen[v]; ok {
+			return
+		}
+		seen[v] = struct{}{}
+		out = append(out, v)
+	}
+	// dot/dash flip: "claude-opus-4.7" ↔ "claude-opus-4-7"
+	push(flipClaudeVersionSeparator(trimmed))
+	// case fold: providers sometimes register "Claude-Opus-4.8" or all-caps
+	lower := strings.ToLower(trimmed)
+	push(lower)
+	push(flipClaudeVersionSeparator(lower))
+	// Common vendor prefixes: "aws-claude-*", "anthropic/claude-*",
+	// "bedrock/claude-*". Registry canonical form drops these; strip on
+	// lookup so a caller sending the vendor-flavored name still matches.
+	for _, pfx := range []string{"aws-", "anthropic/", "bedrock/", "vertex/"} {
+		if strings.HasPrefix(lower, pfx) {
+			stripped := strings.TrimPrefix(lower, pfx)
+			push(stripped)
+			push(flipClaudeVersionSeparator(stripped))
+		}
 	}
 	return out
 }
@@ -1168,6 +1185,20 @@ func (r *ModelRegistry) GetModelProviders(modelID string) []string {
 	defer r.mutex.RUnlock()
 
 	registration, exists := r.models[modelID]
+	if (!exists || registration == nil) && modelID != "" {
+		// Try dot/hyphen equivalent: registry may only carry "claude-opus-4-8"
+		// while the caller sent "claude-opus-4.8" (or vice versa).
+		for _, alt := range ClaudeModelEquivalents(modelID) {
+			if alt == modelID {
+				continue
+			}
+			if reg, ok := r.models[alt]; ok && reg != nil {
+				registration = reg
+				exists = true
+				break
+			}
+		}
+	}
 	if !exists || registration == nil || len(registration.Providers) == 0 {
 		return nil
 	}
