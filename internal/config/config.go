@@ -709,6 +709,15 @@ type ClaudeKey struct {
 	// proxies that expose a non-standard endpoint path.
 	FullURL string `yaml:"full-url,omitempty" json:"full-url,omitempty"`
 
+	// RequirePrefix, when true and Prefix is set, only registers models
+	// under the "<prefix>/<model>" name — never as the bare model name.
+	// Auto-routing on "claude-opus-4-8" will not fall through to this auth
+	// even if it is the only provider that has the model; callers must
+	// send "<prefix>/claude-opus-4-8" explicitly. Useful for opt-in
+	// backends like mirage (rate-limited free pool) that should never
+	// silently absorb general traffic.
+	RequirePrefix bool `yaml:"require-prefix,omitempty" json:"require-prefix,omitempty"`
+
 	// ProxyURL overrides the global proxy setting for this API key if provided.
 	ProxyURL string `yaml:"proxy-url" json:"proxy-url"`
 

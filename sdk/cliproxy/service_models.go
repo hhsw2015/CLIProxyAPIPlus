@@ -212,11 +212,11 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 				}
 				if len(ms) > 0 {
 					ms = s.appendPluginModels(providerKey, ms)
-					s.registerResolvedModelsForAuth(a, providerKey, applyModelPrefixes(ms, a.Prefix, s.cfg.ForceModelPrefix))
+					s.registerResolvedModelsForAuth(a, providerKey, applyModelPrefixesForAuth(ms, a, s.cfg.ForceModelPrefix))
 				} else {
 					ms = s.appendPluginModels(providerKey, nil)
 					if len(ms) > 0 {
-						s.registerResolvedModelsForAuth(a, providerKey, applyModelPrefixes(ms, a.Prefix, s.cfg.ForceModelPrefix))
+						s.registerResolvedModelsForAuth(a, providerKey, applyModelPrefixesForAuth(ms, a, s.cfg.ForceModelPrefix))
 					} else {
 						GlobalModelRegistry().UnregisterClient(a.ID)
 					}
@@ -234,11 +234,11 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 				ms := cached.models
 				if len(ms) > 0 {
 					ms = s.appendPluginModels(providerKey, ms)
-					s.registerResolvedModelsForAuth(a, providerKey, applyModelPrefixes(ms, a.Prefix, s.cfg.ForceModelPrefix))
+					s.registerResolvedModelsForAuth(a, providerKey, applyModelPrefixesForAuth(ms, a, s.cfg.ForceModelPrefix))
 				} else {
 					ms = s.appendPluginModels(providerKey, nil)
 					if len(ms) > 0 {
-						s.registerResolvedModelsForAuth(a, providerKey, applyModelPrefixes(ms, a.Prefix, s.cfg.ForceModelPrefix))
+						s.registerResolvedModelsForAuth(a, providerKey, applyModelPrefixesForAuth(ms, a, s.cfg.ForceModelPrefix))
 					} else {
 						GlobalModelRegistry().UnregisterClient(a.ID)
 					}
@@ -257,7 +257,7 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 			if isCompatAuth {
 				models = s.appendPluginModels(providerKey, nil)
 				if len(models) > 0 {
-					s.registerResolvedModelsForAuth(a, providerKey, applyModelPrefixes(models, a.Prefix, s.cfg != nil && s.cfg.ForceModelPrefix))
+					s.registerResolvedModelsForAuth(a, providerKey, applyModelPrefixesForAuth(models, a, s.cfg != nil && s.cfg.ForceModelPrefix))
 				} else {
 					// No matching provider found or models removed entirely; drop any prior registration.
 					GlobalModelRegistry().UnregisterClient(a.ID)
@@ -279,7 +279,7 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 	}
 	models = s.appendPluginModels(key, models)
 	if len(models) > 0 {
-		s.registerResolvedModelsForAuth(a, key, applyModelPrefixes(models, a.Prefix, s.cfg != nil && s.cfg.ForceModelPrefix))
+		s.registerResolvedModelsForAuth(a, key, applyModelPrefixesForAuth(models, a, s.cfg != nil && s.cfg.ForceModelPrefix))
 		return
 	}
 
@@ -578,6 +578,16 @@ func applyExcludedModels(models []*ModelInfo, excluded []string) []*ModelInfo {
 		}
 	}
 	return filtered
+}
+
+// applyModelPrefixesForAuth is a helper for callers that already have the
+// auth handy; it honors auth.Attributes["require_prefix"] as a per-auth
+// override of the global forceModelPrefix flag.
+func applyModelPrefixesForAuth(models []*ModelInfo, auth *coreauth.Auth, forceModelPrefix bool) []*ModelInfo {
+	if auth != nil && auth.Attributes != nil && strings.EqualFold(strings.TrimSpace(auth.Attributes["require_prefix"]), "true") {
+		forceModelPrefix = true
+	}
+	return applyModelPrefixes(models, auth.Prefix, forceModelPrefix)
 }
 
 func applyModelPrefixes(models []*ModelInfo, prefix string, forceModelPrefix bool) []*ModelInfo {

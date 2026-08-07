@@ -217,6 +217,9 @@ func (s *ConfigSynthesizer) synthesizeClaudeKeys(ctx *SynthesisContext) []*corea
 		if v := strings.TrimSpace(ck.FullURL); v != "" {
 			attrs["full_url"] = v
 		}
+		if ck.RequirePrefix {
+			attrs["require_prefix"] = "true"
+		}
 		if len(ck.NonRetryableSubstrings) > 0 {
 			if encoded, err := json.Marshal(ck.NonRetryableSubstrings); err == nil {
 				attrs["non_retryable_substrings"] = string(encoded)
