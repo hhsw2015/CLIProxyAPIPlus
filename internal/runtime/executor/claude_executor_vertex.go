@@ -9,9 +9,9 @@ import (
 	"strings"
 	"sync"
 
+	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/sjson"
 	"golang.org/x/oauth2/google"
-	log "github.com/sirupsen/logrus"
 
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
@@ -186,4 +186,3 @@ func vertexClaudeToken(ctx context.Context, cfg *internalconfig.Config, auth *cl
 	}
 	return tok.AccessToken, nil
 }
-

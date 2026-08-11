@@ -1044,6 +1044,12 @@ func (h *BaseAPIHandler) applyRequestInterceptorsAfterPluginExecutorRoute(ctx co
 	return req, opts
 }
 
+// ExecutionErrorMessage is the exported wrapper for executionErrorMessage,
+// consumed by callers outside this package (e.g. openai_responses_websocket).
+func ExecutionErrorMessage(err error) *interfaces.ErrorMessage {
+	return executionErrorMessage(err)
+}
+
 func executionErrorMessage(err error) *interfaces.ErrorMessage {
 	status := http.StatusInternalServerError
 	if se, ok := err.(interface{ StatusCode() int }); ok && se != nil {

@@ -118,7 +118,6 @@ func TestPrepareBedrockBody(t *testing.T) {
 	}
 }
 
-
 func contains(s, substr string) bool {
 	return len(s) >= len(substr) && searchString(s, substr)
 }

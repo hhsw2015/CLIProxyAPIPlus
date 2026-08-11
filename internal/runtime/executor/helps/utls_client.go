@@ -639,10 +639,15 @@ func NewUtlsHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyau
 // buildUtlsClientWithDialer creates an HTTP client using the pool's ECH DialContext.
 // The ECH tunnel provides the connection; TLS is handled within the tunnel.
 func buildUtlsClientWithDialer(dialCtx func(ctx context.Context, network, addr string) (net.Conn, error), timeout time.Duration) *http.Client {
+	// Opus-5 adaptive xhigh reasoning on a 194KB tool-heavy request routinely
+	// spends 40-90s producing the first response header (non-stream :rawPredict
+	// path). 30s here was too aggressive for that shape of traffic and made
+	// vertex look "broken" while the request was actually still running. CC
+	// client sets X-Stainless-Timeout: 300, so match that ceiling.
 	transport := &http.Transport{
 		DialContext:           dialCtx,
 		TLSHandshakeTimeout:   15 * time.Second,
-		ResponseHeaderTimeout: 30 * time.Second,
+		ResponseHeaderTimeout: 300 * time.Second,
 		ExpectContinueTimeout: 1 * time.Second,
 	}
 	client := &http.Client{Transport: transport}

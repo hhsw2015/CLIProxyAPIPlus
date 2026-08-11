@@ -458,7 +458,6 @@ func TestGitLabExecutorExecuteStreamFallsBackToSyntheticChat(t *testing.T) {
 	}
 }
 
-
 func collectStreamLines(t *testing.T, result *cliproxyexecutor.StreamResult) []string {
 	t.Helper()
 	lines := make([]string, 0, 8)

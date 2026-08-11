@@ -18,7 +18,6 @@ import (
 	"github.com/tidwall/gjson"
 )
 
-
 func TestCodexExecutorExecute_EmptyStreamCompletionOutputUsesOutputItemDone(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -468,6 +467,11 @@ func TestCodexTerminalFailureErrClassifiesStatus(t *testing.T) {
 		{
 			name:       "invalid request",
 			event:      `{"type":"error","error":{"type":"invalid_request_error","code":"invalid_value","message":"Invalid input."}}`,
+			wantStatus: http.StatusBadRequest,
+		},
+		{
+			name:       "cyber policy",
+			event:      `{"type":"error","error":{"type":"invalid_request","code":"cyber_policy","message":"This content was flagged for possible cybersecurity risk."}}`,
 			wantStatus: http.StatusBadRequest,
 		},
 		{

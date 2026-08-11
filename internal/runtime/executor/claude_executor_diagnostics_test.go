@@ -32,7 +32,6 @@ func TestInjectClaudeDiagnosticsMatchesNativeFieldOrderAndContinuity(t *testing.
 	}
 }
 
-
 func TestClaudeMessageIDFromSSECommitsOnlyCompletedMessage(t *testing.T) {
 	t.Parallel()
 

@@ -48,11 +48,11 @@ func TestApplyClaudeHeaders_MirageWireFormat(t *testing.T) {
 	// emits lowercase on the wire. Over HTTP/2 HPACK normalizes anyway;
 	// over HTTP/1.1 canonical case would fingerprint us.
 	want := map[string]string{
-		"content-type":       "application/json",
-		mirageDeviceHeader:   "", // present but value is a UUID
-		"anthropic-version":  "2023-06-01",
-		"user-agent":         "reqwest/0.13.4",
-		"accept":             "*/*",
+		"content-type":      "application/json",
+		mirageDeviceHeader:  "", // present but value is a UUID
+		"anthropic-version": "2023-06-01",
+		"user-agent":        "reqwest/0.13.4",
+		"accept":            "*/*",
 	}
 
 	// Confirm every "want" key is present with exact case.
@@ -280,4 +280,3 @@ func TestApplyClaudeHeaders_MirageRotatesDeviceIDAcrossCalls(t *testing.T) {
 		t.Fatalf("expected multiple UUIDs from rotating pool, got %d unique: %v", len(seen), seen)
 	}
 }
-

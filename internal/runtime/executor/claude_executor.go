@@ -120,11 +120,12 @@ func shouldSanitizeClaudeMessagesForUpstream(baseModel string) bool {
 	return sigcompat.SignatureProviderFromModelName(baseModel) == sigcompat.SignatureProviderClaude
 }
 
-func sanitizeClaudeMessagesForClaudeUpstreamWithDebug(ctx context.Context, body []byte, baseModel string) []byte {
+func sanitizeClaudeMessagesForClaudeUpstreamWithDebug(ctx context.Context, body []byte, baseModel string, preserveEmptyThinkingBlocks ...bool) []byte {
 	sanitized := body
-	if shouldSanitizeClaudeMessagesForUpstream(baseModel) {
+	preserveEmpty := len(preserveEmptyThinkingBlocks) > 0 && preserveEmptyThinkingBlocks[0]
+	if shouldSanitizeClaudeMessagesForUpstream(baseModel) || preserveEmpty {
 		var report sigcompat.SignatureSanitizeReport
-		sanitized, report = sigcompat.SanitizeClaudeMessagesForClaudeUpstream(body, baseModel)
+		sanitized, report = sigcompat.SanitizeClaudeMessagesForClaudeUpstream(body, baseModel, preserveEmptyThinkingBlocks...)
 		logClaudeSignatureSanitizeReport(ctx, baseModel, report)
 	}
 	return sanitizeClaudeWebSearchDomains(sanitized)
@@ -413,8 +414,8 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	// Auto-inject cache_control if missing (optimization for ClawdBot/clients without caching support)
 	if countCacheControls(body) == 0 {
 		if !isMirageAuth(auth) {
-		body = ensureCacheControl(body)
-	}
+			body = ensureCacheControl(body)
+		}
 	}
 
 	// Enforce Anthropic's cache_control block limit (max 4 breakpoints per request).
@@ -695,8 +696,8 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	// Auto-inject cache_control if missing (optimization for ClawdBot/clients without caching support)
 	if countCacheControls(body) == 0 {
 		if !isMirageAuth(auth) {
-		body = ensureCacheControl(body)
-	}
+			body = ensureCacheControl(body)
+		}
 	}
 
 	// Enforce Anthropic's cache_control block limit (max 4 breakpoints per request).
@@ -1788,11 +1789,11 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 		// distinct fingerprint over HTTP/1.1. Bypass canonicalization by
 		// writing directly to the header map.
 		lower := map[string][]string{
-			"content-type":       {"application/json"},
-			"anthropic-version":  {"2023-06-01"},
-			mirageDeviceHeader:   {mirageEntryFor(auth).next()},
-			"user-agent":         {"reqwest/0.13.4"},
-			"accept":             {"*/*"},
+			"content-type":      {"application/json"},
+			"anthropic-version": {"2023-06-01"},
+			mirageDeviceHeader:  {mirageEntryFor(auth).next()},
+			"user-agent":        {"reqwest/0.13.4"},
+			"accept":            {"*/*"},
 			// Nil slice: Go's http.Transport auto-adds Accept-Encoding: gzip
 			// unless the caller sets the key explicitly. Nil says "user set
 			// no value" so the transport leaves it alone; reqwest 0.13.4
