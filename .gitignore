@@ -57,6 +57,7 @@ docs/*
 AGENTS.md
 CLAUDE.md
 GEMINI.md
+AGENTS.override.md
 
 # warp-pool runtime artifacts
 warp-pool/warp-pool
@@ -85,6 +86,8 @@ warp-pool/data/
 _bmad/*
 _bmad-output/*
 .mcp/cache/
+.gocache/
+.gitnexus/
 
 # macOS
 .DS_Store
@@ -104,6 +107,8 @@ cpa-linux
 scripts/probe_state.json
 scripts/probe_state.watermark
 
-# fork-local build artifacts and generated content
-scripts/probe_state.json
-scripts/probe_state.watermark
+# docker
+docker-compose.override.yml
+
+# Local LLM Wiki vault
+.llm-wiki

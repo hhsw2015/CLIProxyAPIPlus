@@ -913,6 +913,39 @@ func sanitizeCodexAlphaSearchBody(body []byte) []byte {
 	return sanitizedBody
 }
 
+// rewriteCodexAlphaSearchModel replaces the top-level model field with the
+// credential-resolved upstream model before the request is forwarded. Ported
+// from upstream e64cdbf5.
+func rewriteCodexAlphaSearchModel(body []byte, upstreamModel string) []byte {
+	upstreamModel = strings.TrimSpace(upstreamModel)
+	if upstreamModel == "" {
+		return body
+	}
+
+	var payload map[string]json.RawMessage
+	if errUnmarshal := json.Unmarshal(body, &payload); errUnmarshal != nil || payload == nil {
+		return body
+	}
+	if _, exists := payload["model"]; !exists {
+		return body
+	}
+
+	modelJSON, errMarshalModel := json.Marshal(upstreamModel)
+	if errMarshalModel != nil {
+		return body
+	}
+	if string(payload["model"]) == string(modelJSON) {
+		return body
+	}
+
+	payload["model"] = modelJSON
+	rewrittenBody, errMarshal := json.Marshal(payload)
+	if errMarshal != nil {
+		return body
+	}
+	return rewrittenBody
+}
+
 func homeSelectionAttemptContext(ctx context.Context, selection *auth.HomeDispatchSelection) (context.Context, func(), error) {
 	if selection == nil {
 		return nil, func() {}, errors.New("Home dispatch selection is nil")

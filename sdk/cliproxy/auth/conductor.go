@@ -390,7 +390,7 @@ func (m *Manager) hasPluginScheduler() bool {
 
 func isBuiltInSelector(selector Selector) bool {
 	switch selector.(type) {
-	case *RoundRobinSelector, *FillFirstSelector:
+	case *RoundRobinSelector, *WeightedRoundRobinSelector, *FillFirstSelector:
 		return true
 	default:
 		return false
@@ -1373,6 +1373,25 @@ func (m *Manager) executionModelCandidates(auth *Auth, routeModel string) []stri
 	return []string{resolved}
 }
 
+// ResolveExecutionModel returns the credential-aware upstream model used by
+// normal execution. It strips auth prefixes, applies configured aliases, and
+// prefers Home-dispatched upstream models when present. Ported from upstream
+// e64cdbf5 for API-key Codex Alpha Search model rewriting.
+func (m *Manager) ResolveExecutionModel(auth *Auth, routeModel string) string {
+	routeModel = strings.TrimSpace(routeModel)
+	if m == nil {
+		return routeModel
+	}
+	candidates := m.executionModelCandidates(auth, routeModel)
+	if len(candidates) == 0 {
+		return routeModel
+	}
+	if resolved := strings.TrimSpace(candidates[0]); resolved != "" {
+		return resolved
+	}
+	return routeModel
+}
+
 func (m *Manager) selectionModelForAuth(auth *Auth, routeModel string) string {
 	requestedModel := rewriteModelForAuth(routeModel, auth)
 	if strings.TrimSpace(requestedModel) == "" {
@@ -1689,6 +1708,22 @@ func selectionArgForSelector(selector Selector, routeModel string) string {
 		return ""
 	}
 	return routeModel
+}
+
+// restoreModelCooldownErrorModel re-attaches the originally requested model to a
+// modelCooldownError that lost its model name. Built-in selectors receive an
+// empty selection arg (see selectionArgForSelector), so a cooldown surfaced from
+// the selector carries an empty model; restore it from the route model before the
+// error propagates. Ported from upstream 31a4e9b4.
+func restoreModelCooldownErrorModel(err error, requestedModel string) error {
+	if err == nil || requestedModel == "" {
+		return err
+	}
+	var cooldownErr *modelCooldownError
+	if !errors.As(err, &cooldownErr) || cooldownErr == nil || cooldownErr.model != "" {
+		return err
+	}
+	return newModelCooldownError(requestedModel, cooldownErr.provider, cooldownErr.resetIn)
 }
 
 func schedulerAttributeSensitive(key string) bool {
@@ -5723,6 +5758,9 @@ func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, op
 	if !handled {
 		selected, errPick = selector.Pick(ctx, provider, selectionArgForSelector(selector, model), opts, available)
 		if errPick != nil {
+			if isBuiltInSelector(selector) {
+				errPick = restoreModelCooldownErrorModel(errPick, model)
+			}
 			return nil, nil, errPick
 		}
 	}
@@ -5982,6 +6020,9 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 	if !handled {
 		selected, errPick = selector.Pick(ctx, "mixed", selectionArgForSelector(selector, model), opts, available)
 		if errPick != nil {
+			if isBuiltInSelector(selector) {
+				errPick = restoreModelCooldownErrorModel(errPick, model)
+			}
 			return nil, nil, "", errPick
 		}
 	}
@@ -7517,7 +7558,10 @@ func (m *Manager) refreshAuthForRequest(ctx context.Context, id, failedAccessTok
 	auth := m.auths[id]
 	var exec ProviderExecutor
 	if auth != nil {
-		exec = m.executors[auth.Provider]
+		// Use the same effective provider key as request execution so OpenAI-compat
+		// auths registered under namespaced keys still resolve for refresh.
+		// Ported from upstream 01a21b77.
+		exec = m.executors[executorKeyFromAuth(auth)]
 	}
 	m.mu.RUnlock()
 	if auth == nil || exec == nil {
