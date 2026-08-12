@@ -15,16 +15,22 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	homekv "github.com/router-for-me/CLIProxyAPI/v7/internal/home"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 )
 
+// resetAntigravityCreditsRetryState clears the package-level credits state
+// between tests. It empties each map in place instead of assigning a fresh
+// sync.Map, because credits hint refreshes run on background goroutines that
+// may still be writing these maps when a test's cleanup runs. Replacing the
+// variable is an unsynchronized write and races with them; Clear is not.
 func resetAntigravityCreditsRetryState() {
-	antigravityCreditsFailureByAuth = sync.Map{}
-	antigravityShortCooldownByAuth = sync.Map{}
-	antigravityCreditsBalanceByAuth = sync.Map{}
-	antigravityCreditsHintRefreshByID = sync.Map{}
+	antigravityCreditsFailureByAuth.Clear()
+	antigravityShortCooldownByAuth.Clear()
+	antigravityCreditsBalanceByAuth.Clear()
+	antigravityCreditsHintRefreshByID.Clear()
 }
 
 type closeSignalReadCloser struct {
@@ -259,16 +265,16 @@ func TestInjectEnabledCreditTypes(t *testing.T) {
 
 func TestParseRetryDelay_HumanReadableDuration(t *testing.T) {
 	body := []byte(`{"error":{"message":"You have exhausted your capacity on this model. Your quota will reset after 1h43m56s."}}`)
-	retryAfter, err := parseRetryDelay(body)
+	retryAfter, err := helps.ParseRetryDelay(body)
 	if err != nil {
-		t.Fatalf("parseRetryDelay() error = %v", err)
+		t.Fatalf("helps.ParseRetryDelay() error = %v", err)
 	}
 	if retryAfter == nil {
-		t.Fatal("parseRetryDelay() returned nil")
+		t.Fatal("helps.ParseRetryDelay() returned nil")
 	}
 	want := time.Hour + 43*time.Minute + 56*time.Second
 	if *retryAfter != want {
-		t.Fatalf("parseRetryDelay() = %v, want %v", *retryAfter, want)
+		t.Fatalf("helps.ParseRetryDelay() = %v, want %v", *retryAfter, want)
 	}
 }
 
