@@ -112,3 +112,4 @@ docker-compose.override.yml
 
 # Local LLM Wiki vault
 .llm-wiki
+scripts/vertex_watch_state.json

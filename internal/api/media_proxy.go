@@ -86,6 +86,16 @@ func (s *Server) mediaProxyHandler(ep mediaEndpoint) gin.HandlerFunc {
 			return
 		}
 
+		// Vertex Imagen (model="imagen-*") requires SA OAuth + body translation
+		// (OpenAI images/generations → Vertex :predict). Detected before the
+		// generic OpenAI-compat resolver since imagen entries live in the
+		// gemini-api-key section with credentials-b64, not openai-compatibility.
+		if strings.HasPrefix(strings.ToLower(strings.TrimSpace(modelName)), "imagen-") && ep.pathSuffix == "images/generations" {
+			if s.handleVertexImagen(c, modelName, body) {
+				return
+			}
+		}
+
 		// Find provider config for this model + endpoint type.
 		provider := s.resolveMediaProvider(modelName, ep)
 		if provider == nil {

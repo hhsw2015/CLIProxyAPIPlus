@@ -995,6 +995,30 @@ type GeminiKey struct {
 
 	// DisableCooling disables auth/model cooldown scheduling for this credential when true.
 	DisableCooling bool `yaml:"disable-cooling,omitempty" json:"disable-cooling,omitempty"`
+
+	// CredentialsB64 is a base64-encoded service-account JSON. When set, this
+	// entry authenticates to Vertex AI with SA OAuth instead of an AI Studio
+	// API key. Used for Vertex Imagen/Gemini via SA (see media_proxy.go).
+	CredentialsB64 string `yaml:"credentials-b64,omitempty" json:"credentials-b64,omitempty"`
+
+	// VertexLocation is the GCP region to target for Vertex API calls (e.g.
+	// "us-central1"). Required when CredentialsB64 is set.
+	VertexLocation string `yaml:"vertex-location,omitempty" json:"vertex-location,omitempty"`
+
+	// ModelProjectPool maps model name → list of GCP project IDs eligible to
+	// serve that model. Used by Vertex fanout.
+	ModelProjectPool map[string][]string `yaml:"model-project-pool,omitempty" json:"model-project-pool,omitempty"`
+
+	// AuthStyle: "auto" | "bearer" | "key-header". Optional hint for token
+	// header shape.
+	AuthStyle string `yaml:"auth-style,omitempty" json:"auth-style,omitempty"`
+
+	// Name is an optional label for this entry (Vertex SA entries use this
+	// instead of api-key since api-key is null for OAuth).
+	Name string `yaml:"name,omitempty" json:"name,omitempty"`
+
+	// Disabled marks this entry as inactive (loaded but never selected).
+	Disabled bool `yaml:"disabled,omitempty" json:"disabled,omitempty"`
 }
 
 func (k GeminiKey) GetAPIKey() string  { return k.APIKey }
@@ -1751,7 +1775,9 @@ func sanitizeGeminiKeyEntries(entries []GeminiKey) []GeminiKey {
 	for i := range entries {
 		entry := entries[i]
 		entry.APIKey = strings.TrimSpace(entry.APIKey)
-		if entry.APIKey == "" {
+		// Allow SA-based Vertex entries with no APIKey (imagen-sa-*).
+		// They authenticate via CredentialsB64 → OAuth token instead.
+		if entry.APIKey == "" && strings.TrimSpace(entry.CredentialsB64) == "" {
 			continue
 		}
 		entry.Prefix = normalizeModelPrefix(entry.Prefix)
