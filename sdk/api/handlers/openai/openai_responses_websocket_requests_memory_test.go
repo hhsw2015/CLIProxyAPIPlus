@@ -3,6 +3,7 @@ package openai
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math/rand"
 	"reflect"
@@ -17,11 +18,11 @@ const (
 )
 
 var (
-	responsesWebsocketMergedInputSink       []byte
+	responsesWebsocketMergedInputSink       any
 	responsesWebsocketNormalizedRequestSink []byte
 )
 
-func TestMergeResponsesWebsocketInputMatchesReferenceSemantics(t *testing.T) {
+func TestMergeResponsesWebsocketInputMatchesCompatibilityScenarios(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -29,54 +30,70 @@ func TestMergeResponsesWebsocketInputMatchesReferenceSemantics(t *testing.T) {
 		lastRequest        string
 		lastResponseOutput string
 		appendInput        string
+		want               string
 	}{
 		{
 			name:               "messages and paired tool call",
 			lastRequest:        `{"model":"gpt-5.4","input":[{"type":"message","id":"msg-1","role":"user","content":"hello"}]}`,
 			lastResponseOutput: `[{"type":"function_call","id":"fc-1","call_id":"call-1","name":"lookup","arguments":"{}"}]`,
 			appendInput:        `[{"type":"function_call_output","id":"fco-1","call_id":"call-1","output":"done"}]`,
+			want:               `[{"type":"message","id":"msg-1","role":"user","content":"hello"},{"type":"function_call","id":"fc-1","call_id":"call-1","name":"lookup","arguments":"{}"},{"type":"function_call_output","id":"fco-1","call_id":"call-1","output":"done"}]`,
 		},
 		{
 			name:               "duplicate function call keeps first",
 			lastRequest:        `{"input":[{"type":"function_call","id":"fc-first","call_id":"call-1","name":"first","arguments":"{}"}]}`,
 			lastResponseOutput: `[{"type":"function_call","id":"fc-second","call_id":"call-1","name":"second","arguments":"{}"}]`,
 			appendInput:        `[{"type":"function_call_output","id":"fco-1","call_id":"call-1","output":"done"}]`,
+			want:               `[{"type":"function_call","id":"fc-first","call_id":"call-1","name":"first","arguments":"{}"},{"type":"function_call_output","id":"fco-1","call_id":"call-1","output":"done"}]`,
 		},
 		{
 			name:               "duplicate id keeps item referenced by output",
 			lastRequest:        `{"input":[{"type":"function_call","id":"fc-1","call_id":"call-kept","name":"first","arguments":"{}"}]}`,
 			lastResponseOutput: `[{"type":"function_call","id":"fc-1","call_id":"call-other","name":"second","arguments":"{}"}]`,
 			appendInput:        `[{"type":"function_call_output","id":"fco-1","call_id":"call-kept","output":"done"}]`,
+			want:               `[{"type":"function_call","id":"fc-1","call_id":"call-kept","name":"first","arguments":"{}"},{"type":"function_call_output","id":"fco-1","call_id":"call-kept","output":"done"}]`,
 		},
 		{
 			name:               "raw JSON values and escaping",
 			lastRequest:        `{"input":[ {"type":"message","id":"msg-1","content":"<tag> & \\u263a"}, true ]}`,
 			lastResponseOutput: `[null, 42, "line\\nvalue"]`,
 			appendInput:        `[{"id":"last","nested":{"value":[1,2,3]}}]`,
+			want:               `[{"type":"message","id":"msg-1","content":"<tag> & \\u263a"},true,null,42,"line\\nvalue",{"id":"last","nested":{"value":[1,2,3]}}]`,
+		},
+		{
+			name:               "large numbers retain exact JSON values",
+			lastRequest:        `{"input":[9007199254740993,{"id":"n","value":9223372036854775807}]}`,
+			lastResponseOutput: `[18446744073709551615]`,
+			appendInput:        `[{"id":"decimal","value":1.0000000000000000001}]`,
+			want:               `[9007199254740993,{"id":"n","value":9223372036854775807},18446744073709551615,{"id":"decimal","value":1.0000000000000000001}]`,
 		},
 		{
 			name:               "invalid response output remains ignored",
 			lastRequest:        `{"input":[{"id":"first"}]}`,
 			lastResponseOutput: `[{"id":`,
 			appendInput:        `[{"id":"last"}]`,
+			want:               `[{"id":"first"},{"id":"last"}]`,
 		},
 		{
 			name:               "missing previous input and null append",
 			lastRequest:        `{"model":"gpt-5.4"}`,
 			lastResponseOutput: `[{"id":"response"}]`,
 			appendInput:        `null`,
+			want:               `[{"id":"response"}]`,
 		},
 		{
 			name:               "null previous request",
 			lastRequest:        `null`,
 			lastResponseOutput: `[]`,
 			appendInput:        `[{"id":"last"}]`,
+			want:               `[{"id":"last"}]`,
 		},
 		{
 			name:               "duplicate metadata keys follow encoding json",
 			lastRequest:        `{"input":[{"type":"message","type":"function_call","id":"first","id":"fc-1","call_id":"call-other","call_id":"call-kept"}]}`,
 			lastResponseOutput: `[{"type":"function_call","id":"fc-2","call_id":"call-kept"}]`,
 			appendInput:        `[{"type":"function_call_output","id":"fco-1","call_id":"call-kept","output":"done"}]`,
+			want:               `[{"type":"function_call","id":"fc-1","call_id":"call-kept"},{"type":"function_call_output","id":"fco-1","call_id":"call-kept","output":"done"}]`,
 		},
 	}
 
@@ -84,20 +101,22 @@ func TestMergeResponsesWebsocketInputMatchesReferenceSemantics(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
 
-			want, errWant := mergeResponsesWebsocketInputReference([]byte(test.lastRequest), []byte(test.lastResponseOutput), test.appendInput)
-			if errWant != nil {
-				t.Fatalf("reference merge failed: %v", errWant)
+			legacy, errLegacy := mergeResponsesWebsocketInputReference([]byte(test.lastRequest), []byte(test.lastResponseOutput), test.appendInput)
+			if errLegacy != nil {
+				t.Fatalf("legacy merge failed: %v", errLegacy)
 			}
+			assertJSONSemanticallyEqual(t, []byte(legacy), test.want)
+
 			got, errGot := mergeResponsesWebsocketInput([]byte(test.lastRequest), []byte(test.lastResponseOutput), test.appendInput)
 			if errGot != nil {
 				t.Fatalf("mergeResponsesWebsocketInput() error = %v", errGot)
 			}
-			assertJSONSemanticallyEqual(t, got, want)
+			assertJSONSemanticallyEqual(t, []byte(got), test.want)
 		})
 	}
 }
 
-func TestMergeResponsesWebsocketInputMatchesReferenceErrors(t *testing.T) {
+func TestMergeResponsesWebsocketInputReturnsCompatibleErrors(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -105,28 +124,37 @@ func TestMergeResponsesWebsocketInputMatchesReferenceErrors(t *testing.T) {
 		lastRequest        string
 		lastResponseOutput string
 		appendInput        string
+		wantPrefix         string
+		wantSyntaxError    bool
 	}{
-		{name: "invalid previous request", lastRequest: `{"input":`, appendInput: `[]`},
-		{name: "non-array previous input", lastRequest: `{"input":{"id":"item"}}`, appendInput: `[]`},
-		{name: "invalid appended input", lastRequest: `{"input":[]}`, appendInput: `[{"id":`},
-		{name: "non-array appended input", lastRequest: `{"input":[]}`, appendInput: `{"id":"item"}`},
-		{name: "array previous request", lastRequest: `[]`, appendInput: `[]`},
+		{name: "invalid previous request", lastRequest: `{"input":`, appendInput: `[]`, wantPrefix: "invalid previous request input", wantSyntaxError: true},
+		{name: "non-array previous input", lastRequest: `{"input":{"id":"item"}}`, appendInput: `[]`, wantPrefix: "invalid previous request input"},
+		{name: "invalid appended input", lastRequest: `{"input":[]}`, appendInput: `[{"id":`, wantPrefix: "invalid request input", wantSyntaxError: true},
+		{name: "non-array appended input", lastRequest: `{"input":[]}`, appendInput: `{"id":"item"}`, wantPrefix: "invalid request input"},
+		{name: "array previous request", lastRequest: `[]`, appendInput: `[]`, wantPrefix: "invalid previous request input"},
 	}
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
 
-			_, errWant := mergeResponsesWebsocketInputReference([]byte(test.lastRequest), []byte(test.lastResponseOutput), test.appendInput)
 			_, errGot := mergeResponsesWebsocketInput([]byte(test.lastRequest), []byte(test.lastResponseOutput), test.appendInput)
-			if (errGot == nil) != (errWant == nil) {
-				t.Fatalf("error presence differs: got %v, reference %v", errGot, errWant)
-			}
 			if errGot == nil {
 				t.Fatal("expected merge error")
 			}
-			if errGot.Error() != errWant.Error() {
-				t.Fatalf("error differs:\n got: %v\nwant: %v", errGot, errWant)
+			if !strings.HasPrefix(errGot.Error(), test.wantPrefix+": ") {
+				t.Fatalf("error = %q, want prefix %q", errGot, test.wantPrefix+": ")
+			}
+			if test.wantSyntaxError {
+				var syntaxError *json.SyntaxError
+				if !errors.As(errGot, &syntaxError) {
+					t.Fatalf("error cause = %T, want *json.SyntaxError", errGot)
+				}
+				return
+			}
+			var typeError *json.UnmarshalTypeError
+			if !errors.As(errGot, &typeError) {
+				t.Fatalf("error cause = %T, want *json.UnmarshalTypeError", errGot)
 			}
 		})
 	}
@@ -150,7 +178,7 @@ func TestMergeResponsesWebsocketInputMatchesReferenceAcrossGeneratedTranscripts(
 		if errGot != nil {
 			t.Fatalf("iteration %d merge failed: %v", iteration, errGot)
 		}
-		assertJSONSemanticallyEqual(t, got, want)
+		assertJSONSemanticallyEqual(t, []byte(got), want)
 	}
 }
 
@@ -211,41 +239,80 @@ func TestNormalizeResponseSubsequentRequestDetachesSourceBuffers(t *testing.T) {
 }
 
 func TestMergeResponsesWebsocketInputBoundsLargeTranscriptAllocations(t *testing.T) {
-	lastRequest, lastResponseOutput, appendInput := responsesWebsocketLargeTranscriptFixture()
-	inputBytes := len(lastRequest) + len(lastResponseOutput) + len(appendInput)
+	if raceDetectorEnabled {
+		t.Skip("allocation budgets are not meaningful with race detector instrumentation")
+	}
 
-	result := testing.Benchmark(func(b *testing.B) {
-		b.ReportAllocs()
-		for range b.N {
-			merged, errMerge := mergeResponsesWebsocketInput(lastRequest, lastResponseOutput, appendInput)
-			if errMerge != nil {
-				b.Fatalf("mergeResponsesWebsocketInput() error = %v", errMerge)
+	tests := []struct {
+		name        string
+		makeFixture func() ([]byte, []byte, string)
+	}{
+		{name: "single_large_item", makeFixture: responsesWebsocketLargeTranscriptFixture},
+		{name: "many_messages_and_tool_pairs", makeFixture: func() ([]byte, []byte, string) {
+			return responsesWebsocketManyItemsTranscriptFixture(responsesWebsocketLargeTranscriptSize)
+		}},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			lastRequest, lastResponseOutput, appendInput := test.makeFixture()
+			inputBytes := len(lastRequest) + len(lastResponseOutput) + len(appendInput)
+
+			result := testing.Benchmark(func(b *testing.B) {
+				b.SetBytes(int64(inputBytes))
+				b.ReportAllocs()
+				for b.Loop() {
+					merged, errMerge := mergeResponsesWebsocketInput(lastRequest, lastResponseOutput, appendInput)
+					if errMerge != nil {
+						b.Fatalf("mergeResponsesWebsocketInput() error = %v", errMerge)
+					}
+					responsesWebsocketMergedInputSink = merged
+				}
+				responsesWebsocketMergedInputSink = nil
+			})
+
+			const (
+				maxAllocationNumerator   = 3
+				maxAllocationDenominator = 2
+			)
+			maxAllocatedBytes := int64(inputBytes) * maxAllocationNumerator / maxAllocationDenominator
+			t.Logf("merge allocated %d bytes per operation for %d input bytes", result.AllocedBytesPerOp(), inputBytes)
+			if allocatedBytes := result.AllocedBytesPerOp(); allocatedBytes > maxAllocatedBytes {
+				t.Fatalf("merging %d input bytes allocated %d bytes per operation, want at most %d", inputBytes, allocatedBytes, maxAllocatedBytes)
 			}
-			responsesWebsocketMergedInputSink = merged
-		}
-	})
-
-	const maxAllocationMultiple = 2
-	maxAllocatedBytes := int64(inputBytes * maxAllocationMultiple)
-	t.Logf("merge allocated %d bytes per operation for %d input bytes", result.AllocedBytesPerOp(), inputBytes)
-	if allocatedBytes := result.AllocedBytesPerOp(); allocatedBytes > maxAllocatedBytes {
-		t.Fatalf("merging %d input bytes allocated %d bytes per operation, want at most %d", inputBytes, allocatedBytes, maxAllocatedBytes)
+		})
 	}
 }
 
-func BenchmarkNormalizeResponseSubsequentRequestLargeTranscript(b *testing.B) {
-	lastRequest, lastResponseOutput, appendInput := responsesWebsocketTranscriptFixture(responsesWebsocketBenchmarkTranscriptSize)
-	raw := []byte(`{"type":"response.create","input":` + appendInput + `}`)
+func BenchmarkNormalizeResponseSubsequentRequestTranscripts(b *testing.B) {
+	tests := []struct {
+		name        string
+		makeFixture func() ([]byte, []byte, string)
+	}{
+		{name: "single_large_item", makeFixture: func() ([]byte, []byte, string) {
+			return responsesWebsocketTranscriptFixture(responsesWebsocketBenchmarkTranscriptSize)
+		}},
+		{name: "many_messages_and_tool_pairs", makeFixture: func() ([]byte, []byte, string) {
+			return responsesWebsocketManyItemsTranscriptFixture(responsesWebsocketBenchmarkTranscriptSize)
+		}},
+	}
 
-	b.SetBytes(int64(len(lastRequest) + len(lastResponseOutput) + len(raw)))
-	b.ReportAllocs()
-	b.ResetTimer()
-	for range b.N {
-		normalized, _, errMessage := normalizeResponseSubsequentRequest(raw, lastRequest, lastResponseOutput, "", nil, false, false)
-		if errMessage != nil {
-			b.Fatalf("normalizeResponseSubsequentRequest() error = %v", errMessage.Error)
-		}
-		responsesWebsocketNormalizedRequestSink = normalized
+	for _, test := range tests {
+		b.Run(test.name, func(b *testing.B) {
+			lastRequest, lastResponseOutput, appendInput := test.makeFixture()
+			raw := []byte(`{"type":"response.create","input":` + appendInput + `}`)
+
+			b.SetBytes(int64(len(lastRequest) + len(lastResponseOutput) + len(raw)))
+			b.ReportAllocs()
+			for b.Loop() {
+				normalized, _, errMessage := normalizeResponseSubsequentRequest(raw, lastRequest, lastResponseOutput, "", nil, false, false)
+				if errMessage != nil {
+					b.Fatalf("normalizeResponseSubsequentRequest() error = %v", errMessage.Error)
+				}
+				responsesWebsocketNormalizedRequestSink = normalized
+			}
+			responsesWebsocketNormalizedRequestSink = nil
+		})
 	}
 }
 
@@ -260,6 +327,53 @@ func responsesWebsocketTranscriptFixture(transcriptSize int) ([]byte, []byte, st
 	return lastRequest, lastResponseOutput, appendInput
 }
 
+func responsesWebsocketManyItemsTranscriptFixture(transcriptSize int) ([]byte, []byte, string) {
+	const (
+		messageCount  = 512
+		toolPairCount = 128
+	)
+	contentSize := max(transcriptSize/messageCount, 1)
+	content := strings.Repeat("x", contentSize)
+
+	var lastRequest strings.Builder
+	lastRequest.Grow(transcriptSize + messageCount*96)
+	lastRequest.WriteString(`{"model":"gpt-5.4","instructions":"coding","stream":true,"input":[`)
+	for index := range messageCount {
+		if index > 0 {
+			lastRequest.WriteByte(',')
+		}
+		fmt.Fprintf(&lastRequest, `{"type":"message","id":"msg-%d","role":"user","content":"%s"}`, index, content)
+	}
+	lastRequest.WriteString(`]}`)
+
+	var lastResponseOutput strings.Builder
+	lastResponseOutput.Grow(toolPairCount * 112)
+	lastResponseOutput.WriteByte('[')
+	for index := range toolPairCount {
+		if index > 0 {
+			lastResponseOutput.WriteByte(',')
+		}
+		fmt.Fprintf(&lastResponseOutput, `{"type":"function_call","id":"fc-%d","call_id":"call-%d","name":"lookup","arguments":"{}"}`, index, index)
+	}
+	lastResponseOutput.WriteByte(']')
+
+	var appendInput strings.Builder
+	appendInput.Grow(toolPairCount * 104)
+	appendInput.WriteByte('[')
+	for index := range toolPairCount {
+		if index > 0 {
+			appendInput.WriteByte(',')
+		}
+		fmt.Fprintf(&appendInput, `{"type":"function_call_output","id":"fco-%d","call_id":"call-%d","output":"done"}`, index, index)
+	}
+	appendInput.WriteByte(']')
+
+	return []byte(lastRequest.String()), []byte(lastResponseOutput.String()), appendInput.String()
+}
+
+// The legacy oracle detects broad behavior drift from the implementation that
+// preceded the allocation optimization. Explicit compatibility scenarios above
+// remain the independent specification for important merge behavior.
 type referenceResponsesWebsocketInputItem struct {
 	raw      json.RawMessage
 	itemType string
@@ -393,12 +507,22 @@ func dedupeReferenceResponsesWebsocketInputItems(items []referenceResponsesWebso
 
 func assertJSONSemanticallyEqual(t *testing.T, got []byte, want string) {
 	t.Helper()
+	if !json.Valid(got) {
+		t.Fatalf("invalid actual JSON:\n%s", got)
+	}
 	var gotValue any
-	if errUnmarshal := json.Unmarshal(got, &gotValue); errUnmarshal != nil {
+	gotDecoder := json.NewDecoder(bytes.NewReader(got))
+	gotDecoder.UseNumber()
+	if errUnmarshal := gotDecoder.Decode(&gotValue); errUnmarshal != nil {
 		t.Fatalf("invalid actual JSON: %v\n%s", errUnmarshal, got)
 	}
+	if !json.Valid([]byte(want)) {
+		t.Fatalf("invalid expected JSON:\n%s", want)
+	}
 	var wantValue any
-	if errUnmarshal := json.Unmarshal([]byte(want), &wantValue); errUnmarshal != nil {
+	wantDecoder := json.NewDecoder(strings.NewReader(want))
+	wantDecoder.UseNumber()
+	if errUnmarshal := wantDecoder.Decode(&wantValue); errUnmarshal != nil {
 		t.Fatalf("invalid reference JSON: %v\n%s", errUnmarshal, want)
 	}
 	if !reflect.DeepEqual(gotValue, wantValue) {
