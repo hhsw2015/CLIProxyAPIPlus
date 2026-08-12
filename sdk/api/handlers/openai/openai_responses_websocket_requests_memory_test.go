@@ -95,6 +95,27 @@ func TestMergeResponsesWebsocketInputMatchesCompatibilityScenarios(t *testing.T)
 			appendInput:        `[{"type":"function_call_output","id":"fco-1","call_id":"call-kept","output":"done"}]`,
 			want:               `[{"type":"function_call","id":"fc-1","call_id":"call-kept"},{"type":"function_call_output","id":"fco-1","call_id":"call-kept","output":"done"}]`,
 		},
+		{
+			name:               "duplicate previous input keeps last array",
+			lastRequest:        `{"input":[{"id":"old"}],"input":[{"id":"new"}]}`,
+			lastResponseOutput: `[]`,
+			appendInput:        `[]`,
+			want:               `[{"id":"new"}]`,
+		},
+		{
+			name:               "previous input field matching is case insensitive",
+			lastRequest:        `{"Input":[{"id":"old"}],"INPUT":[{"id":"new"}]}`,
+			lastResponseOutput: `[]`,
+			appendInput:        `[]`,
+			want:               `[{"id":"new"}]`,
+		},
+		{
+			name:               "last duplicate null clears previous input",
+			lastRequest:        `{"input":[{"id":"old"}],"input":null}`,
+			lastResponseOutput: `[{"id":"response"}]`,
+			appendInput:        `[]`,
+			want:               `[{"id":"response"}]`,
+		},
 	}
 
 	for _, test := range tests {
@@ -132,6 +153,8 @@ func TestMergeResponsesWebsocketInputReturnsCompatibleErrors(t *testing.T) {
 		{name: "invalid appended input", lastRequest: `{"input":[]}`, appendInput: `[{"id":`, wantPrefix: "invalid request input", wantSyntaxError: true},
 		{name: "non-array appended input", lastRequest: `{"input":[]}`, appendInput: `{"id":"item"}`, wantPrefix: "invalid request input"},
 		{name: "array previous request", lastRequest: `[]`, appendInput: `[]`, wantPrefix: "invalid previous request input"},
+		{name: "last duplicate previous input is non-array", lastRequest: `{"input":[],"input":{"id":"item"}}`, appendInput: `[]`, wantPrefix: "invalid previous request input"},
+		{name: "earlier non-array previous input remains invalid", lastRequest: `{"input":{"id":"item"},"input":[]}`, appendInput: `[]`, wantPrefix: "invalid previous request input"},
 	}
 
 	for _, test := range tests {

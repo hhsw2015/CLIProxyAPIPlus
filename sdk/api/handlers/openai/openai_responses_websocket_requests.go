@@ -374,12 +374,29 @@ func responsesWebsocketPreviousInputNoCopy(lastRequest []byte) (gjson.Result, er
 		return gjson.Result{}, responsesWebsocketPreviousInputDecodeError(lastRequest)
 	}
 
-	input := root.Get("input")
-	if !input.Exists() || input.Type == gjson.Null {
-		return gjson.Parse("[]"), nil
-	}
-	if !input.IsArray() {
+	var input gjson.Result
+	inputFound := false
+	invalidInput := false
+	root.ForEach(func(key, value gjson.Result) bool {
+		if !strings.EqualFold(key.String(), "input") {
+			return true
+		}
+		// encoding/json processes matching duplicate fields in source order,
+		// retains the last value, and still reports a type error from any
+		// incompatible duplicate. Preserve those semantics without copying the
+		// selected array out of the caller-owned request buffer.
+		inputFound = true
+		input = value
+		if value.Type != gjson.Null && !value.IsArray() {
+			invalidInput = true
+		}
+		return true
+	})
+	if invalidInput {
 		return gjson.Result{}, responsesWebsocketPreviousInputDecodeError(lastRequest)
+	}
+	if !inputFound || input.Type == gjson.Null {
+		return gjson.Parse("[]"), nil
 	}
 	return input, nil
 }
