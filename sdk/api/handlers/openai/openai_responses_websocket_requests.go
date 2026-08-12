@@ -443,12 +443,13 @@ func appendResponsesWebsocketMergeInputResult(items []responsesWebsocketMergeInp
 		item := responsesWebsocketMergeInputItem{raw: rawItem.Raw}
 		if rawItem.IsObject() {
 			rawItem.ForEach(func(key, value gjson.Result) bool {
-				switch key.String() {
-				case "type":
+				metadataKey := key.String()
+				switch {
+				case strings.EqualFold(metadataKey, "type"):
 					item.itemType = strings.TrimSpace(value.String())
-				case "id":
+				case strings.EqualFold(metadataKey, "id"):
 					item.id = strings.TrimSpace(value.String())
-				case "call_id":
+				case strings.EqualFold(metadataKey, "call_id"):
 					item.callID = strings.TrimSpace(value.String())
 				}
 				return true

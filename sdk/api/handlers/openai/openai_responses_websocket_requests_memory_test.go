@@ -96,6 +96,27 @@ func TestMergeResponsesWebsocketInputMatchesCompatibilityScenarios(t *testing.T)
 			want:               `[{"type":"function_call","id":"fc-1","call_id":"call-kept"},{"type":"function_call_output","id":"fco-1","call_id":"call-kept","output":"done"}]`,
 		},
 		{
+			name:               "case insensitive metadata dedupes function calls",
+			lastRequest:        `{"input":[{"Type":"function_call","ID":"fc-old","CALL_ID":"call-1","name":"first"}]}`,
+			lastResponseOutput: `[{"type":"function_call","id":"fc-new","call_id":"call-1","name":"second"}]`,
+			appendInput:        `[{"type":"function_call_output","id":"fco-1","call_id":"call-1","output":"done"}]`,
+			want:               `[{"Type":"function_call","ID":"fc-old","CALL_ID":"call-1","name":"first"},{"type":"function_call_output","id":"fco-1","call_id":"call-1","output":"done"}]`,
+		},
+		{
+			name:               "case insensitive metadata keeps referenced duplicate id",
+			lastRequest:        `{"input":[{"Type":"function_call","Id":"fc-1","Call_Id":"call-kept","name":"first"}]}`,
+			lastResponseOutput: `[{"type":"function_call","id":"fc-1","call_id":"call-other","name":"second"}]`,
+			appendInput:        `[{"type":"function_call_output","id":"fco-1","call_id":"call-kept","output":"done"}]`,
+			want:               `[{"Type":"function_call","Id":"fc-1","Call_Id":"call-kept","name":"first"},{"type":"function_call_output","id":"fco-1","call_id":"call-kept","output":"done"}]`,
+		},
+		{
+			name:               "mixed case duplicate metadata keeps last values",
+			lastRequest:        `{"input":[{"type":"message","TYPE":"function_call","id":"first","ID":"fc-1","call_id":"call-other","CALL_ID":"call-kept"}]}`,
+			lastResponseOutput: `[{"type":"function_call","id":"fc-2","call_id":"call-kept"}]`,
+			appendInput:        `[{"type":"function_call_output","id":"fco-1","call_id":"call-kept","output":"done"}]`,
+			want:               `[{"type":"message","TYPE":"function_call","id":"first","ID":"fc-1","call_id":"call-other","CALL_ID":"call-kept"},{"type":"function_call_output","id":"fco-1","call_id":"call-kept","output":"done"}]`,
+		},
+		{
 			name:               "duplicate previous input keeps last array",
 			lastRequest:        `{"input":[{"id":"old"}],"input":[{"id":"new"}]}`,
 			lastResponseOutput: `[]`,
