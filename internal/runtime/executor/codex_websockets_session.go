@@ -164,13 +164,17 @@ func (s *codexWebsocketSession) writeMessage(conn *websocket.Conn, msgType int, 
 	return conn.WriteMessage(msgType, payload)
 }
 
-func (s *codexWebsocketSession) markMultiAgentV2Optimized(conn *websocket.Conn) {
+func (s *codexWebsocketSession) setMultiAgentV2Optimized(conn *websocket.Conn, optimized bool) {
 	if s == nil || conn == nil {
 		return
 	}
 	s.connMu.Lock()
 	if s.conn == conn {
-		s.multiAgentV2OptimizedConn = conn
+		if optimized {
+			s.multiAgentV2OptimizedConn = conn
+		} else {
+			s.multiAgentV2OptimizedConn = nil
+		}
 	}
 	s.connMu.Unlock()
 }

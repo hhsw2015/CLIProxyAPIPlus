@@ -251,8 +251,8 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 		}
 	}
 
-	if optimizeMultiAgentV2 {
-		sess.markMultiAgentV2Optimized(conn)
+	if optimizeMultiAgentV2 || multiAgentV2Conflict {
+		sess.setMultiAgentV2Optimized(conn, optimizeMultiAgentV2 && !multiAgentV2Conflict)
 	}
 
 	outputItemsByIndex := make(map[int64][]byte)

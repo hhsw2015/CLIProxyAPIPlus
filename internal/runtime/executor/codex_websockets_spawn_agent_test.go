@@ -27,7 +27,7 @@ func TestCodexWebsocketsExecutorRestoresMultiAgentV2NamespaceAcrossIncrementalTu
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
-			capturedPayload := make(chan []byte, 3)
+			capturedPayload := make(chan []byte, 6)
 			var connectionCount atomic.Int32
 			var requestCount atomic.Int32
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
@@ -51,7 +51,7 @@ func TestCodexWebsocketsExecutorRestoresMultiAgentV2NamespaceAcrossIncrementalTu
 						t.Errorf("write websocket response: %v", errWrite)
 						return
 					}
-					if turn == 3 {
+					if turn == 6 {
 						return
 					}
 				}
@@ -125,6 +125,31 @@ func TestCodexWebsocketsExecutorRestoresMultiAgentV2NamespaceAcrossIncrementalTu
 			if !strings.Contains(string(conflictingClientPayload), `"namespace":"collaboration-optimize"`) {
 				t.Fatalf("user-defined collaboration-optimize namespace was rewritten: %s", conflictingClientPayload)
 			}
+
+			fourthRequest := []byte(`{"model":"gpt-5.4","previous_response_id":"resp_3","input":[{"type":"function_call_output","call_id":"call_3","output":"done"}]}`)
+			fourthClientPayload := execute(fourthRequest)
+			fourthUpstreamPayload := <-capturedPayload
+			if strings.Contains(string(fourthUpstreamPayload), "collaboration") || strings.Contains(string(fourthUpstreamPayload), "spawn_agent") {
+				t.Fatalf("post-conflict incremental upstream request unexpectedly contains collaboration tools: %s", fourthUpstreamPayload)
+			}
+			if !strings.Contains(string(fourthClientPayload), `"namespace":"collaboration-optimize"`) {
+				t.Fatalf("user-defined namespace was rewritten on the post-conflict incremental turn: %s", fourthClientPayload)
+			}
+
+			fifthClientPayload := execute(codexSpawnAgentTestPayload())
+			fifthUpstreamPayload := <-capturedPayload
+			if namespace := gjson.GetBytes(fifthUpstreamPayload, "input.0.tools.0.name").String(); namespace != "collaboration-optimize" {
+				t.Fatalf("re-enabled upstream namespace = %q, want collaboration-optimize", namespace)
+			}
+			assertCodexSpawnAgentClientNamespace(t, fifthClientPayload)
+
+			sixthRequest := []byte(`{"model":"gpt-5.4","previous_response_id":"resp_5","input":[{"type":"function_call_output","call_id":"call_5","output":"done"}]}`)
+			sixthClientPayload := execute(sixthRequest)
+			sixthUpstreamPayload := <-capturedPayload
+			if strings.Contains(string(sixthUpstreamPayload), "collaboration") || strings.Contains(string(sixthUpstreamPayload), "spawn_agent") {
+				t.Fatalf("re-enabled incremental upstream request unexpectedly contains collaboration tools: %s", sixthUpstreamPayload)
+			}
+			assertCodexSpawnAgentClientNamespace(t, sixthClientPayload)
 
 			if got := connectionCount.Load(); got != 1 {
 				t.Fatalf("upstream websocket connections = %d, want 1", got)

@@ -258,8 +258,8 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 		}
 	}
 
-	if optimizeMultiAgentV2 {
-		sess.markMultiAgentV2Optimized(conn)
+	if optimizeMultiAgentV2 || multiAgentV2Conflict {
+		sess.setMultiAgentV2Optimized(conn, optimizeMultiAgentV2 && !multiAgentV2Conflict)
 	}
 
 	out := make(chan cliproxyexecutor.StreamChunk)
