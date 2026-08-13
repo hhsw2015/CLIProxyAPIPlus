@@ -521,6 +521,43 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		helps.RecordAPIResponseError(ctx, e.cfg, err)
 		return resp, err
 	}
+	// Vertex per-project quota is per-minute; a large request can 429 one
+	// project while its 4 siblings in the pool are fine. Fail over WITHIN the
+	// same auth to the next project before the conductor gives up and drops to
+	// a lower-priority (possibly broken) provider. Only retries on 429, only
+	// for vertex, bounded by the pool size.
+	if vertexMode && httpResp.StatusCode == http.StatusTooManyRequests {
+		pool := vertexClaudeProjectList(auth, baseModel)
+		for i := 0; i < len(pool) && httpResp.StatusCode == http.StatusTooManyRequests; i++ {
+			nextProject := pool[i]
+			location := vertexClaudeLocation(auth)
+			retryURL := strings.Replace(
+				buildVertexClaudeURL(location, nextProject, baseModel),
+				":streamRawPredict", ":rawPredict", 1,
+			)
+			if retryURL == "" || retryURL == url {
+				continue
+			}
+			retryReq, rErr := http.NewRequestWithContext(ctx, http.MethodPost, retryURL, bytes.NewReader(bodyForUpstream))
+			if rErr != nil {
+				break
+			}
+			token, tokErr := vertexClaudeToken(ctx, e.cfg, auth)
+			if tokErr != nil {
+				break
+			}
+			applyVertexClaudeHeaders(retryReq, token)
+			_ = httpResp.Body.Close()
+			helps.LogWithRequestID(ctx).Warnf("[vertex-claude] 429 on prior project, retrying model=%s project=%s (%d/%d)", baseModel, nextProject, i+1, len(pool))
+			retryResp, retryErr := helps.HeadroomDo(httpClient, retryReq)
+			if retryErr != nil {
+				helps.RecordAPIResponseError(ctx, e.cfg, retryErr)
+				return resp, retryErr
+			}
+			httpResp = retryResp
+			url = retryURL
+		}
+	}
 	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		// Decompress error responses — pass the Content-Encoding value (may be empty)
@@ -795,6 +832,37 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	if err != nil {
 		helps.RecordAPIResponseError(ctx, e.cfg, err)
 		return nil, err
+	}
+	// Vertex per-project quota fail-over (streaming path). Same rationale as
+	// the non-stream path: a 429 on one project shouldn't drop the whole
+	// request to a lower-priority provider while sibling projects are fine.
+	// Safe to retry pre-stream: at 429 no SSE bytes have been consumed.
+	if vertexMode && httpResp.StatusCode == http.StatusTooManyRequests {
+		pool := vertexClaudeProjectList(auth, baseModel)
+		for i := 0; i < len(pool) && httpResp.StatusCode == http.StatusTooManyRequests; i++ {
+			retryURL := buildVertexClaudeURL(vertexClaudeLocation(auth), pool[i], baseModel)
+			if retryURL == "" || retryURL == url {
+				continue
+			}
+			retryReq, rErr := http.NewRequestWithContext(ctx, http.MethodPost, retryURL, bytes.NewReader(bodyForUpstream))
+			if rErr != nil {
+				break
+			}
+			token, tokErr := vertexClaudeToken(ctx, e.cfg, auth)
+			if tokErr != nil {
+				break
+			}
+			applyVertexClaudeHeaders(retryReq, token)
+			_ = httpResp.Body.Close()
+			helps.LogWithRequestID(ctx).Warnf("[vertex-claude] 429 on prior project, retrying (stream) model=%s project=%s (%d/%d)", baseModel, pool[i], i+1, len(pool))
+			retryResp, retryErr := helps.HeadroomDo(httpClient, retryReq)
+			if retryErr != nil {
+				helps.RecordAPIResponseError(ctx, e.cfg, retryErr)
+				return nil, retryErr
+			}
+			httpResp = retryResp
+			url = retryURL
+		}
 	}
 	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {

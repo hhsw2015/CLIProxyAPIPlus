@@ -98,6 +98,56 @@ func pickVertexClaudeProject(auth *cliproxyauth.Auth, model string) string {
 	return projects[cursor%uint64(len(projects))]
 }
 
+// vertexClaudeProjectList returns the full ordered project pool for an auth+model.
+// Used by the 429-retry loop so a single request can fail over to another
+// project in the same pool instead of falling through to a lower-priority
+// (and possibly broken) provider. The list starts at the round-robin cursor
+// position so retries spread load rather than always hammering project[0].
+func vertexClaudeProjectList(auth *cliproxyauth.Auth, model string) []string {
+	if auth == nil || auth.Attributes == nil {
+		return nil
+	}
+	poolKey := "model-project-pool"
+	if model != "" {
+		if per := auth.Attributes["model-project-pool/"+model]; per != "" {
+			poolKey = "model-project-pool/" + model
+		}
+	}
+	raw := strings.TrimSpace(auth.Attributes[poolKey])
+	if raw == "" {
+		if p := strings.TrimSpace(auth.Attributes["project-id"]); p != "" {
+			return []string{p}
+		}
+		return nil
+	}
+	var projects []string
+	for _, p := range strings.Split(raw, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			projects = append(projects, p)
+		}
+	}
+	if len(projects) <= 1 {
+		return projects
+	}
+	// Rotate the list so it begins at the current round-robin cursor. This
+	// keeps load spread across projects while still giving every retry a
+	// distinct target.
+	cursorKey := auth.ID + "/" + model
+	var start uint64
+	if v, ok := vertexProjectCursor.Load(cursorKey); ok {
+		start = v.(uint64) + 1
+	} else {
+		start = uint64(rand.Int63())
+	}
+	vertexProjectCursor.Store(cursorKey, start)
+	n := uint64(len(projects))
+	rotated := make([]string, 0, len(projects))
+	for i := uint64(0); i < n; i++ {
+		rotated = append(rotated, projects[(start+i)%n])
+	}
+	return rotated
+}
+
 // buildVertexClaudeURL constructs the Vertex AI Claude streaming endpoint URL.
 // Special case: location "global" uses the region-less aiplatform.googleapis.com
 // host — the global endpoint carries a global quota pool that (as of 2025) is
