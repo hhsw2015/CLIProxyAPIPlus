@@ -383,7 +383,12 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	// preamble both bloats input tokens and shifts the cache_control breakpoint —
 	// invalidating the upstream prompt-cache hash. Header sanitization + wire
 	// format already do all the impersonation mirage needs.
-	if !isMirageAuth(auth) {
+	// Skip cloaking for mirage AND vertex. Mirage needs a pristine wire body;
+	// vertex authenticates via GCP service-account, so the Claude-Code cloak
+	// preamble (used only to look legit to api.anthropic.com and dodge bans) is
+	// pointless there — worse, it injects a ~1900-token non-cacheable prefix
+	// that busts the per-project prompt cache (cache_read stayed 0).
+	if !isMirageAuth(auth) && !isVertexClaudeAuth(auth) {
 		body, err = applyCloaking(ctx, e.cfg, auth, body, baseModel, apiKey)
 		if err != nil {
 			return resp, err
@@ -711,10 +716,15 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	}
 
 	// Apply cloaking (system prompt injection, fake user ID, sensitive word obfuscation)
-	// based on client type and configuration.
-	body, err = applyCloaking(ctx, e.cfg, auth, body, baseModel, apiKey)
-	if err != nil {
-		return nil, err
+	// based on client type and configuration. Skipped for vertex: SA-authenticated
+	// requests don't need the Claude-Code cloak, and its ~1900-token preamble
+	// otherwise busts the per-project prompt cache. (Mirage is skipped upstream
+	// of this stream path via its own body pipeline.)
+	if !isVertexClaudeAuth(auth) {
+		body, err = applyCloaking(ctx, e.cfg, auth, body, baseModel, apiKey)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
