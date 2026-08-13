@@ -472,11 +472,13 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 			return resp, fmt.Errorf("vertex-claude: no project id available for model %s", baseModel)
 		}
 		location := vertexClaudeLocation(auth)
-		// Non-streaming uses :rawPredict instead of :streamRawPredict.
-		url = strings.Replace(
-			buildVertexClaudeURL(location, project, baseModel),
-			":streamRawPredict", ":rawPredict", 1,
-		)
+		// Use :streamRawPredict even for a non-streaming client request, then
+		// aggregate the SSE into a single message below. Vertex's :rawPredict
+		// has a ~4-minute server response deadline that EOFs long generations
+		// (large input + big max_tokens + high thinking effort); the streaming
+		// endpoint has no such cap because incremental tokens keep the
+		// connection alive.
+		url = buildVertexClaudeURL(location, project, baseModel)
 		if url == "" {
 			return resp, fmt.Errorf("vertex-claude: failed to build URL (location=%s project=%s model=%s)", location, project, baseModel)
 		}
@@ -539,10 +541,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		for i := 0; i < len(pool) && httpResp.StatusCode == http.StatusTooManyRequests; i++ {
 			nextProject := pool[i]
 			location := vertexClaudeLocation(auth)
-			retryURL := strings.Replace(
-				buildVertexClaudeURL(location, nextProject, baseModel),
-				":streamRawPredict", ":rawPredict", 1,
-			)
+			retryURL := buildVertexClaudeURL(location, nextProject, baseModel)
 			if retryURL == "" || retryURL == url {
 				continue
 			}
@@ -636,6 +635,14 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		return resp, err
 	}
 	helps.AppendAPIResponseChunk(ctx, e.cfg, data)
+	// Vertex non-stream requests are served over :streamRawPredict (to dodge
+	// the :rawPredict 4-minute deadline), so the body is SSE. Aggregate it back
+	// into the single Messages JSON the non-streaming client expects.
+	if vertexMode && !stream {
+		if aggregated, ok := aggregateClaudeSSEToMessage(data); ok {
+			data = aggregated
+		}
+	}
 	if stream {
 		if errValidate := validateClaudeStreamingResponse(data); errValidate != nil {
 			helps.RecordAPIResponseError(ctx, e.cfg, errValidate)

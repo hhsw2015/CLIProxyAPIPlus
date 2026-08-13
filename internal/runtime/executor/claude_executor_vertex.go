@@ -1,6 +1,8 @@
 package executor
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"encoding/base64"
 	"fmt"
@@ -11,12 +13,140 @@ import (
 	"sync/atomic"
 
 	log "github.com/sirupsen/logrus"
+	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 	"golang.org/x/oauth2/google"
 
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 )
+
+// aggregateClaudeSSEToMessage reconstructs a single Anthropic Messages JSON
+// object from an SSE event stream (the output of :streamRawPredict). Used so a
+// non-streaming client request can be served over the streaming endpoint —
+// which dodges Vertex's ~4-minute :rawPredict server deadline that EOFs long
+// generations (large input + big max_tokens + high thinking effort).
+//
+// It handles the standard event sequence: message_start (message shell +
+// initial usage), content_block_start/delta/stop (text, thinking, tool_use),
+// message_delta (stop_reason, stop_sequence, output usage), message_stop.
+func aggregateClaudeSSEToMessage(sse []byte) ([]byte, bool) {
+	var msg []byte
+	// content block accumulators indexed by block index.
+	type blockAcc struct {
+		start   []byte // the content_block object from content_block_start
+		text    strings.Builder
+		partial strings.Builder // input_json_delta for tool_use
+	}
+	blocks := map[int]*blockAcc{}
+	maxIndex := -1
+	sawStart := false
+
+	scanner := bufio.NewScanner(bytes.NewReader(sse))
+	scanner.Buffer(make([]byte, 0, 1024*1024), 64*1024*1024)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if !strings.HasPrefix(line, "data:") {
+			continue
+		}
+		payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		if payload == "" || payload == "[DONE]" {
+			continue
+		}
+		typ := gjson.GetBytes([]byte(payload), "type").String()
+		switch typ {
+		case "message_start":
+			m := gjson.GetBytes([]byte(payload), "message")
+			if m.Exists() {
+				msg = []byte(m.Raw)
+				sawStart = true
+			}
+		case "content_block_start":
+			idx := int(gjson.GetBytes([]byte(payload), "index").Int())
+			cb := gjson.GetBytes([]byte(payload), "content_block")
+			acc := &blockAcc{}
+			if cb.Exists() {
+				acc.start = []byte(cb.Raw)
+			}
+			blocks[idx] = acc
+			if idx > maxIndex {
+				maxIndex = idx
+			}
+		case "content_block_delta":
+			idx := int(gjson.GetBytes([]byte(payload), "index").Int())
+			acc := blocks[idx]
+			if acc == nil {
+				acc = &blockAcc{}
+				blocks[idx] = acc
+				if idx > maxIndex {
+					maxIndex = idx
+				}
+			}
+			d := gjson.GetBytes([]byte(payload), "delta")
+			switch d.Get("type").String() {
+			case "text_delta":
+				acc.text.WriteString(d.Get("text").String())
+			case "thinking_delta":
+				acc.text.WriteString(d.Get("thinking").String())
+			case "input_json_delta":
+				acc.partial.WriteString(d.Get("partial_json").String())
+			case "signature_delta":
+				// signature carried on the block; fold into start below.
+				if acc.start != nil {
+					acc.start, _ = sjson.SetBytes(acc.start, "signature", d.Get("signature").String())
+				}
+			}
+		case "message_delta":
+			if msg == nil {
+				continue
+			}
+			if sr := gjson.GetBytes([]byte(payload), "delta.stop_reason"); sr.Exists() {
+				msg, _ = sjson.SetBytes(msg, "stop_reason", sr.Value())
+			}
+			if ss := gjson.GetBytes([]byte(payload), "delta.stop_sequence"); ss.Exists() {
+				msg, _ = sjson.SetBytes(msg, "stop_sequence", ss.Value())
+			}
+			// Merge output usage counters.
+			gjson.GetBytes([]byte(payload), "usage").ForEach(func(k, v gjson.Result) bool {
+				msg, _ = sjson.SetBytes(msg, "usage."+k.String(), v.Value())
+				return true
+			})
+		}
+	}
+	if !sawStart || msg == nil {
+		return nil, false
+	}
+
+	// Rebuild content array in index order, folding accumulated text/json.
+	content := []byte(`[]`)
+	for i := 0; i <= maxIndex; i++ {
+		acc := blocks[i]
+		if acc == nil || acc.start == nil {
+			continue
+		}
+		blk := acc.start
+		btype := gjson.GetBytes(blk, "type").String()
+		switch btype {
+		case "text", "thinking":
+			field := "text"
+			if btype == "thinking" {
+				field = "thinking"
+			}
+			blk, _ = sjson.SetBytes(blk, field, acc.text.String())
+		case "tool_use":
+			raw := strings.TrimSpace(acc.partial.String())
+			if raw == "" {
+				raw = "{}"
+			}
+			if gjson.Valid(raw) {
+				blk, _ = sjson.SetRawBytes(blk, "input", []byte(raw))
+			}
+		}
+		content, _ = sjson.SetRawBytes(content, "-1", blk)
+	}
+	msg, _ = sjson.SetRawBytes(msg, "content", content)
+	return msg, true
+}
 
 // isVertexClaudeAuth returns true if the auth entry is configured for Vertex AI Claude.
 func isVertexClaudeAuth(auth *cliproxyauth.Auth) bool {
