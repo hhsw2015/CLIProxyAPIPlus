@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/sjson"
@@ -60,6 +61,28 @@ var vertexProjectCursor sync.Map // key auth.ID+"/"+model → uint64 counter
 // rememberVertexSessionProject / the executor's 429 retry loop).
 var vertexSessionProject sync.Map // key sessionID+"/"+model → project string
 
+// vertexSessionProjectCount bounds vertexSessionProject so long-lived servers
+// don't leak one entry per distinct session forever. At the cap the whole map
+// is cleared — worst case active sessions take one round-robin pick then
+// re-pin, a negligible one-request cache miss.
+var vertexSessionProjectCount int64
+
+const vertexSessionProjectCap = 50000
+
+func storeVertexSessionProject(key, project string) {
+	if _, loaded := vertexSessionProject.LoadOrStore(key, project); loaded {
+		vertexSessionProject.Store(key, project)
+		return
+	}
+	if atomic.AddInt64(&vertexSessionProjectCount, 1) > vertexSessionProjectCap {
+		vertexSessionProject.Range(func(k, _ any) bool {
+			vertexSessionProject.Delete(k)
+			return true
+		})
+		atomic.StoreInt64(&vertexSessionProjectCount, 0)
+	}
+}
+
 func vertexSessionKey(ctx context.Context, model string) string {
 	sid := strings.TrimSpace(cliproxyauth.ExecutorSessionIDFromContext(ctx))
 	if sid == "" {
@@ -76,7 +99,7 @@ func rememberVertexSessionProject(ctx context.Context, model, project string) {
 		return
 	}
 	if key := vertexSessionKey(ctx, model); key != "" {
-		vertexSessionProject.Store(key, project)
+		storeVertexSessionProject(key, project)
 	}
 }
 
@@ -149,7 +172,7 @@ func pickVertexClaudeProject(ctx context.Context, auth *cliproxyauth.Auth, model
 			h *= 1099511628211
 		}
 		chosen := projects[h%uint64(len(projects))]
-		vertexSessionProject.Store(key, chosen)
+		storeVertexSessionProject(key, chosen)
 		return chosen
 	}
 

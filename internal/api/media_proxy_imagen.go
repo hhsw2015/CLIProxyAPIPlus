@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os/exec"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -72,10 +73,20 @@ func (s *Server) handleVertexImagen(c *gin.Context, modelName string, body []byt
 		"https://%s-aiplatform.googleapis.com/v1/projects/%s/locations/%s/publishers/google/models/%s:predict",
 		region, project, region, modelName,
 	)
-	req, _ := http.NewRequestWithContext(c.Request.Context(), http.MethodPost, upstreamURL, bytes.NewReader(vBody))
+	req, reqErr := http.NewRequestWithContext(c.Request.Context(), http.MethodPost, upstreamURL, bytes.NewReader(vBody))
+	if reqErr != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": gin.H{
+			"message": fmt.Sprintf("imagen: build upstream request: %v", reqErr),
+			"type":    "server_error",
+		}})
+		return true
+	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
 
+	// Bounded non-streaming image call: Imagen :predict returns a single JSON
+	// blob (no SSE), so a hard ceiling here can't truncate a live stream. 90s
+	// covers the slowest ultra-model generation with headroom.
 	client := &http.Client{Timeout: 90 * time.Second}
 	resp, doErr := client.Do(req)
 	if doErr != nil {
@@ -114,16 +125,10 @@ func (s *Server) findImagenEntry(modelName string) (*geminiImagenEntry, string, 
 		if region == "" {
 			continue
 		}
-		// Match model in ModelProjectPool.
+		// Match model in ModelProjectPool. No pool → this entry can't serve
+		// the model; skip to the next.
 		projects := e.ModelProjectPool[modelName]
 		if len(projects) == 0 {
-			// Also try Models[].Name / Alias for parity.
-			for _, m := range e.Models {
-				if strings.EqualFold(m.Name, modelName) || strings.EqualFold(m.Alias, modelName) {
-					// No pool → fall through with empty projects, skip.
-					break
-				}
-			}
 			continue
 		}
 		// Round-robin naive: pick first. CPA session-affinity happens at the
@@ -144,9 +149,21 @@ type geminiImagenEntry struct {
 	VertexLocation string
 }
 
-// mintGCPToken exchanges a service-account JWT bearer for an OAuth access token.
-// Uses curl subprocess (Python-side google-auth is slow on macOS; curl is fine
-// on Linux too). Falls back to inline http.Client if curl absent.
+// imagenTokenCache caches minted OAuth tokens per SA client_email so we don't
+// sign a JWT + round-trip Google's token endpoint on every image request
+// (adds 100-400ms and can itself get throttled under bursts). Tokens are
+// valid ~1h; we reuse until 5 min before expiry.
+type cachedImagenToken struct {
+	token  string
+	expiry time.Time
+}
+
+var imagenTokenCache sync.Map // client_email → cachedImagenToken
+
+// mintGCPToken exchanges a service-account JWT bearer for an OAuth access token,
+// caching the result per SA until shortly before expiry. Uses curl subprocess
+// (Python-side google-auth is slow on macOS; curl is fine on Linux too), with
+// an inline http.Client fallback if curl is absent.
 func mintGCPToken(saJSON []byte) (string, error) {
 	var sa struct {
 		ClientEmail string `json:"client_email"`
@@ -155,6 +172,13 @@ func mintGCPToken(saJSON []byte) (string, error) {
 	}
 	if err := json.Unmarshal(saJSON, &sa); err != nil {
 		return "", fmt.Errorf("parse SA JSON: %w", err)
+	}
+	if sa.ClientEmail != "" {
+		if v, ok := imagenTokenCache.Load(sa.ClientEmail); ok {
+			if ct, ok := v.(cachedImagenToken); ok && time.Now().Before(ct.expiry) {
+				return ct.token, nil
+			}
+		}
 	}
 	// Sign JWT with RS256.
 	claims := jwt.MapClaims{
@@ -178,6 +202,15 @@ func mintGCPToken(saJSON []byte) (string, error) {
 	form.Set("grant_type", "urn:ietf:params:oauth:grant-type:jwt-bearer")
 	form.Set("assertion", assertion)
 
+	cacheToken := func(tok string) {
+		if sa.ClientEmail != "" && tok != "" {
+			imagenTokenCache.Store(sa.ClientEmail, cachedImagenToken{
+				token:  tok,
+				expiry: time.Now().Add(55 * time.Minute),
+			})
+		}
+	}
+
 	// Prefer curl (bypasses Python-style HTTPS slowness — safe on Linux/macOS).
 	if _, lookErr := exec.LookPath("curl"); lookErr == nil {
 		out, curlErr := runCurl(sa.TokenURI, form.Encode(), 10*time.Second)
@@ -186,6 +219,7 @@ func mintGCPToken(saJSON []byte) (string, error) {
 				AccessToken string `json:"access_token"`
 			}
 			if jerr := json.Unmarshal(out, &r); jerr == nil && r.AccessToken != "" {
+				cacheToken(r.AccessToken)
 				return r.AccessToken, nil
 			}
 		}
@@ -194,7 +228,10 @@ func mintGCPToken(saJSON []byte) (string, error) {
 	// Fallback: net/http POST.
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, sa.TokenURI, strings.NewReader(form.Encode()))
+	req, reqErr := http.NewRequestWithContext(ctx, http.MethodPost, sa.TokenURI, strings.NewReader(form.Encode()))
+	if reqErr != nil {
+		return "", fmt.Errorf("build token request: %w", reqErr)
+	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	client := &http.Client{Timeout: 15 * time.Second}
 	resp, err := client.Do(req)
@@ -212,6 +249,7 @@ func mintGCPToken(saJSON []byte) (string, error) {
 	if r.AccessToken == "" {
 		return "", fmt.Errorf("token response missing access_token: %s", string(respBody[:minInt(len(respBody), 200)]))
 	}
+	cacheToken(r.AccessToken)
 	return r.AccessToken, nil
 }
 

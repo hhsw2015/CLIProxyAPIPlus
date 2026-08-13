@@ -1786,6 +1786,12 @@ func sanitizeGeminiKeyEntries(entries []GeminiKey) []GeminiKey {
 		entry.Headers = NormalizeHeaders(entry.Headers)
 		entry.ExcludedModels = NormalizeExcludedModels(entry.ExcludedModels)
 		uniqueKey := entry.APIKey + "|" + entry.BaseURL
+		// SA-based Vertex entries (imagen) share an empty api-key and empty
+		// base-url, so key them on the distinguishing fields instead — else
+		// dedup collapses all N region entries into one and breaks fan-out.
+		if entry.APIKey == "" {
+			uniqueKey = entry.CredentialsB64 + "|" + entry.VertexLocation + "|" + entry.Name
+		}
 		if _, exists := seen[uniqueKey]; exists {
 			continue
 		}
