@@ -3,1825 +3,1825 @@
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-fable-5|cla-01|europe-west1": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-fable-5|cla-01|global": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-fable-5|cla-01|us-east5": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-fable-5|cla-02|asia-southeast1": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-fable-5|cla-02|europe-west1": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-fable-5|cla-02|global": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-fable-5|cla-02|us-east5": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-fable-5|cla-03|asia-southeast1": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-fable-5|cla-03|europe-west1": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-fable-5|cla-03|global": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-fable-5|cla-03|us-east5": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-fable-5|cla-04|asia-southeast1": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-fable-5|cla-04|europe-west1": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-fable-5|cla-04|global": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-fable-5|cla-04|us-east5": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-fable-5|cla-05|asia-southeast1": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-fable-5|cla-05|europe-west1": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-fable-5|cla-05|global": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-fable-5|cla-05|us-east5": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-fable-5|cla-06|global": {
     "keep": true,
     "status": 200,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-fable-5|cla-07|global": {
     "keep": true,
     "status": 200,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-fable-5|cla-08|global": {
     "keep": true,
     "status": 200,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-fable-5|cla-09|global": {
     "keep": true,
     "status": 200,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-fable-5|cla-10|global": {
     "keep": true,
     "status": 200,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-haiku-4-5|cla-01|asia-southeast1": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-haiku-4-5|cla-01|europe-west1": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-haiku-4-5|cla-01|global": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-haiku-4-5|cla-01|us-east5": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-haiku-4-5|cla-02|asia-southeast1": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-haiku-4-5|cla-02|europe-west1": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-haiku-4-5|cla-02|global": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-haiku-4-5|cla-02|us-east5": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-haiku-4-5|cla-03|asia-southeast1": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-haiku-4-5|cla-03|europe-west1": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-haiku-4-5|cla-03|global": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-haiku-4-5|cla-03|us-east5": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-haiku-4-5|cla-04|asia-southeast1": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-haiku-4-5|cla-04|europe-west1": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-haiku-4-5|cla-04|global": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-haiku-4-5|cla-04|us-east5": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-haiku-4-5|cla-05|asia-southeast1": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-haiku-4-5|cla-05|europe-west1": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-haiku-4-5|cla-05|global": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-haiku-4-5|cla-05|us-east5": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-haiku-4-5|cla-06|asia-southeast1": {
     "keep": true,
     "status": 429,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-haiku-4-5|cla-06|europe-west1": {
     "keep": true,
     "status": 200,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-haiku-4-5|cla-06|global": {
     "keep": true,
     "status": 200,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-haiku-4-5|cla-06|us-east5": {
     "keep": true,
     "status": 200,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-haiku-4-5|cla-07|asia-southeast1": {
     "keep": true,
     "status": 429,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-haiku-4-5|cla-07|europe-west1": {
     "keep": true,
     "status": 200,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-haiku-4-5|cla-07|global": {
     "keep": true,
     "status": 200,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-haiku-4-5|cla-07|us-east5": {
     "keep": true,
     "status": 200,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-haiku-4-5|cla-08|asia-southeast1": {
     "keep": true,
     "status": 429,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-haiku-4-5|cla-08|europe-west1": {
     "keep": true,
     "status": 200,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-haiku-4-5|cla-08|global": {
     "keep": true,
     "status": 200,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-haiku-4-5|cla-08|us-east5": {
     "keep": true,
     "status": 200,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-haiku-4-5|cla-09|asia-southeast1": {
     "keep": true,
     "status": 429,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-haiku-4-5|cla-09|europe-west1": {
     "keep": true,
     "status": 200,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-haiku-4-5|cla-09|global": {
     "keep": true,
     "status": 200,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-haiku-4-5|cla-09|us-east5": {
     "keep": true,
     "status": 200,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-haiku-4-5|cla-10|asia-southeast1": {
     "keep": true,
     "status": 429,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-haiku-4-5|cla-10|europe-west1": {
     "keep": true,
     "status": 200,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-haiku-4-5|cla-10|global": {
     "keep": true,
     "status": 200,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-haiku-4-5|cla-10|us-east5": {
     "keep": true,
     "status": 200,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-4-5|cla-01|asia-southeast1": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-4-5|cla-01|europe-west1": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-4-5|cla-01|global": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-4-5|cla-01|us-east5": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-4-5|cla-02|asia-southeast1": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-4-5|cla-02|europe-west1": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-4-5|cla-02|global": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-4-5|cla-02|us-east5": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-4-5|cla-03|asia-southeast1": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-4-5|cla-03|europe-west1": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-4-5|cla-03|global": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-4-5|cla-03|us-east5": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-4-5|cla-04|asia-southeast1": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-4-5|cla-04|europe-west1": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-4-5|cla-04|global": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-4-5|cla-04|us-east5": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-4-5|cla-05|asia-southeast1": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-4-5|cla-05|europe-west1": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-4-5|cla-05|global": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-4-5|cla-05|us-east5": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-4-5|cla-06|asia-southeast1": {
     "keep": true,
     "status": 200,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-4-5|cla-06|europe-west1": {
     "keep": true,
     "status": 200,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-4-5|cla-06|global": {
     "keep": true,
     "status": 200,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-4-5|cla-06|us-east5": {
     "keep": true,
     "status": 200,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-4-5|cla-07|asia-southeast1": {
     "keep": true,
     "status": 200,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-4-5|cla-07|europe-west1": {
     "keep": true,
     "status": 200,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-4-5|cla-07|global": {
     "keep": true,
     "status": 200,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-4-5|cla-07|us-east5": {
     "keep": true,
     "status": 200,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-4-5|cla-08|asia-southeast1": {
     "keep": true,
     "status": 200,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-4-5|cla-08|europe-west1": {
     "keep": true,
     "status": 200,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-4-5|cla-08|global": {
     "keep": true,
     "status": 200,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-4-5|cla-08|us-east5": {
     "keep": true,
     "status": 200,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-4-5|cla-09|asia-southeast1": {
     "keep": true,
     "status": 200,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-4-5|cla-09|europe-west1": {
     "keep": true,
     "status": 200,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-4-5|cla-09|global": {
     "keep": true,
     "status": 200,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-4-5|cla-09|us-east5": {
     "keep": true,
     "status": 200,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-4-5|cla-10|asia-southeast1": {
     "keep": true,
     "status": 200,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-4-5|cla-10|europe-west1": {
     "keep": true,
     "status": 200,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-4-5|cla-10|global": {
     "keep": true,
     "status": 200,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-4-5|cla-10|us-east5": {
     "keep": true,
     "status": 200,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-4-6|cla-01|asia-southeast1": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-4-6|cla-01|europe-west1": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-4-6|cla-01|global": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-4-6|cla-01|us-east5": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-4-6|cla-02|asia-southeast1": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-4-6|cla-02|europe-west1": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-4-6|cla-02|global": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-4-6|cla-02|us-east5": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-4-6|cla-03|asia-southeast1": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-4-6|cla-03|europe-west1": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-4-6|cla-03|global": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-4-6|cla-03|us-east5": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-4-6|cla-04|asia-southeast1": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-4-6|cla-04|europe-west1": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-4-6|cla-04|global": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-4-6|cla-04|us-east5": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-4-6|cla-05|asia-southeast1": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-4-6|cla-05|europe-west1": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-4-6|cla-05|global": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-4-6|cla-05|us-east5": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-4-6|cla-06|asia-southeast1": {
     "keep": true,
     "status": 200,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-4-6|cla-06|europe-west1": {
     "keep": true,
     "status": 200,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-4-6|cla-06|global": {
     "keep": true,
     "status": 200,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-4-6|cla-06|us-east5": {
     "keep": true,
     "status": 200,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-4-6|cla-07|asia-southeast1": {
     "keep": true,
     "status": 200,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-4-6|cla-07|europe-west1": {
     "keep": true,
     "status": 200,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-4-6|cla-07|global": {
     "keep": true,
     "status": 200,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-4-6|cla-07|us-east5": {
     "keep": true,
     "status": 200,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-4-6|cla-08|asia-southeast1": {
     "keep": true,
     "status": 200,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-4-6|cla-08|europe-west1": {
     "keep": true,
     "status": 200,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-4-6|cla-08|global": {
     "keep": true,
     "status": 200,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-4-6|cla-08|us-east5": {
     "keep": true,
     "status": 200,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-4-6|cla-09|asia-southeast1": {
     "keep": true,
     "status": 200,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-4-6|cla-09|europe-west1": {
     "keep": true,
     "status": 200,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-4-6|cla-09|global": {
     "keep": true,
     "status": 200,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-4-6|cla-09|us-east5": {
     "keep": true,
     "status": 200,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-4-6|cla-10|asia-southeast1": {
     "keep": true,
     "status": 200,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-4-6|cla-10|europe-west1": {
     "keep": true,
     "status": 200,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-4-6|cla-10|global": {
     "keep": true,
     "status": 200,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-4-6|cla-10|us-east5": {
     "keep": true,
     "status": 200,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-4-7|cla-01|asia-southeast1": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-4-7|cla-01|europe-west1": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-4-7|cla-01|global": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-4-7|cla-01|us-east5": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-4-7|cla-02|asia-southeast1": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-4-7|cla-02|europe-west1": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-4-7|cla-02|global": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-4-7|cla-02|us-east5": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-4-7|cla-03|asia-southeast1": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-4-7|cla-03|europe-west1": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-4-7|cla-03|global": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-4-7|cla-03|us-east5": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-4-7|cla-04|asia-southeast1": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-4-7|cla-04|europe-west1": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-4-7|cla-04|global": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-4-7|cla-04|us-east5": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-4-7|cla-05|asia-southeast1": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-4-7|cla-05|europe-west1": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-4-7|cla-05|global": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-4-7|cla-05|us-east5": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-4-7|cla-06|global": {
     "keep": true,
     "status": 200,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-4-7|cla-07|global": {
     "keep": true,
     "status": 200,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-4-7|cla-08|global": {
     "keep": true,
     "status": 200,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-4-7|cla-09|global": {
     "keep": true,
     "status": 200,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-4-7|cla-10|global": {
     "keep": true,
     "status": 200,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-4-8|cla-01|asia-southeast1": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-4-8|cla-01|europe-west1": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-4-8|cla-01|global": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-4-8|cla-01|us-east5": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-4-8|cla-02|asia-southeast1": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-4-8|cla-02|europe-west1": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-4-8|cla-02|global": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-4-8|cla-02|us-east5": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-4-8|cla-03|asia-southeast1": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-4-8|cla-03|europe-west1": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-4-8|cla-03|global": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-4-8|cla-03|us-east5": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-4-8|cla-04|asia-southeast1": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-4-8|cla-04|europe-west1": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-4-8|cla-04|global": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-4-8|cla-04|us-east5": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-4-8|cla-05|asia-southeast1": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-4-8|cla-05|europe-west1": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-4-8|cla-05|global": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-4-8|cla-05|us-east5": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-4-8|cla-06|global": {
     "keep": true,
     "status": 200,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-4-8|cla-07|global": {
     "keep": true,
     "status": 200,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-4-8|cla-08|global": {
     "keep": true,
     "status": 200,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-4-8|cla-09|global": {
     "keep": true,
     "status": 200,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-4-8|cla-10|global": {
     "keep": true,
     "status": 200,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-5|cla-01|asia-southeast1": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-5|cla-01|europe-west1": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-5|cla-01|global": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-5|cla-01|us-east5": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-5|cla-02|asia-southeast1": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-5|cla-02|europe-west1": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-5|cla-02|global": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-5|cla-02|us-east5": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-5|cla-03|asia-southeast1": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-5|cla-03|europe-west1": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-5|cla-03|global": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-5|cla-03|us-east5": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-5|cla-04|asia-southeast1": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-5|cla-04|europe-west1": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-5|cla-04|global": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-5|cla-04|us-east5": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-5|cla-05|asia-southeast1": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-5|cla-05|europe-west1": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-5|cla-05|global": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-5|cla-05|us-east5": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-opus-5|cla-06|global": {
     "keep": false,
     "status": 404,
-    "ts": 1786504114.794985
+    "ts": 1786591109.782259
   },
   "claude-opus-5|cla-07|global": {
     "keep": false,
     "status": 404,
-    "ts": 1786504114.794985
+    "ts": 1786591109.782259
   },
   "claude-opus-5|cla-08|global": {
     "keep": false,
     "status": 404,
-    "ts": 1786504114.794985
+    "ts": 1786591109.782259
   },
   "claude-opus-5|cla-09|global": {
     "keep": false,
     "status": 404,
-    "ts": 1786504114.794985
+    "ts": 1786591109.782259
   },
   "claude-opus-5|cla-10|global": {
     "keep": false,
     "status": 404,
-    "ts": 1786504114.794985
+    "ts": 1786591109.782259
   },
   "claude-sonnet-4-5|cla-01|asia-southeast1": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-sonnet-4-5|cla-01|europe-west1": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-sonnet-4-5|cla-01|global": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-sonnet-4-5|cla-01|us-east5": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-sonnet-4-5|cla-02|asia-southeast1": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-sonnet-4-5|cla-02|europe-west1": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-sonnet-4-5|cla-02|global": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-sonnet-4-5|cla-02|us-east5": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-sonnet-4-5|cla-03|asia-southeast1": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-sonnet-4-5|cla-03|europe-west1": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-sonnet-4-5|cla-03|global": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-sonnet-4-5|cla-03|us-east5": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-sonnet-4-5|cla-04|asia-southeast1": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-sonnet-4-5|cla-04|europe-west1": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-sonnet-4-5|cla-04|global": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-sonnet-4-5|cla-04|us-east5": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-sonnet-4-5|cla-05|asia-southeast1": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-sonnet-4-5|cla-05|europe-west1": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-sonnet-4-5|cla-05|global": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-sonnet-4-5|cla-05|us-east5": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-sonnet-4-5|cla-06|asia-southeast1": {
     "keep": true,
     "status": 200,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-sonnet-4-5|cla-06|europe-west1": {
     "keep": true,
     "status": 200,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-sonnet-4-5|cla-06|global": {
     "keep": true,
     "status": 200,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-sonnet-4-5|cla-06|us-east5": {
     "keep": true,
     "status": 200,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-sonnet-4-5|cla-07|asia-southeast1": {
     "keep": true,
     "status": 200,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-sonnet-4-5|cla-07|europe-west1": {
     "keep": true,
     "status": 200,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-sonnet-4-5|cla-07|global": {
     "keep": true,
     "status": 200,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-sonnet-4-5|cla-07|us-east5": {
     "keep": true,
     "status": 200,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-sonnet-4-5|cla-08|asia-southeast1": {
     "keep": true,
     "status": 200,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-sonnet-4-5|cla-08|europe-west1": {
     "keep": true,
     "status": 200,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-sonnet-4-5|cla-08|global": {
     "keep": true,
     "status": 200,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-sonnet-4-5|cla-08|us-east5": {
     "keep": true,
     "status": 200,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-sonnet-4-5|cla-09|asia-southeast1": {
     "keep": true,
     "status": 200,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-sonnet-4-5|cla-09|europe-west1": {
     "keep": true,
     "status": 200,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-sonnet-4-5|cla-09|global": {
     "keep": true,
     "status": 200,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-sonnet-4-5|cla-09|us-east5": {
     "keep": true,
     "status": 200,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-sonnet-4-5|cla-10|asia-southeast1": {
     "keep": true,
     "status": 200,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-sonnet-4-5|cla-10|europe-west1": {
     "keep": true,
     "status": 200,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-sonnet-4-5|cla-10|global": {
     "keep": true,
     "status": 200,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-sonnet-4-5|cla-10|us-east5": {
     "keep": true,
     "status": 200,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-sonnet-4-6|cla-01|asia-southeast1": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-sonnet-4-6|cla-01|europe-west1": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-sonnet-4-6|cla-01|global": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-sonnet-4-6|cla-01|us-east5": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-sonnet-4-6|cla-02|asia-southeast1": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-sonnet-4-6|cla-02|europe-west1": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-sonnet-4-6|cla-02|global": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-sonnet-4-6|cla-02|us-east5": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-sonnet-4-6|cla-03|asia-southeast1": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-sonnet-4-6|cla-03|europe-west1": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-sonnet-4-6|cla-03|global": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-sonnet-4-6|cla-03|us-east5": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-sonnet-4-6|cla-04|asia-southeast1": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-sonnet-4-6|cla-04|europe-west1": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-sonnet-4-6|cla-04|global": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-sonnet-4-6|cla-04|us-east5": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-sonnet-4-6|cla-05|asia-southeast1": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-sonnet-4-6|cla-05|europe-west1": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-sonnet-4-6|cla-05|global": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-sonnet-4-6|cla-05|us-east5": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-sonnet-4-6|cla-06|asia-southeast1": {
     "keep": true,
     "status": 200,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-sonnet-4-6|cla-06|europe-west1": {
     "keep": true,
     "status": 200,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-sonnet-4-6|cla-06|global": {
     "keep": true,
     "status": 200,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-sonnet-4-6|cla-06|us-east5": {
     "keep": true,
     "status": 200,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-sonnet-4-6|cla-07|asia-southeast1": {
     "keep": true,
     "status": 200,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-sonnet-4-6|cla-07|europe-west1": {
     "keep": true,
     "status": 200,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-sonnet-4-6|cla-07|global": {
     "keep": true,
     "status": 200,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-sonnet-4-6|cla-07|us-east5": {
     "keep": true,
     "status": 200,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-sonnet-4-6|cla-08|asia-southeast1": {
     "keep": true,
     "status": 200,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-sonnet-4-6|cla-08|europe-west1": {
     "keep": true,
     "status": 200,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-sonnet-4-6|cla-08|global": {
     "keep": true,
     "status": 200,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-sonnet-4-6|cla-08|us-east5": {
     "keep": true,
     "status": 200,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-sonnet-4-6|cla-09|asia-southeast1": {
     "keep": true,
     "status": 200,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-sonnet-4-6|cla-09|europe-west1": {
     "keep": true,
     "status": 200,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-sonnet-4-6|cla-09|global": {
     "keep": true,
     "status": 200,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-sonnet-4-6|cla-09|us-east5": {
     "keep": true,
     "status": 200,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-sonnet-4-6|cla-10|asia-southeast1": {
     "keep": true,
     "status": 200,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-sonnet-4-6|cla-10|europe-west1": {
     "keep": true,
     "status": 200,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-sonnet-4-6|cla-10|global": {
     "keep": true,
     "status": 200,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-sonnet-4-6|cla-10|us-east5": {
     "keep": true,
     "status": 200,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-sonnet-5|cla-01|asia-southeast1": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-sonnet-5|cla-01|europe-west1": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-sonnet-5|cla-01|global": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-sonnet-5|cla-01|us-east5": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-sonnet-5|cla-02|asia-southeast1": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-sonnet-5|cla-02|europe-west1": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-sonnet-5|cla-02|global": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-sonnet-5|cla-02|us-east5": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-sonnet-5|cla-03|asia-southeast1": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-sonnet-5|cla-03|europe-west1": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-sonnet-5|cla-03|global": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-sonnet-5|cla-03|us-east5": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-sonnet-5|cla-04|asia-southeast1": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-sonnet-5|cla-04|europe-west1": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-sonnet-5|cla-04|global": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-sonnet-5|cla-04|us-east5": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-sonnet-5|cla-05|asia-southeast1": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-sonnet-5|cla-05|europe-west1": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-sonnet-5|cla-05|global": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-sonnet-5|cla-05|us-east5": {
     "error": "banned (per-project ban confirmed by vertex_watch)",
     "keep": false,
     "status": 498,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-sonnet-5|cla-06|global": {
     "keep": true,
     "status": 200,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-sonnet-5|cla-07|global": {
     "keep": true,
     "status": 200,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-sonnet-5|cla-08|global": {
     "keep": true,
     "status": 200,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-sonnet-5|cla-09|global": {
     "keep": true,
     "status": 200,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   },
   "claude-sonnet-5|cla-10|global": {
     "keep": true,
     "status": 200,
-    "ts": 1786525398.9797702
+    "ts": 1786575971.12512
   }
 }

@@ -51,18 +51,48 @@ func vertexClaudeLocation(auth *cliproxyauth.Auth) string {
 // vertexProjectCursor implements per-model round-robin over the project pool.
 // GCP Vertex quota is per (project, base_model) — rotating projects spreads
 // load and dodges the 429 hot-project trap.
-var vertexProjectCursor sync.Map // key auth.ID+"/"+model → *uint64 counter
+var vertexProjectCursor sync.Map // key auth.ID+"/"+model → uint64 counter
 
-// pickVertexClaudeProject picks a project from a pool the auth entry declared.
-// Pool encoding (auth.Attributes["model-project-pool"]) is a comma-separated
-// list of project IDs. If the pool is empty, "project-id" is used verbatim.
-// The choice rotates round-robin (per auth+model) so no single project gets
-// the whole request stream.
-func pickVertexClaudeProject(auth *cliproxyauth.Auth, model string) string {
-	if auth == nil || auth.Attributes == nil {
+// vertexSessionProject pins a downstream session to the project that last
+// served it successfully. Anthropic prompt-cache on Vertex is per-project, so
+// keeping a session on one project is what makes cache_read hits happen. Only
+// a 429/failure moves a session off its pinned project (see
+// rememberVertexSessionProject / the executor's 429 retry loop).
+var vertexSessionProject sync.Map // key sessionID+"/"+model → project string
+
+func vertexSessionKey(ctx context.Context, model string) string {
+	sid := strings.TrimSpace(cliproxyauth.ExecutorSessionIDFromContext(ctx))
+	if sid == "" {
 		return ""
 	}
-	// Per-model pool key (config gen emits comma-separated lists).
+	return sid + "/" + model
+}
+
+// rememberVertexSessionProject pins a session to a project after a successful
+// call, so subsequent turns in the same conversation reuse it and warm the
+// per-project prompt cache. No-op when there is no session identity.
+func rememberVertexSessionProject(ctx context.Context, model, project string) {
+	if project == "" {
+		return
+	}
+	if key := vertexSessionKey(ctx, model); key != "" {
+		vertexSessionProject.Store(key, project)
+	}
+}
+
+// forgetVertexSessionProject drops a session's project pin (e.g. after that
+// project 429s) so the next pick re-stickies onto whatever worked.
+func forgetVertexSessionProject(ctx context.Context, model string) {
+	if key := vertexSessionKey(ctx, model); key != "" {
+		vertexSessionProject.Delete(key)
+	}
+}
+
+// vertexProjectPoolFor parses the auth's declared project pool for a model.
+func vertexProjectPoolFor(auth *cliproxyauth.Auth, model string) []string {
+	if auth == nil || auth.Attributes == nil {
+		return nil
+	}
 	poolKey := "model-project-pool"
 	if model != "" {
 		if per := auth.Attributes["model-project-pool/"+model]; per != "" {
@@ -71,7 +101,10 @@ func pickVertexClaudeProject(auth *cliproxyauth.Auth, model string) string {
 	}
 	raw := strings.TrimSpace(auth.Attributes[poolKey])
 	if raw == "" {
-		return strings.TrimSpace(auth.Attributes["project-id"])
+		if p := strings.TrimSpace(auth.Attributes["project-id"]); p != "" {
+			return []string{p}
+		}
+		return nil
 	}
 	var projects []string
 	for _, p := range strings.Split(raw, ",") {
@@ -79,19 +112,53 @@ func pickVertexClaudeProject(auth *cliproxyauth.Auth, model string) string {
 			projects = append(projects, p)
 		}
 	}
+	return projects
+}
+
+// pickVertexClaudeProject picks a project from a pool the auth entry declared.
+// Session-sticky: a session that already has a pinned project keeps it (so the
+// per-project prompt cache warms). New sessions and session-less requests fall
+// back to round-robin so load still spreads across the pool.
+func pickVertexClaudeProject(ctx context.Context, auth *cliproxyauth.Auth, model string) string {
+	projects := vertexProjectPoolFor(auth, model)
 	if len(projects) == 0 {
-		return strings.TrimSpace(auth.Attributes["project-id"])
+		return ""
 	}
 	if len(projects) == 1 {
 		return projects[0]
 	}
+
+	// Sticky path: reuse the project this session last succeeded on.
+	if key := vertexSessionKey(ctx, model); key != "" {
+		if v, ok := vertexSessionProject.Load(key); ok {
+			pinned := v.(string)
+			for _, p := range projects {
+				if p == pinned {
+					return pinned
+				}
+			}
+			// Pinned project no longer in pool → drop the stale pin.
+			vertexSessionProject.Delete(key)
+		}
+		// First request for this session: pick deterministically by session
+		// hash so retries/reconnects of the same session land on the same
+		// project, then pin it.
+		var h uint64 = 1469598103934665603 // FNV-1a offset
+		for i := 0; i < len(key); i++ {
+			h ^= uint64(key[i])
+			h *= 1099511628211
+		}
+		chosen := projects[h%uint64(len(projects))]
+		vertexSessionProject.Store(key, chosen)
+		return chosen
+	}
+
+	// Session-less path: round-robin per auth+model.
 	cursorKey := auth.ID + "/" + model
 	var cursor uint64
 	if v, ok := vertexProjectCursor.Load(cursorKey); ok {
 		cursor = v.(uint64) + 1
 	} else {
-		// New key: seed with a random offset so different processes / restarts
-		// don't hammer the same first project.
 		cursor = uint64(rand.Int63())
 	}
 	vertexProjectCursor.Store(cursorKey, cursor)

@@ -2631,6 +2631,13 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 	if len(normalized) == 0 {
 		return cliproxyexecutor.Response{}, &Error{Code: "provider_not_found", Message: "no provider supplied"}
 	}
+	// Tag ctx with the session id so provider executors can pin session-sticky
+	// state (e.g. Vertex per-project prompt-cache affinity). Session affinity
+	// at the auth level is already handled by the selector; this exposes the
+	// same identity one layer deeper.
+	if sid := ExtractSessionID(opts.Headers, req.Payload, opts.Metadata); sid != "" {
+		ctx = WithExecutorSessionID(ctx, sid)
+	}
 	if m.HomeEnabled() {
 		return m.executeHome(ctx, normalized, req, opts, false)
 	}
@@ -2719,6 +2726,11 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 	normalized := m.normalizeProviders(providers)
 	if len(normalized) == 0 {
 		return nil, &Error{Code: "provider_not_found", Message: "no provider supplied"}
+	}
+	// Tag ctx with the session id for session-sticky provider state (see the
+	// non-stream Execute for rationale).
+	if sid := ExtractSessionID(opts.Headers, req.Payload, opts.Metadata); sid != "" {
+		ctx = WithExecutorSessionID(ctx, sid)
 	}
 
 	_, maxRetryCredentials, maxWait := m.retrySettings()

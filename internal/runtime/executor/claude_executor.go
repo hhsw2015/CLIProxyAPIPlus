@@ -462,7 +462,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	var url string
 	vertexMode := isVertexClaudeAuth(auth)
 	if vertexMode {
-		project := pickVertexClaudeProject(auth, baseModel)
+		project := pickVertexClaudeProject(ctx, auth, baseModel)
 		if project == "" {
 			return resp, fmt.Errorf("vertex-claude: no project id available for model %s", baseModel)
 		}
@@ -527,6 +527,9 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	// a lower-priority (possibly broken) provider. Only retries on 429, only
 	// for vertex, bounded by the pool size.
 	if vertexMode && httpResp.StatusCode == http.StatusTooManyRequests {
+		// The pinned project 429'd — drop its session pin so we re-sticky onto
+		// whichever project actually serves this request.
+		forgetVertexSessionProject(ctx, baseModel)
 		pool := vertexClaudeProjectList(auth, baseModel)
 		for i := 0; i < len(pool) && httpResp.StatusCode == http.StatusTooManyRequests; i++ {
 			nextProject := pool[i]
@@ -556,6 +559,11 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 			}
 			httpResp = retryResp
 			url = retryURL
+			// Pin this session to the project that just worked so the next
+			// turn reuses it and warms the per-project prompt cache.
+			if httpResp.StatusCode >= 200 && httpResp.StatusCode < 300 {
+				rememberVertexSessionProject(ctx, baseModel, nextProject)
+			}
 		}
 	}
 	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
@@ -772,7 +780,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	var url string
 	vertexMode := isVertexClaudeAuth(auth)
 	if vertexMode {
-		project := pickVertexClaudeProject(auth, baseModel)
+		project := pickVertexClaudeProject(ctx, auth, baseModel)
 		if project == "" {
 			return nil, fmt.Errorf("vertex-claude: no project id available for model %s", baseModel)
 		}
@@ -838,6 +846,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	// request to a lower-priority provider while sibling projects are fine.
 	// Safe to retry pre-stream: at 429 no SSE bytes have been consumed.
 	if vertexMode && httpResp.StatusCode == http.StatusTooManyRequests {
+		forgetVertexSessionProject(ctx, baseModel)
 		pool := vertexClaudeProjectList(auth, baseModel)
 		for i := 0; i < len(pool) && httpResp.StatusCode == http.StatusTooManyRequests; i++ {
 			retryURL := buildVertexClaudeURL(vertexClaudeLocation(auth), pool[i], baseModel)
@@ -862,6 +871,9 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			}
 			httpResp = retryResp
 			url = retryURL
+			if httpResp.StatusCode >= 200 && httpResp.StatusCode < 300 {
+				rememberVertexSessionProject(ctx, baseModel, pool[i])
+			}
 		}
 	}
 	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
