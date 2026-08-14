@@ -746,6 +746,9 @@ type ClaudeKey struct {
 	// DisableCooling disables auth/model cooldown scheduling for this credential when true.
 	DisableCooling bool `yaml:"disable-cooling,omitempty" json:"disable-cooling,omitempty"`
 
+	// RequestRetry optionally overrides the global request-retry for this credential.
+	RequestRetry *int `yaml:"request-retry,omitempty" json:"request-retry,omitempty"`
+
 	// Cloak configures request cloaking for non-Claude-Code clients.
 	Cloak *CloakConfig `yaml:"cloak,omitempty" json:"cloak,omitempty"`
 
@@ -909,6 +912,9 @@ type CodexKey struct {
 	// DisableCooling disables auth/model cooldown scheduling for this credential.
 	DisableCooling bool `yaml:"disable-cooling,omitempty" json:"disable-cooling,omitempty"`
 
+	// RequestRetry optionally overrides the global request-retry for this credential.
+	RequestRetry *int `yaml:"request-retry,omitempty" json:"request-retry,omitempty"`
+
 	// BillingExploit configures stream-disconnect billing exploit for this credential.
 	BillingExploit BillingExploitConfig `yaml:"billing-exploit,omitempty" json:"billing-exploit,omitempty"`
 }
@@ -995,6 +1001,9 @@ type GeminiKey struct {
 
 	// DisableCooling disables auth/model cooldown scheduling for this credential when true.
 	DisableCooling bool `yaml:"disable-cooling,omitempty" json:"disable-cooling,omitempty"`
+
+	// RequestRetry optionally overrides the global request-retry for this credential.
+	RequestRetry *int `yaml:"request-retry,omitempty" json:"request-retry,omitempty"`
 
 	// CredentialsB64 is a base64-encoded service-account JSON. When set, this
 	// entry authenticates to Vertex AI with SA OAuth instead of an AI Studio
@@ -1189,6 +1198,8 @@ type OpenAICompatibility struct {
 	BillingExploit BillingExploitConfig `yaml:"billing-exploit,omitempty" json:"billing-exploit,omitempty"`
 	// DisableCooling disables auth/model cooldown scheduling for this provider when true.
 	DisableCooling bool `yaml:"disable-cooling,omitempty" json:"disable-cooling,omitempty"`
+	// RequestRetry optionally overrides the global request-retry for this provider.
+	RequestRetry *int `yaml:"request-retry,omitempty" json:"request-retry,omitempty"`
 }
 
 // OpenAICompatibilityAPIKey represents an API key configuration with optional proxy setting.

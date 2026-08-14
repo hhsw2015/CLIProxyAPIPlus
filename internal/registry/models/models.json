@@ -13,7 +13,14 @@
         "min": 1024,
         "max": 128000,
         "zero_allowed": true
-      }
+      },
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
     },
     {
       "id": "claude-sonnet-4-5-20250929",
@@ -28,7 +35,14 @@
         "min": 1024,
         "max": 128000,
         "zero_allowed": true
-      }
+      },
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
     },
     {
       "id": "claude-sonnet-4-6",
@@ -49,7 +63,14 @@
           "high",
           "max"
         ]
-      }
+      },
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
     },
     {
       "id": "claude-opus-4-6",
@@ -71,7 +92,44 @@
           "high",
           "max"
         ]
-      }
+      },
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "claude-opus-4-7",
+      "object": "model",
+      "created": 1776297600,
+      "owned_by": "anthropic",
+      "type": "claude",
+      "display_name": "Claude Opus 4.7",
+      "description": "Premium model combining maximum intelligence with practical performance",
+      "context_length": 1000000,
+      "max_completion_tokens": 128000,
+      "thinking": {
+        "min": 1024,
+        "max": 128000,
+        "zero_allowed": true,
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      },
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
     },
     {
       "id": "claude-opus-4-8",
@@ -94,7 +152,14 @@
           "xhigh",
           "max"
         ]
-      }
+      },
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
     },
     {
       "id": "claude-opus-5",
@@ -116,7 +181,14 @@
           "xhigh",
           "max"
         ]
-      }
+      },
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
     },
     {
       "id": "claude-sonnet-5",
@@ -138,7 +210,14 @@
           "xhigh",
           "max"
         ]
-      }
+      },
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
     },
     {
       "id": "claude-fable-5",
@@ -161,7 +240,14 @@
           "xhigh",
           "max"
         ]
-      }
+      },
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
     },
     {
       "id": "claude-opus-4-5-20251101",
@@ -177,7 +263,14 @@
         "min": 1024,
         "max": 128000,
         "zero_allowed": true
-      }
+      },
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
     },
     {
       "id": "claude-opus-4-1-20250805",
@@ -191,7 +284,14 @@
       "thinking": {
         "min": 1024,
         "max": 128000
-      }
+      },
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
     },
     {
       "id": "claude-opus-4-20250514",
@@ -205,7 +305,14 @@
       "thinking": {
         "min": 1024,
         "max": 128000
-      }
+      },
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
     },
     {
       "id": "claude-sonnet-4-20250514",
@@ -219,7 +326,14 @@
       "thinking": {
         "min": 1024,
         "max": 128000
-      }
+      },
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
     },
     {
       "id": "claude-3-7-sonnet-20250219",
@@ -233,7 +347,14 @@
       "thinking": {
         "min": 1024,
         "max": 128000
-      }
+      },
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
     },
     {
       "id": "claude-3-5-haiku-20241022",
@@ -315,7 +436,16 @@
         "min": 128,
         "max": 32768,
         "dynamic_allowed": true
-      }
+      },
+      "supportedInputModalities": [
+        "text",
+        "image",
+        "audio",
+        "video"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
     },
     {
       "id": "gemini-2.5-flash",
@@ -339,7 +469,16 @@
         "max": 24576,
         "zero_allowed": true,
         "dynamic_allowed": true
-      }
+      },
+      "supportedInputModalities": [
+        "text",
+        "image",
+        "audio",
+        "video"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
     },
     {
       "id": "gemini-2.5-flash-lite",
@@ -363,7 +502,16 @@
         "max": 24576,
         "zero_allowed": true,
         "dynamic_allowed": true
-      }
+      },
+      "supportedInputModalities": [
+        "text",
+        "image",
+        "audio",
+        "video"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
     },
     {
       "id": "gemini-3-pro-preview",
@@ -391,7 +539,16 @@
           "low",
           "high"
         ]
-      }
+      },
+      "supportedInputModalities": [
+        "text",
+        "image",
+        "audio",
+        "video"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
     },
     {
       "id": "gemini-3.1-pro-preview",
@@ -420,7 +577,16 @@
           "medium",
           "high"
         ]
-      }
+      },
+      "supportedInputModalities": [
+        "text",
+        "image",
+        "audio",
+        "video"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
     },
     {
       "id": "gemini-3.1-flash-image-preview",
@@ -448,7 +614,15 @@
           "minimal",
           "high"
         ]
-      }
+      },
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text",
+        "image"
+      ]
     },
     {
       "id": "gemini-3-flash-preview",
@@ -478,7 +652,16 @@
           "medium",
           "high"
         ]
-      }
+      },
+      "supportedInputModalities": [
+        "text",
+        "image",
+        "audio",
+        "video"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
     },
     {
       "id": "gemini-3.1-flash-lite-preview",
@@ -506,7 +689,16 @@
           "minimal",
           "high"
         ]
-      }
+      },
+      "supportedInputModalities": [
+        "text",
+        "image",
+        "audio",
+        "video"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
     },
     {
       "id": "gemini-3-pro-image-preview",
@@ -534,7 +726,15 @@
           "low",
           "high"
         ]
-      }
+      },
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text",
+        "image"
+      ]
     },
     {
       "id": "gemini-3.5-flash",
@@ -564,7 +764,16 @@
           "medium",
           "high"
         ]
-      }
+      },
+      "supportedInputModalities": [
+        "text",
+        "image",
+        "audio",
+        "video"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
     },
     {
       "id": "gemini-3.5-flash-lite",
@@ -594,7 +803,16 @@
           "medium",
           "high"
         ]
-      }
+      },
+      "supportedInputModalities": [
+        "text",
+        "image",
+        "audio",
+        "video"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
     },
     {
       "id": "gemini-3.6-flash",
@@ -624,7 +842,16 @@
           "medium",
           "high"
         ]
-      }
+      },
+      "supportedInputModalities": [
+        "text",
+        "image",
+        "audio",
+        "video"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
     }
   ],
   "vertex": [
@@ -650,7 +877,16 @@
         "min": 128,
         "max": 32768,
         "dynamic_allowed": true
-      }
+      },
+      "supportedInputModalities": [
+        "text",
+        "image",
+        "audio",
+        "video"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
     },
     {
       "id": "gemini-2.5-flash",
@@ -674,7 +910,16 @@
         "max": 24576,
         "zero_allowed": true,
         "dynamic_allowed": true
-      }
+      },
+      "supportedInputModalities": [
+        "text",
+        "image",
+        "audio",
+        "video"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
     },
     {
       "id": "gemini-2.5-flash-image",
@@ -698,7 +943,15 @@
         "max": 24576,
         "zero_allowed": true,
         "dynamic_allowed": true
-      }
+      },
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text",
+        "image"
+      ]
     },
     {
       "id": "gemini-2.5-flash-lite",
@@ -722,7 +975,16 @@
         "max": 24576,
         "zero_allowed": true,
         "dynamic_allowed": true
-      }
+      },
+      "supportedInputModalities": [
+        "text",
+        "image",
+        "audio",
+        "video"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
     },
     {
       "id": "gemini-3-pro",
@@ -750,7 +1012,16 @@
           "low",
           "high"
         ]
-      }
+      },
+      "supportedInputModalities": [
+        "text",
+        "image",
+        "audio",
+        "video"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
     },
     {
       "id": "gemini-3-flash",
@@ -780,7 +1051,16 @@
           "medium",
           "high"
         ]
-      }
+      },
+      "supportedInputModalities": [
+        "text",
+        "image",
+        "audio",
+        "video"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
     },
     {
       "id": "gemini-3.1-pro",
@@ -809,7 +1089,16 @@
           "medium",
           "high"
         ]
-      }
+      },
+      "supportedInputModalities": [
+        "text",
+        "image",
+        "audio",
+        "video"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
     },
     {
       "id": "gemini-3.1-pro-preview",
@@ -838,7 +1127,16 @@
           "medium",
           "high"
         ]
-      }
+      },
+      "supportedInputModalities": [
+        "text",
+        "image",
+        "audio",
+        "video"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
     },
     {
       "id": "gemini-3.1-flash-image",
@@ -866,7 +1164,15 @@
           "minimal",
           "high"
         ]
-      }
+      },
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text",
+        "image"
+      ]
     },
     {
       "id": "gemini-3.1-flash-lite",
@@ -896,7 +1202,16 @@
           "medium",
           "high"
         ]
-      }
+      },
+      "supportedInputModalities": [
+        "text",
+        "image",
+        "audio",
+        "video"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
     },
     {
       "id": "gemini-3-pro-image",
@@ -924,7 +1239,15 @@
           "low",
           "high"
         ]
-      }
+      },
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text",
+        "image"
+      ]
     },
     {
       "id": "imagen-4.0-generate-001",
@@ -938,6 +1261,12 @@
       "description": "Imagen 4.0 image generation model",
       "supportedGenerationMethods": [
         "predict"
+      ],
+      "supportedInputModalities": [
+        "text"
+      ],
+      "supportedOutputModalities": [
+        "image"
       ]
     },
     {
@@ -952,6 +1281,12 @@
       "description": "Imagen 4.0 Ultra high-quality image generation model",
       "supportedGenerationMethods": [
         "predict"
+      ],
+      "supportedInputModalities": [
+        "text"
+      ],
+      "supportedOutputModalities": [
+        "image"
       ]
     },
     {
@@ -966,6 +1301,12 @@
       "description": "Imagen 3.0 image generation model",
       "supportedGenerationMethods": [
         "predict"
+      ],
+      "supportedInputModalities": [
+        "text"
+      ],
+      "supportedOutputModalities": [
+        "image"
       ]
     },
     {
@@ -980,6 +1321,12 @@
       "description": "Imagen 3.0 fast image generation model",
       "supportedGenerationMethods": [
         "predict"
+      ],
+      "supportedInputModalities": [
+        "text"
+      ],
+      "supportedOutputModalities": [
+        "image"
       ]
     },
     {
@@ -994,6 +1341,12 @@
       "description": "Imagen 4.0 fast image generation model",
       "supportedGenerationMethods": [
         "predict"
+      ],
+      "supportedInputModalities": [
+        "text"
+      ],
+      "supportedOutputModalities": [
+        "image"
       ]
     },
     {
@@ -1024,7 +1377,16 @@
           "medium",
           "high"
         ]
-      }
+      },
+      "supportedInputModalities": [
+        "text",
+        "image",
+        "audio",
+        "video"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
     },
     {
       "id": "gemini-3.5-flash-lite",
@@ -1054,7 +1416,16 @@
           "medium",
           "high"
         ]
-      }
+      },
+      "supportedInputModalities": [
+        "text",
+        "image",
+        "audio",
+        "video"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
     },
     {
       "id": "gemini-3.6-flash",
@@ -1084,7 +1455,16 @@
           "medium",
           "high"
         ]
-      }
+      },
+      "supportedInputModalities": [
+        "text",
+        "image",
+        "audio",
+        "video"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
     }
   ],
   "gemini-cli": [
@@ -1110,7 +1490,16 @@
         "min": 128,
         "max": 32768,
         "dynamic_allowed": true
-      }
+      },
+      "supportedInputModalities": [
+        "text",
+        "image",
+        "audio",
+        "video"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
     },
     {
       "id": "gemini-2.5-flash",
@@ -1134,7 +1523,16 @@
         "max": 24576,
         "zero_allowed": true,
         "dynamic_allowed": true
-      }
+      },
+      "supportedInputModalities": [
+        "text",
+        "image",
+        "audio",
+        "video"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
     },
     {
       "id": "gemini-2.5-flash-lite",
@@ -1158,7 +1556,16 @@
         "max": 24576,
         "zero_allowed": true,
         "dynamic_allowed": true
-      }
+      },
+      "supportedInputModalities": [
+        "text",
+        "image",
+        "audio",
+        "video"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
     },
     {
       "id": "gemini-3-pro-preview",
@@ -1186,7 +1593,16 @@
           "low",
           "high"
         ]
-      }
+      },
+      "supportedInputModalities": [
+        "text",
+        "image",
+        "audio",
+        "video"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
     },
     {
       "id": "gemini-3.1-pro-preview",
@@ -1215,7 +1631,16 @@
           "medium",
           "high"
         ]
-      }
+      },
+      "supportedInputModalities": [
+        "text",
+        "image",
+        "audio",
+        "video"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
     },
     {
       "id": "gemini-3-flash-preview",
@@ -1245,7 +1670,16 @@
           "medium",
           "high"
         ]
-      }
+      },
+      "supportedInputModalities": [
+        "text",
+        "image",
+        "audio",
+        "video"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
     },
     {
       "id": "gemini-3.1-flash-lite-preview",
@@ -1275,7 +1709,16 @@
           "medium",
           "high"
         ]
-      }
+      },
+      "supportedInputModalities": [
+        "text",
+        "image",
+        "audio",
+        "video"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
     }
   ],
   "aistudio": [
@@ -1301,7 +1744,16 @@
         "min": 128,
         "max": 32768,
         "dynamic_allowed": true
-      }
+      },
+      "supportedInputModalities": [
+        "text",
+        "image",
+        "audio",
+        "video"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
     },
     {
       "id": "gemini-2.5-flash",
@@ -1325,7 +1777,16 @@
         "max": 24576,
         "zero_allowed": true,
         "dynamic_allowed": true
-      }
+      },
+      "supportedInputModalities": [
+        "text",
+        "image",
+        "audio",
+        "video"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
     },
     {
       "id": "gemini-2.5-flash-lite",
@@ -1349,7 +1810,16 @@
         "max": 24576,
         "zero_allowed": true,
         "dynamic_allowed": true
-      }
+      },
+      "supportedInputModalities": [
+        "text",
+        "image",
+        "audio",
+        "video"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
     },
     {
       "id": "gemini-3-pro-preview",
@@ -1373,7 +1843,16 @@
         "min": 128,
         "max": 32768,
         "dynamic_allowed": true
-      }
+      },
+      "supportedInputModalities": [
+        "text",
+        "image",
+        "audio",
+        "video"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
     },
     {
       "id": "gemini-3.1-pro-preview",
@@ -1397,7 +1876,16 @@
         "min": 128,
         "max": 32768,
         "dynamic_allowed": true
-      }
+      },
+      "supportedInputModalities": [
+        "text",
+        "image",
+        "audio",
+        "video"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
     },
     {
       "id": "gemini-3-flash-preview",
@@ -1421,7 +1909,16 @@
         "min": 128,
         "max": 32768,
         "dynamic_allowed": true
-      }
+      },
+      "supportedInputModalities": [
+        "text",
+        "image",
+        "audio",
+        "video"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
     },
     {
       "id": "gemini-3.1-flash-lite-preview",
@@ -1451,7 +1948,16 @@
           "medium",
           "high"
         ]
-      }
+      },
+      "supportedInputModalities": [
+        "text",
+        "image",
+        "audio",
+        "video"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
     },
     {
       "id": "gemini-pro-latest",
@@ -1475,7 +1981,16 @@
         "min": 128,
         "max": 32768,
         "dynamic_allowed": true
-      }
+      },
+      "supportedInputModalities": [
+        "text",
+        "image",
+        "audio",
+        "video"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
     },
     {
       "id": "gemini-flash-latest",
@@ -1499,7 +2014,16 @@
         "max": 24576,
         "zero_allowed": true,
         "dynamic_allowed": true
-      }
+      },
+      "supportedInputModalities": [
+        "text",
+        "image",
+        "audio",
+        "video"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
     },
     {
       "id": "gemini-flash-lite-latest",
@@ -1524,7 +2048,16 @@
         "max": 24576,
         "zero_allowed": true,
         "dynamic_allowed": true
-      }
+      },
+      "supportedInputModalities": [
+        "text",
+        "image",
+        "audio",
+        "video"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
     },
     {
       "id": "gemini-2.5-flash-image",
@@ -1543,6 +2076,14 @@
         "countTokens",
         "createCachedContent",
         "batchGenerateContent"
+      ],
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text",
+        "image"
       ]
     },
     {
@@ -1573,7 +2114,16 @@
           "medium",
           "high"
         ]
-      }
+      },
+      "supportedInputModalities": [
+        "text",
+        "image",
+        "audio",
+        "video"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
     },
     {
       "id": "gemini-3.5-flash-lite",
@@ -1603,7 +2153,16 @@
           "medium",
           "high"
         ]
-      }
+      },
+      "supportedInputModalities": [
+        "text",
+        "image",
+        "audio",
+        "video"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
     },
     {
       "id": "gemini-3.6-flash",
@@ -1633,7 +2192,16 @@
           "medium",
           "high"
         ]
-      }
+      },
+      "supportedInputModalities": [
+        "text",
+        "image",
+        "audio",
+        "video"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
     }
   ],
   "codex-free": [
@@ -1658,7 +2226,14 @@
           "high",
           "xhigh"
         ]
-      }
+      },
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
     },
     {
       "id": "gpt-5.5",
@@ -1681,7 +2256,14 @@
           "high",
           "xhigh"
         ]
-      }
+      },
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
     },
     {
       "id": "gpt-5.6-terra",
@@ -1705,7 +2287,14 @@
           "xhigh",
           "max"
         ]
-      }
+      },
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
     },
     {
       "id": "gpt-5.6-luna",
@@ -1735,7 +2324,14 @@
           "user-agent": "codex-tui/0.144.0 (Mac OS 26.5.1; arm64) iTerm.app/3.6.11 (codex-tui; 0.144.0)",
           "originator": "codex-tui"
         }
-      }
+      },
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
     },
     {
       "id": "codex-auto-review",
@@ -1758,7 +2354,14 @@
           "high",
           "xhigh"
         ]
-      }
+      },
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
     }
   ],
   "codex-team": [
@@ -1783,7 +2386,14 @@
           "high",
           "xhigh"
         ]
-      }
+      },
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
     },
     {
       "id": "gpt-5.4-mini",
@@ -1806,7 +2416,14 @@
           "high",
           "xhigh"
         ]
-      }
+      },
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
     },
     {
       "id": "gpt-5.5",
@@ -1829,7 +2446,14 @@
           "high",
           "xhigh"
         ]
-      }
+      },
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
     },
     {
       "id": "gpt-5.6-sol",
@@ -1853,7 +2477,14 @@
           "xhigh",
           "max"
         ]
-      }
+      },
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
     },
     {
       "id": "gpt-5.6-terra",
@@ -1877,7 +2508,14 @@
           "xhigh",
           "max"
         ]
-      }
+      },
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
     },
     {
       "id": "gpt-5.6-luna",
@@ -1907,7 +2545,14 @@
           "user-agent": "codex-tui/0.144.0 (Mac OS 26.5.1; arm64) iTerm.app/3.6.11 (codex-tui; 0.144.0)",
           "originator": "codex-tui"
         }
-      }
+      },
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
     },
     {
       "id": "codex-auto-review",
@@ -1930,7 +2575,14 @@
           "high",
           "xhigh"
         ]
-      }
+      },
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
     }
   ],
   "codex-plus": [
@@ -1955,7 +2607,13 @@
           "high",
           "xhigh"
         ]
-      }
+      },
+      "supportedInputModalities": [
+        "text"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
     },
     {
       "id": "gpt-5.4",
@@ -1978,7 +2636,14 @@
           "high",
           "xhigh"
         ]
-      }
+      },
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
     },
     {
       "id": "gpt-5.4-mini",
@@ -2001,7 +2666,14 @@
           "high",
           "xhigh"
         ]
-      }
+      },
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
     },
     {
       "id": "gpt-5.5",
@@ -2024,7 +2696,14 @@
           "high",
           "xhigh"
         ]
-      }
+      },
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
     },
     {
       "id": "gpt-5.6-sol",
@@ -2048,7 +2727,14 @@
           "xhigh",
           "max"
         ]
-      }
+      },
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
     },
     {
       "id": "gpt-5.6-terra",
@@ -2072,7 +2758,14 @@
           "xhigh",
           "max"
         ]
-      }
+      },
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
     },
     {
       "id": "gpt-5.6-luna",
@@ -2102,7 +2795,14 @@
           "user-agent": "codex-tui/0.144.0 (Mac OS 26.5.1; arm64) iTerm.app/3.6.11 (codex-tui; 0.144.0)",
           "originator": "codex-tui"
         }
-      }
+      },
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
     },
     {
       "id": "codex-auto-review",
@@ -2125,7 +2825,14 @@
           "high",
           "xhigh"
         ]
-      }
+      },
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
     }
   ],
   "codex-pro": [
@@ -2150,7 +2857,13 @@
           "high",
           "xhigh"
         ]
-      }
+      },
+      "supportedInputModalities": [
+        "text"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
     },
     {
       "id": "gpt-5.4",
@@ -2173,7 +2886,14 @@
           "high",
           "xhigh"
         ]
-      }
+      },
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
     },
     {
       "id": "gpt-5.4-mini",
@@ -2196,7 +2916,14 @@
           "high",
           "xhigh"
         ]
-      }
+      },
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
     },
     {
       "id": "gpt-5.5",
@@ -2219,7 +2946,14 @@
           "high",
           "xhigh"
         ]
-      }
+      },
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
     },
     {
       "id": "gpt-5.6-sol",
@@ -2243,7 +2977,14 @@
           "xhigh",
           "max"
         ]
-      }
+      },
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
     },
     {
       "id": "gpt-5.6-terra",
@@ -2267,7 +3008,14 @@
           "xhigh",
           "max"
         ]
-      }
+      },
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
     },
     {
       "id": "gpt-5.6-luna",
@@ -2297,7 +3045,14 @@
           "user-agent": "codex-tui/0.144.0 (Mac OS 26.5.1; arm64) iTerm.app/3.6.11 (codex-tui; 0.144.0)",
           "originator": "codex-tui"
         }
-      }
+      },
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
     },
     {
       "id": "codex-auto-review",
@@ -2320,7 +3075,14 @@
           "high",
           "xhigh"
         ]
-      }
+      },
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
     }
   ],
   "kimi": [
@@ -2333,7 +3095,13 @@
       "display_name": "Kimi K2",
       "description": "Kimi K2 - Moonshot AI's flagship coding model",
       "context_length": 131072,
-      "max_completion_tokens": 32768
+      "max_completion_tokens": 32768,
+      "supportedInputModalities": [
+        "text"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
     },
     {
       "id": "kimi-k2-thinking",
@@ -2351,7 +3119,13 @@
           "low",
           "high"
         ]
-      }
+      },
+      "supportedInputModalities": [
+        "text"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
     },
     {
       "id": "kimi-k2.5",
@@ -2369,7 +3143,15 @@
           "low",
           "high"
         ]
-      }
+      },
+      "supportedInputModalities": [
+        "text",
+        "image",
+        "video"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
     },
     {
       "id": "kimi-k2.6",
@@ -2387,7 +3169,15 @@
           "low",
           "high"
         ]
-      }
+      },
+      "supportedInputModalities": [
+        "text",
+        "image",
+        "video"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
     },
     {
       "id": "kimi-k2.7-code",
@@ -2405,7 +3195,15 @@
           "low",
           "high"
         ]
-      }
+      },
+      "supportedInputModalities": [
+        "text",
+        "image",
+        "video"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
     },
     {
       "id": "kimi-k2.7-code-highspeed",
@@ -2423,7 +3221,15 @@
           "low",
           "high"
         ]
-      }
+      },
+      "supportedInputModalities": [
+        "text",
+        "image",
+        "video"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
     },
     {
       "id": "kimi-k3",
@@ -2442,7 +3248,15 @@
           "high",
           "max"
         ]
-      }
+      },
+      "supportedInputModalities": [
+        "text",
+        "image",
+        "video"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
     },
     {
       "id": "kimi-k3-256k",
@@ -2461,7 +3275,14 @@
           "high",
           "max"
         ]
-      }
+      },
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
     }
   ],
   "antigravity": [
@@ -2480,7 +3301,14 @@
         "max": 64000,
         "zero_allowed": true,
         "dynamic_allowed": true
-      }
+      },
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
     },
     {
       "id": "claude-sonnet-4-6",
@@ -2497,7 +3325,14 @@
         "max": 64000,
         "zero_allowed": true,
         "dynamic_allowed": true
-      }
+      },
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
     },
     {
       "id": "gemini-3.6-flash-high",
@@ -2519,7 +3354,47 @@
           "medium",
           "high"
         ]
-      }
+      },
+      "supportedInputModalities": [
+        "text",
+        "image",
+        "audio",
+        "video"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "gemini-3.7-flash-high",
+      "object": "model",
+      "owned_by": "antigravity",
+      "type": "antigravity",
+      "display_name": "Gemini 3.7 Flash",
+      "name": "gemini-3.7-flash-high",
+      "description": "Gemini 3.7 Flash (High)",
+      "context_length": 1048576,
+      "max_completion_tokens": 65536,
+      "thinking": {
+        "min": 1,
+        "max": 65535,
+        "dynamic_allowed": true,
+        "levels": [
+          "minimal",
+          "low",
+          "medium",
+          "high"
+        ]
+      },
+      "supportedInputModalities": [
+        "text",
+        "image",
+        "audio",
+        "video"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
     },
     {
       "id": "gemini-3-flash",
@@ -2541,7 +3416,16 @@
           "medium",
           "high"
         ]
-      }
+      },
+      "supportedInputModalities": [
+        "text",
+        "image",
+        "audio",
+        "video"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
     },
     {
       "id": "gemini-3-flash-agent",
@@ -2563,7 +3447,16 @@
           "medium",
           "high"
         ]
-      }
+      },
+      "supportedInputModalities": [
+        "text",
+        "image",
+        "audio",
+        "video"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
     },
     {
       "id": "gemini-3.1-flash-image",
@@ -2581,7 +3474,15 @@
           "minimal",
           "high"
         ]
-      }
+      },
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text",
+        "image"
+      ]
     },
     {
       "id": "gemini-pro-agent",
@@ -2602,7 +3503,16 @@
           "medium",
           "high"
         ]
-      }
+      },
+      "supportedInputModalities": [
+        "text",
+        "image",
+        "audio",
+        "video"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
     },
     {
       "id": "gemini-3.1-pro-low",
@@ -2623,7 +3533,16 @@
           "medium",
           "high"
         ]
-      }
+      },
+      "supportedInputModalities": [
+        "text",
+        "image",
+        "audio",
+        "video"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
     },
     {
       "id": "gpt-oss-120b-medium",
@@ -2634,7 +3553,13 @@
       "name": "gpt-oss-120b-medium",
       "description": "GPT-OSS 120B (Medium)",
       "context_length": 114000,
-      "max_completion_tokens": 32768
+      "max_completion_tokens": 32768,
+      "supportedInputModalities": [
+        "text"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
     },
     {
       "id": "gemini-3.1-flash-lite",
@@ -2657,7 +3582,16 @@
           "medium",
           "high"
         ]
-      }
+      },
+      "supportedInputModalities": [
+        "text",
+        "image",
+        "audio",
+        "video"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
     },
     {
       "id": "gemini-3.5-flash-low",
@@ -2678,7 +3612,16 @@
           "medium",
           "high"
         ]
-      }
+      },
+      "supportedInputModalities": [
+        "text",
+        "image",
+        "audio",
+        "video"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
     },
     {
       "id": "gemini-3.5-flash-extra-low",
@@ -2699,11 +3642,48 @@
           "medium",
           "high"
         ]
-      }
+      },
+      "supportedInputModalities": [
+        "text",
+        "image",
+        "audio",
+        "video"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
     }
 
   ],
   "xai": [
+    {
+      "id": "grok-4.6",
+      "object": "model",
+      "created": 1785974400,
+      "owned_by": "xai",
+      "type": "xai",
+      "display_name": "Grok 4.6",
+      "name": "grok-4.6",
+      "description": "SpaceXAI's smartest model built for long-running agents, interactive and visual work.",
+      "context_length": 500000,
+      "max_completion_tokens": 65536,
+      "thinking": {
+        "zero_allowed": false,
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ]
+      },
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
+    },
     {
       "id": "grok-build-0.1",
       "object": "model",
@@ -2714,7 +3694,14 @@
       "name": "grok-build-0.1",
       "description": "Grok Build 0.1 is xAI’s fast coding model trained specifically for agentic software engineering workflows.",
       "context_length": 256000,
-      "max_completion_tokens": 256000
+      "max_completion_tokens": 256000,
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
     },
     {
       "id": "grok-4.5",
@@ -2734,7 +3721,14 @@
           "medium",
           "high"
         ]
-      }
+      },
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
     },
     {
       "id": "grok-4.3",
@@ -2755,7 +3749,14 @@
           "medium",
           "high"
         ]
-      }
+      },
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
     },
     {
       "id": "grok-4.20-0309-reasoning",
@@ -2767,7 +3768,14 @@
       "name": "grok-4.20-0309-reasoning",
       "description": "xAI Grok 4.20 0309 reasoning model for the Responses API.",
       "context_length": 2000000,
-      "max_completion_tokens": 65536
+      "max_completion_tokens": 65536,
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
     },
     {
       "id": "grok-4.20-0309-non-reasoning",
@@ -2779,7 +3787,14 @@
       "name": "grok-4.20-0309-non-reasoning",
       "description": "xAI Grok 4.20 0309 non-reasoning model for the Responses API.",
       "context_length": 2000000,
-      "max_completion_tokens": 65536
+      "max_completion_tokens": 65536,
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
     },
     {
       "id": "grok-4.20-multi-agent-0309",
@@ -2798,7 +3813,14 @@
           "medium",
           "high"
         ]
-      }
+      },
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
     },
     {
       "id": "grok-3-mini",
@@ -2817,7 +3839,13 @@
           "medium",
           "high"
         ]
-      }
+      },
+      "supportedInputModalities": [
+        "text"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
     },
     {
       "id": "grok-3-mini-fast",
@@ -2836,7 +3864,13 @@
           "medium",
           "high"
         ]
-      }
+      },
+      "supportedInputModalities": [
+        "text"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
     },
     {
       "id": "grok-composer-2.5-fast",
