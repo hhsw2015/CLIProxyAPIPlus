@@ -386,6 +386,11 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 				bytes.Clone(line),
 				&param,
 			)
+			if responseFormat == sdktranslator.FormatOpenAIResponse {
+				for i, chunk := range chunks {
+					chunks[i] = helps.EnsureResponsesUsageDetails(chunk)
+				}
+			}
 			for i := range chunks {
 				select {
 				case out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}:
