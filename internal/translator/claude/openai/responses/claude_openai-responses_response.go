@@ -528,7 +528,7 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 			itemDone, _ = sjson.SetBytes(itemDone, "item.encrypted_content", st.ReasoningSignature)
 			summary := []byte(`{"type":"summary_text","text":""}`)
 			summary, _ = sjson.SetBytes(summary, "text", full)
-			itemDone, _ = sjson.SetRawBytes(itemDone, "item.summary.-1", summary)
+			itemDone = translatorcommon.SetRawArrayItems(itemDone, "item.summary", [][]byte{summary})
 			out = append(out, emitEvent("response.output_item.done", itemDone))
 			st.ReasoningItems = append(st.ReasoningItems, claudeResponsesReasoningItem{
 				ID:          st.ReasoningItemID,
@@ -629,7 +629,7 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 			item, _ = sjson.SetBytes(item, "encrypted_content", reasoning.Signature)
 			summary := []byte(`{"type":"summary_text","text":""}`)
 			summary, _ = sjson.SetBytes(summary, "text", reasoning.Text)
-			item, _ = sjson.SetRawBytes(item, "summary.-1", summary)
+			item = translatorcommon.SetRawArrayItems(item, "summary", [][]byte{summary})
 			outputsWrapper, _ = sjson.SetRawBytes(outputsWrapper, fmt.Sprintf("arr.%d", reasoning.OutputIndex), item)
 		}
 		// assistant message items

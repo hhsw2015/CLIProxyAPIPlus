@@ -251,14 +251,12 @@ func claudeContentBlockToInteractionsStep(part gjson.Result) []byte {
 		step := []byte(`{"type":"model_output","content":[]}`)
 		content := []byte(`{"type":"text","text":""}`)
 		content, _ = sjson.SetBytes(content, "text", part.Get("text").String())
-		step, _ = sjson.SetRawBytes(step, "content.-1", content)
-		return step
+		return translatorcommon.SetRawArrayItems(step, "content", [][]byte{content})
 	case "thinking":
 		step := []byte(`{"type":"thought","content":[]}`)
 		content := []byte(`{"type":"text","text":""}`)
 		content, _ = sjson.SetBytes(content, "text", part.Get("thinking").String())
-		step, _ = sjson.SetRawBytes(step, "content.-1", content)
-		return step
+		return translatorcommon.SetRawArrayItems(step, "content", [][]byte{content})
 	case "tool_use":
 		return claudeToolUseToInteractionsStep(part, strings.TrimSpace(part.Get("input").Raw))
 	}
@@ -357,7 +355,7 @@ func claudeNonStreamContentBlockStop(root gjson.Result, st *claudeToInteractions
 		step = []byte(`{"type":"thought","content":[]}`)
 		content := []byte(`{"type":"text","text":""}`)
 		content, _ = sjson.SetBytes(content, "text", text)
-		step, _ = sjson.SetRawBytes(step, "content.-1", content)
+		step = translatorcommon.SetRawArrayItems(step, "content", [][]byte{content})
 	case "function_call":
 		part := []byte(`{"type":"tool_use","id":"","name":"","input":{}}`)
 		part, _ = sjson.SetBytes(part, "id", st.ToolIDs[index])
@@ -367,7 +365,7 @@ func claudeNonStreamContentBlockStop(root gjson.Result, st *claudeToInteractions
 		step = []byte(`{"type":"model_output","content":[]}`)
 		content := []byte(`{"type":"text","text":""}`)
 		content, _ = sjson.SetBytes(content, "text", text)
-		step, _ = sjson.SetRawBytes(step, "content.-1", content)
+		step = translatorcommon.SetRawArrayItems(step, "content", [][]byte{content})
 	}
 	delete(st.CurrentStepByIndex, index)
 	delete(st.ToolNames, index)
