@@ -409,7 +409,11 @@ func ConvertGeminiResponseToOpenAINonStream(_ context.Context, _ string, origina
 				}
 
 				if hasTextContent {
-					choiceTemplate, _ = sjson.SetBytes(choiceTemplate, "message.content", textContent.String())
+					if !hasReasoningContent && len(partsResults) == 1 && len(toolCalls) == 0 && len(images) == 0 {
+						choiceTemplate, _ = sjson.SetBytes(choiceTemplate, "message.content", partsResults[0].Get("text").String())
+					} else {
+						choiceTemplate, _ = sjson.SetBytes(choiceTemplate, "message.content", textContent.String())
+					}
 				}
 				if hasReasoningContent {
 					choiceTemplate, _ = sjson.SetBytes(choiceTemplate, "message.reasoning_content", reasoningContent.String())
@@ -432,7 +436,7 @@ func ConvertGeminiResponseToOpenAINonStream(_ context.Context, _ string, origina
 			return true
 		})
 		if len(choicesList) > 0 {
-			template, _ = sjson.SetRawBytes(template, "choices", translatorcommon.JoinRawArray(choicesList))
+			template = translatorcommon.SetRawArrayItems(template, "choices", choicesList)
 		}
 	}
 
