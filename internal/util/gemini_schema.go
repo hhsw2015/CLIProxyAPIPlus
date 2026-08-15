@@ -84,6 +84,7 @@ func cleanJSONSchema(jsonStr string, options jsonSchemaCleanOptions) string {
 	jsonStr = moveConstraintsToDescription(jsonStr)
 
 	// Phase 2: Flatten complex structures
+	jsonStr = mergeConditionals(jsonStr)
 	jsonStr = mergeAllOf(jsonStr)
 	if options.flattenUnions {
 		jsonStr = flattenAnyOfOneOf(jsonStr)
@@ -312,6 +313,48 @@ func moveConstraintsToDescription(jsonStr string) string {
 	return jsonStr
 }
 
+func mergeConditionals(jsonStr string) string {
+	pathsByField := findPathsByFields(jsonStr, []string{"then", "else"})
+	var paths []string
+	for _, key := range []string{"then", "else"} {
+		for _, p := range pathsByField[key] {
+			parentPath := trimSuffix(p, "."+key)
+			if isPropertyDefinition(parentPath) {
+				continue
+			}
+			paths = append(paths, p)
+		}
+	}
+	sortByDepth(paths)
+
+	for _, p := range paths {
+		props := gjson.Get(jsonStr, joinPath(p, "properties"))
+		if !props.IsObject() {
+			continue
+		}
+		var parentPath string
+		if strings.HasSuffix(p, ".then") {
+			parentPath = trimSuffix(p, ".then")
+		} else if strings.HasSuffix(p, ".else") {
+			parentPath = trimSuffix(p, ".else")
+		} else if p == "then" || p == "else" {
+			parentPath = ""
+		} else {
+			continue
+		}
+
+		props.ForEach(func(key, value gjson.Result) bool {
+			destPath := joinPath(parentPath, "properties."+escapeGJSONPathKey(key.String()))
+			if !gjson.Get(jsonStr, destPath).Exists() {
+				updated, _ := sjson.SetRawBytes([]byte(jsonStr), destPath, []byte(value.Raw))
+				jsonStr = string(updated)
+			}
+			return true
+		})
+	}
+	return jsonStr
+}
+
 func mergeAllOf(jsonStr string) string {
 	paths := findPaths(jsonStr, "allOf")
 	sortByDepth(paths)
@@ -488,6 +531,7 @@ func removeUnsupportedKeywords(jsonStr string, options jsonSchemaCleanOptions) s
 	keywords := append(unsupportedConstraints,
 		"$schema", "$defs", "definitions", "const", "$ref", "$id", "additionalProperties",
 		"propertyNames", "patternProperties", // Gemini doesn't support these schema keywords
+		"if", "then", "else",
 		"$comment", "enumDescriptions", "enumTitles", "prefill", "deprecated", // Schema metadata fields unsupported by Gemini
 	)
 

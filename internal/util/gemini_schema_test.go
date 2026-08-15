@@ -1346,3 +1346,107 @@ func TestCleanJSONSchemaKeepsPropertiesNamedLikeKeywords(t *testing.T) {
 		}
 	}
 }
+
+func TestCleanJSONSchema_ConditionalKeywords(t *testing.T) {
+	// 1. Root-level if/then/else
+	rootInput := `{
+		"type": "object",
+		"properties": { "kind": { "type": "string", "enum": ["buy", "sell"] } },
+		"required": ["kind"],
+		"if":   { "properties": { "kind": { "const": "sell" } } },
+		"then": { "properties": { "sell_reason": { "type": "string", "description": "why the position is being sold" } }, "required": ["sell_reason"] },
+		"else": { "properties": { "buy_reason": { "type": "string" } } }
+	}`
+
+	for name, clean := range map[string]func(string) string{
+		"AntigravityResponse": CleanJSONSchemaForAntigravityResponse,
+		"Antigravity":         CleanJSONSchemaForAntigravity,
+		"Gemini":              CleanJSONSchemaForGemini,
+	} {
+		res := gjson.Parse(clean(rootInput))
+		if res.Get("if").Exists() {
+			t.Errorf("[%s] root 'if' was not removed: %s", name, res.Raw)
+		}
+		if res.Get("then").Exists() {
+			t.Errorf("[%s] root 'then' was not removed: %s", name, res.Raw)
+		}
+		if res.Get("else").Exists() {
+			t.Errorf("[%s] root 'else' was not removed: %s", name, res.Raw)
+		}
+		if !res.Get("properties.sell_reason").Exists() {
+			t.Errorf("[%s] then.properties.sell_reason was lost: %s", name, res.Raw)
+		}
+		if !res.Get("properties.buy_reason").Exists() {
+			t.Errorf("[%s] else.properties.buy_reason was lost: %s", name, res.Raw)
+		}
+		if res.Get("properties.sell_reason.description").String() != "why the position is being sold" {
+			t.Errorf("[%s] sell_reason description mismatch: %s", name, res.Raw)
+		}
+	}
+
+	// 2. allOf with if/then
+	allOfInput := `{
+		"type": "object",
+		"properties": { "kind": { "type": "string", "enum": ["buy", "sell"] } },
+		"required": ["kind"],
+		"allOf": [
+			{
+				"if":   { "properties": { "kind": { "const": "sell" } } },
+				"then": {
+					"properties": { "sell_reason": { "type": "string", "description": "why the position is being sold" } },
+					"required": ["sell_reason"]
+				}
+			}
+		]
+	}`
+
+	for name, clean := range map[string]func(string) string{
+		"AntigravityResponse": CleanJSONSchemaForAntigravityResponse,
+		"Antigravity":         CleanJSONSchemaForAntigravity,
+		"Gemini":              CleanJSONSchemaForGemini,
+	} {
+		res := gjson.Parse(clean(allOfInput))
+		if res.Get("allOf").Exists() {
+			t.Errorf("[%s] 'allOf' was not removed: %s", name, res.Raw)
+		}
+		if res.Get("if").Exists() || strings.Contains(res.Raw, `"if":`) {
+			t.Errorf("[%s] 'if' keyword present: %s", name, res.Raw)
+		}
+		if !res.Get("properties.sell_reason").Exists() {
+			t.Errorf("[%s] allOf.then.properties.sell_reason was lost: %s", name, res.Raw)
+		}
+		if res.Get("properties.sell_reason.description").String() != "why the position is being sold" {
+			t.Errorf("[%s] sell_reason description mismatch: %s", name, res.Raw)
+		}
+	}
+
+	// 3. Nested property with if/then
+	nestedInput := `{
+		"type": "object",
+		"properties": {
+			"trade": {
+				"type": "object",
+				"properties": { "kind": { "type": "string" } },
+				"if":   { "properties": { "kind": { "const": "sell" } } },
+				"then": { "properties": { "sell_reason": { "type": "string" } } }
+			}
+		}
+	}`
+
+	for name, clean := range map[string]func(string) string{
+		"AntigravityResponse": CleanJSONSchemaForAntigravityResponse,
+		"Antigravity":         CleanJSONSchemaForAntigravity,
+		"Gemini":              CleanJSONSchemaForGemini,
+	} {
+		res := gjson.Parse(clean(nestedInput))
+		if res.Get("properties.trade.if").Exists() {
+			t.Errorf("[%s] nested 'if' was not removed: %s", name, res.Raw)
+		}
+		if res.Get("properties.trade.then").Exists() {
+			t.Errorf("[%s] nested 'then' was not removed: %s", name, res.Raw)
+		}
+		if !res.Get("properties.trade.properties.sell_reason").Exists() {
+			t.Errorf("[%s] nested then.properties.sell_reason was lost: %s", name, res.Raw)
+		}
+	}
+}
