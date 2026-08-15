@@ -157,14 +157,18 @@ func interactionsStepToResponsesOutput(step gjson.Result) ([]byte, bool) {
 		if content.Type == gjson.String {
 			part := []byte(`{"type":"output_text","text":""}`)
 			part, _ = sjson.SetBytes(part, "text", content.String())
-			item, _ = sjson.SetRawBytes(item, "content.-1", part)
+			item = translatorcommon.SetRawArrayItems(item, "content", [][]byte{part})
 		} else {
+			var parts [][]byte
 			content.ForEach(func(_, part gjson.Result) bool {
 				if converted, ok := interactionsContentPartToResponses(part, "assistant"); ok {
-					item, _ = sjson.SetRawBytes(item, "content.-1", converted)
+					parts = append(parts, converted)
 				}
 				return true
 			})
+			if len(parts) > 0 {
+				item = translatorcommon.SetRawArrayItems(item, "content", parts)
+			}
 		}
 		return item, true
 	case "thought":
@@ -172,10 +176,15 @@ func interactionsStepToResponsesOutput(step gjson.Result) ([]byte, bool) {
 		if signature := interactionsThoughtSignature(step); signature != "" {
 			item, _ = sjson.SetBytes(item, "encrypted_content", signature)
 		}
-		for _, text := range interactionsContentTexts(step.Get("content")) {
-			part := []byte(`{"type":"summary_text","text":""}`)
-			part, _ = sjson.SetBytes(part, "text", text)
-			item, _ = sjson.SetRawBytes(item, "summary.-1", part)
+		texts := interactionsContentTexts(step.Get("content"))
+		if len(texts) > 0 {
+			summaries := make([][]byte, 0, len(texts))
+			for _, text := range texts {
+				part := []byte(`{"type":"summary_text","text":""}`)
+				part, _ = sjson.SetBytes(part, "text", text)
+				summaries = append(summaries, part)
+			}
+			item = translatorcommon.SetRawArrayItems(item, "summary", summaries)
 		}
 		return item, true
 	case "function_call":
@@ -447,6 +456,7 @@ func setResponsesCompletedOutput(payload []byte, st *interactionsToResponsesStre
 			maxIndex = index
 		}
 	}
+	var outputItems [][]byte
 	for index := 0; index <= maxIndex; index++ {
 		itemType, ok := st.ItemTypes[index]
 		if !ok {
@@ -454,8 +464,11 @@ func setResponsesCompletedOutput(payload []byte, st *interactionsToResponsesStre
 		}
 		item, ok := responsesCompletedOutputItem(index, itemType, st)
 		if ok {
-			payload, _ = sjson.SetRawBytes(payload, "response.output.-1", item)
+			outputItems = append(outputItems, item)
 		}
+	}
+	if len(outputItems) > 0 {
+		payload = translatorcommon.SetRawArrayItems(payload, "response.output", outputItems)
 	}
 	return payload
 }
@@ -475,7 +488,7 @@ func responsesCompletedOutputItem(index int, itemType string, st *interactionsTo
 		if builder := st.TextOutputs[index]; builder != nil && builder.String() != "" {
 			part := []byte(`{"type":"output_text","text":""}`)
 			part, _ = sjson.SetBytes(part, "text", builder.String())
-			item, _ = sjson.SetRawBytes(item, "content.-1", part)
+			item = translatorcommon.SetRawArrayItems(item, "content", [][]byte{part})
 		}
 		return item, true
 	case "thought":
@@ -500,10 +513,15 @@ func responsesReasoningItem(index int, st *interactionsToResponsesStreamState) [
 	if signature := st.ReasoningEncrypted[index]; signature != "" {
 		item, _ = sjson.SetBytes(item, "encrypted_content", signature)
 	}
-	for _, text := range st.ReasoningSummaries[index] {
-		part := []byte(`{"type":"summary_text","text":""}`)
-		part, _ = sjson.SetBytes(part, "text", text)
-		item, _ = sjson.SetRawBytes(item, "summary.-1", part)
+	summaries := st.ReasoningSummaries[index]
+	if len(summaries) > 0 {
+		summaryBlocks := make([][]byte, 0, len(summaries))
+		for _, text := range summaries {
+			part := []byte(`{"type":"summary_text","text":""}`)
+			part, _ = sjson.SetBytes(part, "text", text)
+			summaryBlocks = append(summaryBlocks, part)
+		}
+		item = translatorcommon.SetRawArrayItems(item, "summary", summaryBlocks)
 	}
 	return item
 }

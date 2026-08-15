@@ -235,7 +235,7 @@ func responsesInputItemToInteractions(item gjson.Result, functionNamesByCallID m
 		step := []byte(`{"type":"","content":[]}`)
 		step, _ = sjson.SetBytes(step, "type", stepType)
 		if part, ok := responsesContentPartToInteractions(item); ok {
-			step, _ = sjson.SetRawBytes(step, "content.-1", part)
+			step = translatorcommon.SetRawArrayItems(step, "content", [][]byte{part})
 		}
 		return step
 	default:

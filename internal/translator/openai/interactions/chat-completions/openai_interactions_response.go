@@ -64,6 +64,7 @@ func ConvertInteractionsResponseToOpenAINonStream(ctx context.Context, modelName
 	var textBuilder strings.Builder
 	var reasoningBuilder strings.Builder
 	sawToolCall := false
+	var toolCalls [][]byte
 	steps.ForEach(func(_, step gjson.Result) bool {
 		switch step.Get("type").String() {
 		case "model_output":
@@ -76,7 +77,7 @@ func ConvertInteractionsResponseToOpenAINonStream(ctx context.Context, modelName
 			}
 		case "function_call":
 			sawToolCall = true
-			out, _ = sjson.SetRawBytes(out, "choices.0.message.tool_calls.-1", openAIChatToolCallFromInteractions(step, gjson.Result{}))
+			toolCalls = append(toolCalls, openAIChatToolCallFromInteractions(step, gjson.Result{}))
 		}
 		return true
 	})
@@ -85,6 +86,9 @@ func ConvertInteractionsResponseToOpenAINonStream(ctx context.Context, modelName
 	}
 	if reasoningBuilder.Len() > 0 {
 		out, _ = sjson.SetBytes(out, "choices.0.message.reasoning_content", reasoningBuilder.String())
+	}
+	if len(toolCalls) > 0 {
+		out = translatorcommon.SetRawArrayItems(out, "choices.0.message.tool_calls", toolCalls)
 	}
 	if sawToolCall {
 		out, _ = sjson.SetBytes(out, "choices.0.message.content", nil)
