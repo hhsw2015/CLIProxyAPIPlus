@@ -178,12 +178,18 @@ func (m *Manager) executeHome(ctx context.Context, providers []string, req clipr
 			}
 			result.Error = resultErrorFromError(errExecute)
 			result.RetryAfter = retryAfterFromError(errExecute)
+			if isCredentialScopedError(errExecute) {
+				result.CredentialScope = true
+			}
 			m.reportHomeResult(execCtx, result, preparedAuth)
 			lastErr = errExecute
 			if isRequestInvalidError(errExecute) {
 				releaseAttempt()
 				selection.End("request_invalid")
 				return cliproxyexecutor.Response{}, errExecute
+			}
+			if result.CredentialScope {
+				break
 			}
 		}
 		releaseAttempt()
