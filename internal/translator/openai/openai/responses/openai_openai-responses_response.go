@@ -162,7 +162,6 @@ func buildResponsesCompletedEvent(st *oaiToResponsesState, requestRawJSON []byte
 		}
 	}
 
-	outputsWrapper := []byte(`{"arr":[]}`)
 	type completedOutputItem struct {
 		index int
 		raw   []byte
@@ -228,11 +227,12 @@ func buildResponsesCompletedEvent(st *oaiToResponsesState, requestRawJSON []byte
 		}
 	}
 	sort.Slice(outputItems, func(i, j int) bool { return outputItems[i].index < outputItems[j].index })
+	outputs := make([][]byte, 0, len(outputItems))
 	for _, item := range outputItems {
-		outputsWrapper, _ = sjson.SetRawBytes(outputsWrapper, "arr.-1", item.raw)
+		outputs = append(outputs, item.raw)
 	}
-	if gjson.GetBytes(outputsWrapper, "arr.#").Int() > 0 {
-		completed, _ = sjson.SetRawBytes(completed, "response.output", []byte(gjson.GetBytes(outputsWrapper, "arr").Raw))
+	if len(outputs) > 0 {
+		completed, _ = sjson.SetRawBytes(completed, "response.output", translatorcommon.JoinRawArray(outputs))
 	}
 	if st.UsageSeen {
 		completed, _ = sjson.SetBytes(completed, "response.usage.input_tokens", st.PromptTokens)

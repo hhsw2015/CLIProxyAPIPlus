@@ -92,12 +92,16 @@ func ConvertInteractionsResponseToOpenAIResponsesNonStream(ctx context.Context, 
 	if !steps.Exists() {
 		steps = root.Get("interaction.steps")
 	}
+	var outputs [][]byte
 	steps.ForEach(func(_, step gjson.Result) bool {
 		if item, ok := interactionsStepToResponsesOutput(step); ok {
-			out, _ = sjson.SetRawBytes(out, "output.-1", item)
+			outputs = append(outputs, item)
 		}
 		return true
 	})
+	if len(outputs) > 0 {
+		out, _ = sjson.SetRawBytes(out, "output", translatorcommon.JoinRawArray(outputs))
+	}
 	if envID := firstNonEmpty(root.Get("environment_id").String(), root.Get("interaction.environment_id").String(), root.Get("environment.id").String(), root.Get("interaction.environment.id").String()); envID != "" {
 		out, _ = sjson.SetBytes(out, "environment_id", envID)
 	}
@@ -555,12 +559,16 @@ func ConvertOpenAIResponsesResponseToInteractionsNonStream(ctx context.Context, 
 	out := []byte(`{"id":"","object":"interaction","status":"completed","model":"","steps":[]}`)
 	out, _ = sjson.SetBytes(out, "id", root.Get("id").String())
 	out, _ = sjson.SetBytes(out, "model", responseModel(modelName, root))
+	var stepItems [][]byte
 	root.Get("output").ForEach(func(_, item gjson.Result) bool {
 		if step, ok := openAIResponsesOutputItemToInteractionsStep(item); ok {
-			out, _ = sjson.SetRawBytes(out, "steps.-1", step)
+			stepItems = append(stepItems, step)
 		}
 		return true
 	})
+	if len(stepItems) > 0 {
+		out, _ = sjson.SetRawBytes(out, "steps", translatorcommon.JoinRawArray(stepItems))
+	}
 	out = setInteractionsUsageFromResponses(out, "usage", root.Get("usage"))
 	return out
 }

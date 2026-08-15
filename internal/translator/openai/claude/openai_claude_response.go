@@ -634,6 +634,7 @@ func ConvertOpenAIResponseToClaudeNonStream(_ context.Context, _ string, origina
 
 	hasToolCall := false
 	stopReasonSet := false
+	var blocks [][]byte
 
 	if choices := root.Get("choices"); choices.Exists() && choices.IsArray() && len(choices.Array()) > 0 {
 		choice := choices.Array()[0]
@@ -655,7 +656,7 @@ func ConvertOpenAIResponseToClaudeNonStream(_ context.Context, _ string, origina
 						}
 						block := []byte(`{"type":"text","text":""}`)
 						block, _ = sjson.SetBytes(block, "text", textBuilder.String())
-						out, _ = sjson.SetRawBytes(out, "content.-1", block)
+						blocks = append(blocks, block)
 						textBuilder.Reset()
 					}
 
@@ -665,7 +666,7 @@ func ConvertOpenAIResponseToClaudeNonStream(_ context.Context, _ string, origina
 						}
 						block := []byte(`{"type":"thinking","thinking":""}`)
 						block, _ = sjson.SetBytes(block, "thinking", thinkingBuilder.String())
-						out, _ = sjson.SetRawBytes(out, "content.-1", block)
+						blocks = append(blocks, block)
 						thinkingBuilder.Reset()
 					}
 
@@ -697,7 +698,7 @@ func ConvertOpenAIResponseToClaudeNonStream(_ context.Context, _ string, origina
 										toolUse, _ = sjson.SetRawBytes(toolUse, "input", []byte(`{}`))
 									}
 
-									out, _ = sjson.SetRawBytes(out, "content.-1", toolUse)
+									blocks = append(blocks, toolUse)
 									return true
 								})
 							}
@@ -719,7 +720,7 @@ func ConvertOpenAIResponseToClaudeNonStream(_ context.Context, _ string, origina
 					if textContent != "" {
 						block := []byte(`{"type":"text","text":""}`)
 						block, _ = sjson.SetBytes(block, "text", textContent)
-						out, _ = sjson.SetRawBytes(out, "content.-1", block)
+						blocks = append(blocks, block)
 					}
 				}
 			}
@@ -731,7 +732,7 @@ func ConvertOpenAIResponseToClaudeNonStream(_ context.Context, _ string, origina
 					}
 					block := []byte(`{"type":"thinking","thinking":""}`)
 					block, _ = sjson.SetBytes(block, "thinking", reasoningText)
-					out, _ = sjson.SetRawBytes(out, "content.-1", block)
+					blocks = append(blocks, block)
 				}
 			}
 
@@ -754,11 +755,15 @@ func ConvertOpenAIResponseToClaudeNonStream(_ context.Context, _ string, origina
 						toolUseBlock, _ = sjson.SetRawBytes(toolUseBlock, "input", []byte(`{}`))
 					}
 
-					out, _ = sjson.SetRawBytes(out, "content.-1", toolUseBlock)
+					blocks = append(blocks, toolUseBlock)
 					return true
 				})
 			}
 		}
+	}
+
+	if len(blocks) > 0 {
+		out, _ = sjson.SetRawBytes(out, "content", translatorcommon.JoinRawArray(blocks))
 	}
 
 	if respUsage := root.Get("usage"); respUsage.Exists() {
