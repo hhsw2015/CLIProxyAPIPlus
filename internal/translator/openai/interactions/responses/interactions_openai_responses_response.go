@@ -13,6 +13,7 @@ import (
 )
 
 type interactionsToResponsesStreamState struct {
+	EnvironmentID      string
 	FunctionCalls      map[int]*interactionsFunctionCallState
 	ItemIDs            map[int]string
 	ItemTypes          map[int]string
@@ -97,6 +98,9 @@ func ConvertInteractionsResponseToOpenAIResponsesNonStream(ctx context.Context, 
 		}
 		return true
 	})
+	if envID := firstNonEmpty(root.Get("environment_id").String(), root.Get("interaction.environment_id").String(), root.Get("environment.id").String(), root.Get("interaction.environment.id").String()); envID != "" {
+		out, _ = sjson.SetBytes(out, "environment_id", envID)
+	}
 	out = setResponsesUsageFromInteractions(out, "usage", translatorcommon.InteractionsUsage(root))
 	return out
 }
@@ -181,6 +185,12 @@ func responsesCreatedEvent(modelName string, originalRequestRawJSON, requestRawJ
 	payload, _ = sjson.SetBytes(payload, "sequence_number", nextResponsesSeq(st))
 	payload, _ = sjson.SetBytes(payload, "response.id", firstNonEmpty(root.Get("interaction.id").String(), root.Get("id").String()))
 	payload, _ = sjson.SetBytes(payload, "response.model", modelName)
+	if envID := firstNonEmpty(root.Get("interaction.environment_id").String(), root.Get("environment_id").String(), root.Get("environment.id").String(), root.Get("interaction.environment.id").String()); envID != "" {
+		if st != nil {
+			st.EnvironmentID = envID
+		}
+		payload, _ = sjson.SetBytes(payload, "response.environment_id", envID)
+	}
 	requestModelName := translatorcommon.RequestModelName(originalRequestRawJSON, requestRawJSON)
 	if requestModelName == "" {
 		requestModelName = modelName
@@ -368,6 +378,13 @@ func responsesCompletedEvent(modelName string, root gjson.Result, st *interactio
 	interaction := root.Get("interaction")
 	payload, _ = sjson.SetBytes(payload, "response.id", firstNonEmpty(interaction.Get("id").String(), root.Get("id").String()))
 	payload, _ = sjson.SetBytes(payload, "response.model", firstNonEmpty(interaction.Get("model").String(), modelName))
+	envID := firstNonEmpty(interaction.Get("environment_id").String(), root.Get("environment_id").String(), interaction.Get("environment.id").String(), root.Get("environment.id").String())
+	if envID == "" && st != nil {
+		envID = st.EnvironmentID
+	}
+	if envID != "" {
+		payload, _ = sjson.SetBytes(payload, "response.environment_id", envID)
+	}
 	payload = setResponsesCompletedOutput(payload, st)
 	payload = setResponsesUsageFromInteractions(payload, "response.usage", translatorcommon.InteractionsUsage(root))
 	return emitResponsesEvent("response.completed", payload)
