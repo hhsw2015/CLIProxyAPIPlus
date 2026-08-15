@@ -58,6 +58,8 @@ type Result struct {
 	CredentialScope bool
 	// Error describes the failure when Success is false.
 	Error *Error
+	// Options carries execution request options (headers, metadata, etc.) for result tracking.
+	Options cliproxyexecutor.Options
 }
 
 // Selector chooses an auth candidate for execution.
