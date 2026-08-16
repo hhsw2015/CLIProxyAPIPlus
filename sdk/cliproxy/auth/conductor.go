@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/clienterror"
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/home"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
@@ -170,8 +171,12 @@ type Result struct {
 	Success bool
 	// RetryAfter carries a provider supplied retry hint (e.g. 429 retryDelay).
 	RetryAfter *time.Duration
+	// CredentialScope indicates that the failure affects the whole credential across models (e.g. Anthropic 5h/7d unified limits).
+	CredentialScope bool
 	// Error describes the failure when Success is false.
 	Error *Error
+	// Options carries execution request options (headers, metadata, etc.) for result tracking.
+	Options cliproxyexecutor.Options
 }
 
 // Selector chooses an auth candidate for execution.
@@ -2170,13 +2175,19 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 		}
 		if errStream != nil {
 			rerr := resultErrorFromError(errStream)
-			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: rerr}
+			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: rerr, Options: execOpts}
 			result.RetryAfter = retryAfterFromError(errStream)
+			if isCredentialScopedError(errStream) {
+				result.CredentialScope = true
+			}
 			m.recordExecutionResult(ctx, result, auth, ephemeralResult)
 			if isRequestInvalidError(errStream) {
 				return nil, errStream
 			}
 			lastErr = errStream
+			if result.CredentialScope {
+				break
+			}
 			continue
 		}
 
@@ -2216,11 +2227,17 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			}
 			if idx < len(execModels)-1 {
 				rerr := resultErrorFromError(bootstrapErr)
-				result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: rerr}
+				result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: rerr, Options: execOpts}
 				result.RetryAfter = retryAfterFromError(bootstrapErr)
+				if isCredentialScopedError(bootstrapErr) {
+					result.CredentialScope = true
+				}
 				m.recordExecutionResult(ctx, result, auth, ephemeralResult)
 				discardStreamChunks(streamResult.Chunks)
 				lastErr = bootstrapErr
+				if result.CredentialScope {
+					break
+				}
 				continue
 			}
 			rerr := resultErrorFromError(bootstrapErr)
@@ -2506,6 +2523,16 @@ func (m *Manager) Update(ctx context.Context, auth *Auth) (*Auth, error) {
 	if !existing.Disabled && existing.Status != StatusDisabled && !auth.Disabled && auth.Status != StatusDisabled {
 		if len(auth.ModelStates) == 0 && len(existing.ModelStates) > 0 {
 			auth.ModelStates = existing.ModelStates
+		}
+		// Preserve an active credential-scoped cooldown across config reloads so a
+		// unified rate-limit (5h/7d) is not reset to available by a routine Update.
+		if existing.Quota.Exceeded && existing.Quota.Reason == "credential_quota" && existing.Quota.NextRecoverAt.After(time.Now()) {
+			auth.Unavailable = existing.Unavailable
+			auth.NextRetryAfter = existing.NextRetryAfter
+			auth.Quota = existing.Quota
+			if auth.Status == StatusActive {
+				auth.Status = existing.Status
+			}
 		}
 	}
 	now := time.Now()
@@ -2976,7 +3003,7 @@ func (m *Manager) executeHome(ctx context.Context, providers []string, req clipr
 					}
 				}
 			}
-			result := Result{AuthID: preparedAuth.ID, Provider: selection.Provider, Model: resultModel, Success: errExecute == nil}
+			result := Result{AuthID: preparedAuth.ID, Provider: selection.Provider, Model: resultModel, Success: errExecute == nil, Options: execOpts}
 			if errExecute == nil {
 				m.reportHomeResult(execCtx, result, preparedAuth)
 				releaseAttempt()
@@ -2988,12 +3015,18 @@ func (m *Manager) executeHome(ctx context.Context, providers []string, req clipr
 			}
 			result.Error = resultErrorFromError(errExecute)
 			result.RetryAfter = retryAfterFromError(errExecute)
+			if isCredentialScopedError(errExecute) {
+				result.CredentialScope = true
+			}
 			m.reportHomeResult(execCtx, result, preparedAuth)
 			lastErr = errExecute
 			if isRequestInvalidError(errExecute) {
 				releaseAttempt()
 				selection.End("request_invalid")
 				return cliproxyexecutor.Response{}, errExecute
+			}
+			if result.CredentialScope {
+				break
 			}
 		}
 		releaseAttempt()
@@ -3183,17 +3216,23 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 					}
 				}
 			}
-			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: errExec == nil}
+			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: errExec == nil, Options: execOpts}
 			if errExec != nil {
 				result.Error = resultErrorFromError(errExec)
 				if ra := retryAfterFromError(errExec); ra != nil {
 					result.RetryAfter = ra
+				}
+				if isCredentialScopedError(errExec) {
+					result.CredentialScope = true
 				}
 				m.MarkResult(execCtx, result)
 				if isRequestInvalidError(errExec) {
 					return cliproxyexecutor.Response{}, errExec
 				}
 				authErr = errExec
+				if result.CredentialScope {
+					break
+				}
 				continue
 			}
 			m.MarkResult(execCtx, result)
@@ -3299,7 +3338,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 					}
 				}
 			}
-			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: errExec == nil}
+			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: errExec == nil, Options: execOpts}
 			if errExec != nil {
 				result.Error = resultErrorFromError(errExec)
 				if ra := retryAfterFromError(errExec); ra != nil {
@@ -3312,12 +3351,18 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 				if isCountTokensEndpointNotFoundError(errExec, execReq.Model) {
 					m.recordAvailabilityNeutralResult(execCtx, result)
 				} else {
+					if isCredentialScopedError(errExec) {
+						result.CredentialScope = true
+					}
 					m.MarkResult(execCtx, result)
 				}
 				if isRequestInvalidError(errExec) {
 					return cliproxyexecutor.Response{}, errExec
 				}
 				authErr = errExec
+				if result.CredentialScope {
+					break
+				}
 				continue
 			}
 			m.MarkResult(execCtx, result)
@@ -3555,7 +3600,19 @@ func sanitizeDownstreamWebsocketFallbackRequest(ctx context.Context, auth *Auth,
 	return req
 }
 
+func cloneRequestMetadata(src map[string]any) map[string]any {
+	if len(src) == 0 {
+		return make(map[string]any, 4)
+	}
+	dst := make(map[string]any, len(src)+4)
+	for k, v := range src {
+		dst[k] = v
+	}
+	return dst
+}
+
 func ensureRequestedModelMetadata(opts cliproxyexecutor.Options, requestedModel string) cliproxyexecutor.Options {
+	opts.Metadata = cloneRequestMetadata(opts.Metadata)
 	requestedModel = strings.TrimSpace(requestedModel)
 	if requestedModel == "" {
 		return opts
@@ -3563,16 +3620,7 @@ func ensureRequestedModelMetadata(opts cliproxyexecutor.Options, requestedModel 
 	if hasRequestedModelMetadata(opts.Metadata) {
 		return opts
 	}
-	if len(opts.Metadata) == 0 {
-		opts.Metadata = map[string]any{cliproxyexecutor.RequestedModelMetadataKey: requestedModel}
-		return opts
-	}
-	meta := make(map[string]any, len(opts.Metadata)+1)
-	for k, v := range opts.Metadata {
-		meta[k] = v
-	}
-	meta[cliproxyexecutor.RequestedModelMetadataKey] = requestedModel
-	opts.Metadata = meta
+	opts.Metadata[cliproxyexecutor.RequestedModelMetadataKey] = requestedModel
 	return opts
 }
 
@@ -4487,7 +4535,11 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 		}
 
 		if result.Success {
-			if result.Model != "" {
+			if auth.Quota.Exceeded && auth.Quota.Reason == "credential_quota" && auth.Quota.NextRecoverAt.After(now) {
+				// Retain active credential-scoped cooldown: a single model
+				// success must not clear an auth-wide unified rate-limit (5h/7d)
+				// cooldown that still applies to the whole credential.
+			} else if result.Model != "" {
 				state := ensureModelState(auth, result.Model)
 				resetModelState(state, now)
 				updateAggregatedAvailability(auth, now)
@@ -4615,6 +4667,9 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 								} else {
 									next, backoffLevel = quotaCooldownAfterFailure(state.Quota, now)
 								}
+								if state.Quota.Exceeded && state.Quota.NextRecoverAt.After(next) {
+									next = state.Quota.NextRecoverAt
+								}
 							}
 							state.NextRetryAfter = next
 							// disable-cooling clears both NextRetryAfter AND
@@ -4637,6 +4692,38 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 								suspendReason = "quota"
 								shouldSuspendModel = true
 								setModelQuota = true
+							}
+							// Credential-scoped rejection (e.g. Anthropic unified
+							// 5h/7d limit): the failure applies to the whole
+							// credential, so cool down every model state and the
+							// auth itself, not just the model that happened to run.
+							if result.CredentialScope && !disableCooling {
+								for _, otherState := range auth.ModelStates {
+									if otherState != nil && otherState != state {
+										otherState.Unavailable = true
+										otherState.Status = StatusError
+										otherNext := next
+										if otherState.Quota.Exceeded && otherState.Quota.NextRecoverAt.After(otherNext) {
+											otherNext = otherState.Quota.NextRecoverAt
+										}
+										otherState.NextRetryAfter = otherNext
+										otherState.Quota = QuotaState{
+											Exceeded:      true,
+											Reason:        "credential_quota",
+											NextRecoverAt: otherNext,
+											BackoffLevel:  backoffLevel,
+										}
+									}
+								}
+								auth.Unavailable = true
+								auth.Quota.Exceeded = true
+								auth.Quota.Reason = "credential_quota"
+								authNext := next
+								if auth.Quota.NextRecoverAt.After(authNext) {
+									authNext = auth.Quota.NextRecoverAt
+								}
+								auth.Quota.NextRecoverAt = authNext
+								auth.NextRetryAfter = authNext
 							}
 						case 408, 500, 502, 503, 504:
 							if disableCooling {
@@ -4688,6 +4775,21 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 
 	m.hook.OnResult(ctx, result)
 	m.publishErrorEvent(result, authSnapshot)
+	m.updateSessionAffinity(result)
+}
+
+// updateSessionAffinity forwards the execution result to the active selector when
+// it implements OnResult, so session→credential bindings are refreshed on success
+// or released on credential-scoped failures.
+func (m *Manager) updateSessionAffinity(result Result) {
+	if m == nil || m.selector == nil {
+		return
+	}
+	if affinity, ok := m.selector.(interface {
+		OnResult(Result)
+	}); ok && affinity != nil {
+		affinity.OnResult(result)
+	}
 }
 
 func (m *Manager) recordExecutionResult(ctx context.Context, result Result, auth *Auth, ephemeral bool) {
@@ -4783,6 +4885,10 @@ func updateAggregatedAvailability(auth *Auth, now time.Time) {
 	if auth == nil {
 		return
 	}
+	if auth.Quota.Exceeded && auth.Quota.Reason == "credential_quota" && auth.Quota.NextRecoverAt.After(now) {
+		auth.Unavailable = true
+		return
+	}
 	if len(auth.ModelStates) == 0 {
 		clearAggregatedAvailability(auth)
 		return
@@ -4840,8 +4946,14 @@ func updateAggregatedAvailability(auth *Auth, now time.Time) {
 	if quotaExceeded {
 		auth.Quota.Exceeded = true
 		auth.Quota.Reason = "quota"
+		if auth.Quota.NextRecoverAt.After(quotaRecover) {
+			quotaRecover = auth.Quota.NextRecoverAt
+		}
 		auth.Quota.NextRecoverAt = quotaRecover
 		auth.Quota.BackoffLevel = maxBackoffLevel
+	} else if auth.Quota.Exceeded && auth.Quota.NextRecoverAt.After(now) {
+		// Retain active auth-level quota cooldown even when no model state
+		// currently reports quota exhaustion (e.g. credential-scoped cooldown).
 	} else {
 		auth.Quota.Exceeded = false
 		auth.Quota.Reason = ""
@@ -5185,7 +5297,65 @@ func isRequestScopedResultError(err *Error) bool {
 	if err.HTTPStatus == http.StatusNotImplemented {
 		return true
 	}
-	return err.IsRequestScoped() || isRequestScopedNotFoundResultError(err)
+	return err.IsRequestScoped() || isRequestScopedNotFoundResultError(err) || isRequestInvalidError(err)
+}
+
+// isCredentialScopedError reports whether the error indicates a failure that
+// affects the whole credential across models (e.g. Anthropic unified 5h/7d
+// rate limits), so the caller stops walking other models on the same credential.
+func isCredentialScopedError(err error) bool {
+	if err == nil {
+		return false
+	}
+	type credentialScopedProvider interface {
+		IsCredentialScoped() bool
+	}
+	var csp credentialScopedProvider
+	return errors.As(err, &csp) && csp != nil && csp.IsCredentialScoped()
+}
+
+// shouldSkipCredentialCooldown reports failures that must not release the
+// session→credential binding or cool the credential: request-scoped faults and
+// transport/connection lifecycle drops (client cancel, EOF, websocket close).
+func shouldSkipCredentialCooldown(err *Error) bool {
+	return isRequestScopedResultError(err) || isConnectionLifecycleResultError(err)
+}
+
+func isConnectionLifecycleResultError(err *Error) bool {
+	if err == nil {
+		return false
+	}
+	if err.Code == connectionLifecycleErrorCode {
+		return true
+	}
+	// Message fallback only when no HTTP status is attached, so 401/429/5xx
+	// response bodies cannot suppress credential cooldown.
+	if statusCodeFromResult(err) != 0 {
+		return false
+	}
+	return isConnectionLifecycleMessage(err.Message)
+}
+
+func isConnectionLifecycleMessage(message string) bool {
+	lower := strings.ToLower(strings.TrimSpace(message))
+	if lower == "" {
+		return false
+	}
+	switch lower {
+	case "context canceled", "context deadline exceeded", "eof", "unexpected eof":
+		return true
+	}
+	// gorilla/websocket CloseError.Error() and common wrappers.
+	if strings.Contains(lower, "websocket: close 1000") ||
+		strings.Contains(lower, "websocket: close 1001") ||
+		strings.Contains(lower, "websocket: close 1006") {
+		return true
+	}
+	// Wrapped transport EOF phrasing (e.g. "read tcp ...: unexpected EOF").
+	if strings.Contains(lower, "unexpected eof") {
+		return true
+	}
+	return false
 }
 
 func isCountTokensEndpointNotFoundError(err error, requestedModel string) bool {
@@ -5404,6 +5574,21 @@ func isRequestInvalidError(err error) bool {
 		return false
 	}
 	status := statusCodeFromError(err)
+	// Request-fault bodies (e.g. invalid_request_error) are client faults
+	// regardless of the paired HTTP status, so a healthy credential is not
+	// cooled for a caller's malformed request. clienterror already excludes
+	// genuine credential failures (401 authentication_error, 402, 429).
+	if clienterror.IsRequestFault(status, err) {
+		return true
+	}
+	var authErr *Error
+	if errors.As(err, &authErr) && authErr != nil && authErr.Message != "" {
+		// When Code is set, Error() formats as "Code: Message" which breaks JSON
+		// body parsing; re-evaluate against the raw message body.
+		if clienterror.IsRequestFault(status, errors.New(authErr.Message)) {
+			return true
+		}
+	}
 	switch status {
 	case http.StatusBadRequest:
 		msg := err.Error()
@@ -5712,6 +5897,10 @@ func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, op
 		return auth, exec, err
 	}
 
+	opts.EnsureMetadata()
+	opts.Metadata[cliproxyexecutor.SessionAffinityProviderMetadataKey] = provider
+	opts.Metadata[cliproxyexecutor.SessionAffinityModelMetadataKey] = selectionArgForSelector(m.selector, model)
+
 	pinnedAuthID := pinnedAuthIDFromMetadata(opts.Metadata)
 	disallowFreeAuth := disallowFreeAuthFromMetadata(opts.Metadata)
 
@@ -5891,10 +6080,13 @@ func (m *Manager) SelectHomeAuthByKind(ctx context.Context, provider string, mod
 }
 
 func (m *Manager) pickNext(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, ProviderExecutor, error) {
+	opts.EnsureMetadata()
 	if m.HomeEnabled() {
 		auth, exec, _, err := m.pickNextViaHome(ctx, model, opts, tried)
 		return auth, exec, err
 	}
+	opts.Metadata[cliproxyexecutor.SessionAffinityProviderMetadataKey] = provider
+	opts.Metadata[cliproxyexecutor.SessionAffinityModelMetadataKey] = model
 
 	if m.hasPluginScheduler() || !m.useSchedulerFastPath() {
 		return m.pickNextLegacy(ctx, provider, model, opts, tried)
@@ -5956,6 +6148,10 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 	if m.HomeEnabled() {
 		return m.pickNextViaHome(ctx, model, opts, tried)
 	}
+
+	opts.EnsureMetadata()
+	opts.Metadata[cliproxyexecutor.SessionAffinityProviderMetadataKey] = "mixed"
+	opts.Metadata[cliproxyexecutor.SessionAffinityModelMetadataKey] = selectionArgForSelector(m.selector, model)
 
 	pinnedAuthID := pinnedAuthIDFromMetadata(opts.Metadata)
 	disallowFreeAuth := disallowFreeAuthFromMetadata(opts.Metadata)
@@ -6059,9 +6255,12 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 }
 
 func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, ProviderExecutor, string, error) {
+	opts.EnsureMetadata()
 	if m.HomeEnabled() {
 		return m.pickNextViaHome(ctx, model, opts, tried)
 	}
+	opts.Metadata[cliproxyexecutor.SessionAffinityProviderMetadataKey] = "mixed"
+	opts.Metadata[cliproxyexecutor.SessionAffinityModelMetadataKey] = model
 
 	if m.hasPluginScheduler() || !m.useSchedulerFastPath() {
 		return m.pickNextMixedLegacy(ctx, providers, model, opts, tried)
@@ -7087,13 +7286,19 @@ func (m *Manager) tryAntigravityCreditsExecute(ctx context.Context, req cliproxy
 			execReq := req
 			execReq.Model = upstreamModel
 			resp, errExec := c.executor.Execute(creditsCtx, c.auth, execReq, creditsOpts)
-			result := Result{AuthID: c.auth.ID, Provider: c.provider, Model: resultModel, Success: errExec == nil}
+			result := Result{AuthID: c.auth.ID, Provider: c.provider, Model: resultModel, Success: errExec == nil, Options: creditsOpts}
 			if errExec != nil {
 				result.Error = resultErrorFromError(errExec)
 				if ra := retryAfterFromError(errExec); ra != nil {
 					result.RetryAfter = ra
 				}
+				if isCredentialScopedError(errExec) {
+					result.CredentialScope = true
+				}
 				m.MarkResult(creditsCtx, result)
+				if result.CredentialScope {
+					break
+				}
 				continue
 			}
 			m.MarkResult(creditsCtx, result)

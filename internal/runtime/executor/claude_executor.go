@@ -327,6 +327,64 @@ func (e *ClaudeExecutor) HttpRequest(ctx context.Context, auth *cliproxyauth.Aut
 	return helps.HeadroomDo(httpClient, httpReq)
 }
 
+// claudeEntitlementError marks an upstream refusal that no other credential can
+// satisfy (fast-mode credits) as request-scoped, so the auth manager surfaces it
+// to the caller instead of walking and cooling the whole Claude pool.
+type claudeEntitlementError struct {
+	statusErr
+}
+
+func (claudeEntitlementError) IsRequestScoped() bool { return true }
+
+func (claudeEntitlementError) IsCredentialScoped() bool { return false }
+
+// claudeRateLimitError carries an upstream Claude 429. When credentialScoped is
+// set (Anthropic unified 5h/7d limit), the failure applies to the whole
+// credential across models, so the auth manager cools the credential rather than
+// only the model that happened to run.
+type claudeRateLimitError struct {
+	statusErr
+	credentialScoped bool
+}
+
+func (e claudeRateLimitError) IsCredentialScoped() bool { return e.credentialScoped }
+
+func (e claudeRateLimitError) IsRequestScoped() bool { return false }
+
+// classifyClaudeUpstreamError turns an upstream Claude error into a typed error
+// that tells the auth manager how far the failure reaches (request, model, or
+// whole credential) and carries any retry-after hint parsed from headers.
+func classifyClaudeUpstreamError(statusCode int, headers http.Header, body []byte) error {
+	var retryAfter *time.Duration
+	if statusCode == http.StatusTooManyRequests || (statusCode >= 400 && statusCode < 600) {
+		retryAfter = helps.ParseClaudeRateLimitReset(headers, time.Now())
+	}
+	err := statusErr{code: statusCode, msg: string(body), retryAfter: retryAfter}
+	if statusCode == http.StatusTooManyRequests {
+		if helps.ClaudeHeadersIndicateUnifiedRateLimitRejection(headers) {
+			return claudeRateLimitError{statusErr: err, credentialScoped: true}
+		}
+		if claudeBodyIndicatesFastModeCredits(body) {
+			return claudeEntitlementError{err}
+		}
+		// Ordinary model-level Claude 429 (not a unified 5h/7d rejection).
+		return claudeRateLimitError{statusErr: err, credentialScoped: false}
+	}
+	return err
+}
+
+// claudeBodyIndicatesFastModeCredits reports whether a 429 body is a fast-mode
+// credits refusal that no other credential can satisfy.
+func claudeBodyIndicatesFastModeCredits(body []byte) bool {
+	message := strings.ToLower(gjson.GetBytes(body, "error.message").String())
+	if message == "" {
+		message = strings.ToLower(string(body))
+	}
+	return strings.Contains(message, "fast request rejected") ||
+		(strings.Contains(message, "fast") &&
+			(strings.Contains(message, "usage credits") || strings.Contains(message, "credits are required")))
+}
+
 func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
 	if opts.Alt == "responses/compact" {
 		return resp, statusErr{code: http.StatusNotImplemented, msg: "/responses/compact not supported"}
@@ -580,7 +638,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 			helps.RecordAPIResponseError(ctx, e.cfg, decErr)
 			msg := fmt.Sprintf("failed to decode error response body: %v", decErr)
 			helps.LogWithRequestID(ctx).Warn(msg)
-			return resp, statusErr{code: httpResp.StatusCode, msg: msg}
+			return resp, classifyClaudeUpstreamError(httpResp.StatusCode, httpResp.Header, []byte(msg))
 		}
 		b, readErr := io.ReadAll(errBody)
 		if readErr != nil {
@@ -610,7 +668,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 			}
 		}
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
-		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
+		err = classifyClaudeUpstreamError(httpResp.StatusCode, httpResp.Header, b)
 		if errClose := errBody.Close(); errClose != nil {
 			log.Errorf("response body close error: %v", errClose)
 		}
@@ -671,6 +729,9 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		data,
 		&param,
 	)
+	if responseFormat == sdktranslator.FormatOpenAIResponse {
+		out = helps.EnsureResponsesUsageDetails(out)
+	}
 	resp = cliproxyexecutor.Response{Payload: out, Headers: httpResp.Header.Clone()}
 	return resp, nil
 }
@@ -903,7 +964,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			helps.RecordAPIResponseError(ctx, e.cfg, decErr)
 			msg := fmt.Sprintf("failed to decode error response body: %v", decErr)
 			helps.LogWithRequestID(ctx).Warn(msg)
-			return nil, statusErr{code: httpResp.StatusCode, msg: msg}
+			return nil, classifyClaudeUpstreamError(httpResp.StatusCode, httpResp.Header, []byte(msg))
 		}
 		b, readErr := io.ReadAll(errBody)
 		if readErr != nil {
@@ -934,7 +995,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		if errClose := errBody.Close(); errClose != nil {
 			log.Errorf("response body close error: %v", errClose)
 		}
-		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
+		err = classifyClaudeUpstreamError(httpResp.StatusCode, httpResp.Header, b)
 		return nil, err
 	}
 	decodedBody, err := decodeResponseBody(httpResp.Body, httpResp.Header.Get("Content-Encoding"))
@@ -1157,6 +1218,11 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 				bytes.Clone(line),
 				&param,
 			)
+			if responseFormat == sdktranslator.FormatOpenAIResponse {
+				for i := range chunks {
+					chunks[i] = helps.EnsureResponsesUsageDetails(chunks[i])
+				}
+			}
 			for i := range chunks {
 				select {
 				case out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}:
@@ -1348,7 +1414,7 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 			helps.RecordAPIResponseError(ctx, e.cfg, decErr)
 			msg := fmt.Sprintf("failed to decode error response body: %v", decErr)
 			helps.LogWithRequestID(ctx).Warn(msg)
-			return cliproxyexecutor.Response{}, statusErr{code: resp.StatusCode, msg: msg}
+			return cliproxyexecutor.Response{}, classifyClaudeUpstreamError(resp.StatusCode, resp.Header, []byte(msg))
 		}
 		b, readErr := io.ReadAll(errBody)
 		if readErr != nil {
@@ -1371,7 +1437,7 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 		if errClose := errBody.Close(); errClose != nil {
 			log.Errorf("response body close error: %v", errClose)
 		}
-		return cliproxyexecutor.Response{}, statusErr{code: resp.StatusCode, msg: string(b)}
+		return cliproxyexecutor.Response{}, classifyClaudeUpstreamError(resp.StatusCode, resp.Header, b)
 	}
 	decodedBody, err := decodeResponseBody(resp.Body, resp.Header.Get("Content-Encoding"))
 	if err != nil {
