@@ -2200,3 +2200,130 @@ func TestSessionAffinitySelectorUsesRequestPayloadWhenOriginalRequestMissing(t *
 		t.Fatalf("request-only conversation changed auth from %q to %q", first.ID, second.ID)
 	}
 }
+
+func TestSessionCache_StopConcurrent(t *testing.T) {
+	t.Parallel()
+	for iter := 0; iter < 100; iter++ {
+		cache := NewSessionCache(time.Minute)
+		var wg sync.WaitGroup
+		for i := 0; i < 20; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				cache.Stop()
+			}()
+		}
+		wg.Wait()
+	}
+}
+
+type mockStoppableSelector struct {
+	stopped bool
+}
+
+func (m *mockStoppableSelector) Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
+	return nil, nil
+}
+
+func (m *mockStoppableSelector) Stop() {
+	m.stopped = true
+}
+
+func TestManagerSetSelectorStopsReplacedStoppableSelector(t *testing.T) {
+	t.Parallel()
+	mockSelector := &mockStoppableSelector{}
+	manager := NewManager(nil, mockSelector, nil)
+
+	manager.SetSelector(&RoundRobinSelector{})
+
+	if !mockSelector.stopped {
+		t.Fatal("expected previous StoppableSelector to be stopped when replaced via SetSelector")
+	}
+}
+
+type zeroSizeSelectorA struct {
+	stopped *bool
+}
+
+func (z zeroSizeSelectorA) Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
+	return nil, nil
+}
+
+func (z zeroSizeSelectorA) Stop() {
+	if z.stopped != nil {
+		*z.stopped = true
+	}
+}
+
+type zeroSizeSelectorB struct{}
+
+func (z zeroSizeSelectorB) Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
+	return nil, nil
+}
+
+func TestManagerSetSelectorDifferentZeroSizedSelectors(t *testing.T) {
+	t.Parallel()
+	stoppedA := false
+	selA := zeroSizeSelectorA{stopped: &stoppedA}
+	selB := zeroSizeSelectorB{}
+
+	manager := NewManager(nil, selA, nil)
+	manager.SetSelector(selB)
+
+	if !stoppedA {
+		t.Fatal("expected zeroSizeSelectorA to be stopped when replaced by zeroSizeSelectorB")
+	}
+	if manager.Selector() != selB {
+		t.Fatalf("expected manager selector to be selB, got %#v", manager.Selector())
+	}
+}
+
+type uncomparableSelector struct {
+	fn func()
+}
+
+func (u uncomparableSelector) Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
+	return nil, nil
+}
+
+func TestManagerSetSelectorUncomparableTypes(t *testing.T) {
+	t.Parallel()
+	manager := NewManager(nil, nil, nil)
+
+	sel1 := uncomparableSelector{fn: func() {}}
+	sel2 := uncomparableSelector{fn: func() {}}
+
+	// Setting uncomparable types must not panic
+	manager.SetSelector(sel1)
+	manager.SetSelector(sel2)
+	manager.SetSelector(nil)
+}
+
+func TestManagerSetSelectorSameInstanceDoesNotStop(t *testing.T) {
+	t.Parallel()
+	mockSelector := &mockStoppableSelector{}
+	manager := NewManager(nil, mockSelector, nil)
+
+	// Setting the same instance should be a no-op and not call Stop
+	manager.SetSelector(mockSelector)
+	if mockSelector.stopped {
+		t.Fatal("setting the same selector instance unexpectedly called Stop")
+	}
+}
+
+func TestManagerSetSelectorConcurrent(t *testing.T) {
+	t.Parallel()
+	manager := NewManager(nil, nil, nil)
+	var wg sync.WaitGroup
+	for i := 0; i < 20; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 10; j++ {
+				sel := &mockStoppableSelector{}
+				manager.SetSelector(sel)
+			}
+		}()
+	}
+	wg.Wait()
+}
