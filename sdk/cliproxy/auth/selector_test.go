@@ -779,6 +779,75 @@ func TestSessionAffinitySelector_SameSessionSameAuth(t *testing.T) {
 	}
 }
 
+func TestSessionAffinitySelector_ThinkingSuffixVariantsPreserveBindingAndRelease(t *testing.T) {
+	t.Parallel()
+
+	fallback := &RoundRobinSelector{}
+	selector := NewSessionAffinitySelector(fallback)
+	defer selector.Stop()
+
+	auths := []*Auth{
+		{ID: "auth-a"},
+		{ID: "auth-b"},
+		{ID: "auth-c"},
+	}
+
+	payload := []byte(`{"metadata":{"user_id":"user_xxx_account__session_ac980658-63bd-4fb3-97ba-8da64cb1e344"}}`)
+	opts := cliproxyexecutor.Options{OriginalRequest: payload}
+
+	first, errFirst := selector.Pick(context.Background(), "anthropic", "claude-sonnet-4-5", opts, auths)
+	if errFirst != nil {
+		t.Fatalf("first Pick() error = %v", errFirst)
+	}
+	if first == nil {
+		t.Fatalf("first Pick() returned nil")
+	}
+
+	// Suffix variant claude-sonnet-4-5(high) should reuse the exact same auth binding
+	second, errSecond := selector.Pick(context.Background(), "anthropic", "claude-sonnet-4-5(high)", opts, auths)
+	if errSecond != nil {
+		t.Fatalf("second Pick() error = %v", errSecond)
+	}
+	if second.ID != first.ID {
+		t.Fatalf("second Pick() auth.ID = %q, want %q (thinking suffix variant should keep session stickiness)", second.ID, first.ID)
+	}
+
+	// Third request with claude-sonnet-4-5(medium) should also reuse the same auth
+	third, errThird := selector.Pick(context.Background(), "anthropic", "claude-sonnet-4-5(medium)", opts, auths)
+	if errThird != nil {
+		t.Fatalf("third Pick() error = %v", errThird)
+	}
+	if third.ID != first.ID {
+		t.Fatalf("third Pick() auth.ID = %q, want %q (thinking suffix variant should keep session stickiness)", third.ID, first.ID)
+	}
+
+	// Failure on a thinking-suffix variant (with explicit metadata) should properly release the session binding
+	optsWithMetadata := cliproxyexecutor.Options{
+		OriginalRequest: payload,
+		Metadata: map[string]any{
+			cliproxyexecutor.SessionAffinityProviderMetadataKey: "anthropic",
+			cliproxyexecutor.SessionAffinityModelMetadataKey:    "claude-sonnet-4-5(high)",
+		},
+	}
+	selector.OnResult(Result{
+		Provider: "anthropic",
+		Model:    "claude-sonnet-4-5(high)",
+		AuthID:   first.ID,
+		Success:  false,
+		Error:    &Error{Code: "rate_limited", Message: "rate limited"},
+		Options:  optsWithMetadata,
+	})
+
+	// After release, next pick should reselect using fallback selector
+	next, errNext := selector.Pick(context.Background(), "anthropic", "claude-sonnet-4-5", opts, auths)
+	if errNext != nil {
+		t.Fatalf("next Pick() error = %v", errNext)
+	}
+	if next.ID == first.ID {
+		t.Fatalf("next Pick() auth.ID = %q, should have reselected a different auth after failure release", next.ID)
+	}
+}
+
 func TestSessionAffinitySelector_WeightedBindingRebindsAfterWeightBecomesZero(t *testing.T) {
 	t.Parallel()
 
