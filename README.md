@@ -110,7 +110,7 @@ PackyCode provides special discounts for our software users: register using <a h
 </tr>
 <tr>
 <td width="180"><a href="https://bestproxy.com/?keyword=ayh7otlb"><img src="./assets/bestproxy.png" alt="Bestproxy" width="150"></a></td>
-<td>Bestproxy provides high-purity residential IPs with dedicated one-IP-per-account support. 🟡Residential Proxy - $0.5/GB；🟡Static Residential Proxy - Starting at $3/IP；🟡Unlimited Residential Proxy - Starting at $67/Day.  ✅Get Free Trial.</td>
+<td>Bestproxy provides high-purity residential IPs with dedicated one-IP-per-account support. 🟡Residential Proxy - $0.5/GB；🟡Static Residential Proxy - Starting at $3/IP；🟡Unlimited Residential Proxy - Starting at $67/Day.  ✅<a href="https://bestproxy.com/?keyword=ayh7otlb">Get Free Trial.</a></td>
 </tr>
 </tbody>
 </table>
