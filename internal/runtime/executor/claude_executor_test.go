@@ -4483,7 +4483,7 @@ func TestResolveClaudeWirePolicy(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			auth := &cliproxyauth.Auth{Metadata: map[string]any{"cloak_mode": test.mode}}
-			policy, _ := resolveClaudeWirePolicy(&config.Config{}, auth, "sk-ant-oat-test", test.confirmed, "")
+			policy, _ := resolveClaudeWirePolicy(&config.Config{}, auth, "sk-ant-oat-test", test.confirmed)
 			if !policy.OAuth {
 				t.Fatal("resolveClaudeWirePolicy() OAuth = false, want true")
 			}

@@ -36,6 +36,17 @@ func rejectInvalidCredentialWeight(c *gin.Context, field string, weight *int) bo
 	return false
 }
 
+// rejectInvalidFingerprintProfile fails a write that carries a value the request
+// path would silently ignore, so a typo surfaces here instead of as a warning
+// behind every later request.
+func rejectInvalidFingerprintProfile(c *gin.Context, field, profile string) bool {
+	if errValidate := config.ValidateClaudeFingerprintProfile(profile); errValidate != nil {
+		c.JSON(400, gin.H{"error": fmt.Sprintf("%s: %v", field, errValidate)})
+		return true
+	}
+	return false
+}
+
 // Generic helpers for list[string]
 func (h *Handler) putStringList(c *gin.Context, set func([]string), after func()) {
 	data, err := c.GetRawData()
@@ -541,6 +552,9 @@ func (h *Handler) PutClaudeKeys(c *gin.Context) {
 		if rejectInvalidCredentialWeight(c, fmt.Sprintf("claude-api-key[%d].weight", i), arr[i].Weight) {
 			return
 		}
+		if rejectInvalidFingerprintProfile(c, fmt.Sprintf("claude-api-key[%d].fingerprint-profile", i), arr[i].FingerprintProfile) {
+			return
+		}
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -599,7 +613,10 @@ func (h *Handler) PatchClaudeKey(c *gin.Context) {
 		entry.APIKey = strings.TrimSpace(*body.Value.APIKey)
 	}
 	if body.Value.FingerprintProfile != nil {
-		entry.FingerprintProfile = strings.TrimSpace(*body.Value.FingerprintProfile)
+		if rejectInvalidFingerprintProfile(c, "fingerprint-profile", *body.Value.FingerprintProfile) {
+			return
+		}
+		entry.FingerprintProfile, _ = config.NormalizeClaudeFingerprintProfile(*body.Value.FingerprintProfile)
 	}
 	if len(body.Value.Weight) > 0 {
 		weight, errWeight := parseCredentialWeightPatch(body.Value.Weight)
@@ -1686,7 +1703,11 @@ func normalizeClaudeKey(entry *config.ClaudeKey) {
 		return
 	}
 	entry.APIKey = strings.TrimSpace(entry.APIKey)
-	entry.FingerprintProfile = strings.TrimSpace(entry.FingerprintProfile)
+	if normalized, ok := config.NormalizeClaudeFingerprintProfile(entry.FingerprintProfile); ok {
+		entry.FingerprintProfile = normalized
+	} else {
+		entry.FingerprintProfile = strings.TrimSpace(entry.FingerprintProfile)
+	}
 	entry.BaseURL = strings.TrimSpace(entry.BaseURL)
 	entry.ProxyURL = strings.TrimSpace(entry.ProxyURL)
 	entry.Headers = config.NormalizeHeaders(entry.Headers)

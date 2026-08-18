@@ -127,27 +127,43 @@ func TestFinalizeAnthropicMessagesBodyCCH_AddsMissingBillingBlock(t *testing.T) 
 func TestClaudeCCHSigningEnabled(t *testing.T) {
 	t.Parallel()
 
+	const (
+		anthropicOrigin = "https://api.anthropic.com/v1/messages?beta=true"
+		gatewayOrigin   = "https://gateway.example/v1/messages?beta=true"
+	)
+
 	tests := []struct {
 		name           string
 		apiKey         string
 		kind           claudeCCHUpstreamKind
 		cliFingerprint bool
+		origin         string
 		want           bool
 	}{
-		{name: "official API key default", apiKey: "key-123", kind: claudeCCHUpstreamAnthropic, want: false},
-		{name: "official API key opt-in", apiKey: "key-123", kind: claudeCCHUpstreamAnthropic, cliFingerprint: true, want: true},
-		{name: "Kimi API key default", apiKey: "key-123", kind: claudeCCHUpstreamAnthropic, want: false},
-		{name: "Kimi API key opt-in", apiKey: "key-123", kind: claudeCCHUpstreamAnthropic, cliFingerprint: true, want: true},
-		{name: "Claude OAuth", apiKey: "sk-ant-oat-custom", kind: claudeCCHUpstreamAnthropic, want: true},
-		{name: "other provider Claude OAuth", apiKey: "sk-ant-oat-other", kind: claudeCCHUpstreamOther, want: true},
-		{name: "Vertex provider API key", apiKey: "key-123", kind: claudeCCHUpstreamVertex, want: true},
-		{name: "other provider API key", apiKey: "key-123", kind: claudeCCHUpstreamOther, want: false},
+		{name: "official API key default", apiKey: "key-123", kind: claudeCCHUpstreamAnthropic, origin: anthropicOrigin, want: false},
+		{name: "official API key opt-in", apiKey: "key-123", kind: claudeCCHUpstreamAnthropic, cliFingerprint: true, origin: anthropicOrigin, want: true},
+		{name: "Kimi API key default", apiKey: "key-123", kind: claudeCCHUpstreamAnthropic, origin: "https://api.kimi.com/v1/messages", want: false},
+		// Native emits cch only for firstParty on api.anthropic.com or for vertex, so an
+		// opted-in key on any other gateway keeps a cache-stable billing header.
+		{name: "Kimi API key opt-in", apiKey: "key-123", kind: claudeCCHUpstreamAnthropic, cliFingerprint: true, origin: "https://api.kimi.com/v1/messages", want: false},
+		{name: "gateway API key opt-in", apiKey: "key-123", kind: claudeCCHUpstreamAnthropic, cliFingerprint: true, origin: gatewayOrigin, want: false},
+		{name: "anthropic host over http opt-in", apiKey: "key-123", kind: claudeCCHUpstreamAnthropic, cliFingerprint: true, origin: "http://api.anthropic.com/v1/messages", want: false},
+		{name: "anthropic host explicit 443 opt-in", apiKey: "key-123", kind: claudeCCHUpstreamAnthropic, cliFingerprint: true, origin: "https://api.anthropic.com:443/v1/messages", want: true},
+		{name: "anthropic lookalike host opt-in", apiKey: "key-123", kind: claudeCCHUpstreamAnthropic, cliFingerprint: true, origin: "https://api.anthropic.com.evil.example/v1/messages", want: false},
+		// A real OAuth credential signs on every upstream: CPA is the hop that has to
+		// regenerate the cch a downstream Claude Code could not produce.
+		{name: "Claude OAuth", apiKey: "sk-ant-oat-custom", kind: claudeCCHUpstreamAnthropic, origin: anthropicOrigin, want: true},
+		{name: "Claude OAuth custom gateway", apiKey: "sk-ant-oat-custom", kind: claudeCCHUpstreamAnthropic, origin: gatewayOrigin, want: true},
+		{name: "other provider Claude OAuth", apiKey: "sk-ant-oat-other", kind: claudeCCHUpstreamOther, origin: gatewayOrigin, want: true},
+		{name: "Vertex provider API key", apiKey: "key-123", kind: claudeCCHUpstreamVertex, origin: "https://us-east5-aiplatform.googleapis.com/v1/projects/p/locations/l/publishers/anthropic/models/m:streamRawPredict", want: true},
+		{name: "other provider API key", apiKey: "key-123", kind: claudeCCHUpstreamOther, origin: gatewayOrigin, want: false},
+		{name: "other provider API key opt-in", apiKey: "key-123", kind: claudeCCHUpstreamOther, cliFingerprint: true, origin: gatewayOrigin, want: false},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			if got := claudeCCHSigningEnabled(tt.apiKey, tt.kind, tt.cliFingerprint); got != tt.want {
+			if got := claudeCCHSigningEnabled(tt.apiKey, tt.kind, tt.cliFingerprint, tt.origin); got != tt.want {
 				t.Fatalf("claudeCCHSigningEnabled() = %t, want %t", got, tt.want)
 			}
 		})

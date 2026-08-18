@@ -1,6 +1,7 @@
 package executor
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"net/http"
@@ -8,6 +9,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	log "github.com/sirupsen/logrus"
 
 	claudeauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/claude"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
@@ -370,11 +373,12 @@ func TestClaudeExecutor_ClaudeCodeCLIFingerprintOnThirdPartyGateway(t *testing.T
 	if !strings.HasPrefix(billing, "x-anthropic-billing-header:") {
 		t.Fatalf("system.0.text = %q, want billing header", billing)
 	}
-	if !strings.Contains(billing, "cch=") {
-		t.Fatalf("billing = %q, want signed cch", billing)
-	}
-	if strings.Contains(billing, "cch=00000") {
-		t.Fatalf("billing = %q, want non-zero cch signature", billing)
+	// Native only emits cch for firstParty on api.anthropic.com or for vertex. A
+	// third-party gateway therefore gets the billing header without a per-request
+	// hash, which is both the measured shape and what keeps the gateway's prompt
+	// cache stable.
+	if strings.Contains(billing, "cch=") {
+		t.Fatalf("billing = %q, want no cch on a third-party gateway", billing)
 	}
 	if got := gjson.GetBytes(seenBody, "system.1.text").String(); got != claudeCodeCLIIdentity {
 		t.Fatalf("system.1.text = %q, want CLI identity", got)
@@ -548,6 +552,15 @@ func TestClaudeExecutor_OfficialAPIKeyClaudeCodeCLIFingerprintIncludesDiagnostic
 	}
 	if diagnostics := gjson.GetBytes(seenBody, "diagnostics"); !diagnostics.IsObject() {
 		t.Fatalf("diagnostics = %s, want object after fingerprint-profile opt-in", diagnostics.Raw)
+	}
+	// api.anthropic.com is the one API-key origin where native emits cch, so the
+	// opt-in must produce a finalized signature here.
+	billing := gjson.GetBytes(seenBody, "system.0.text").String()
+	if !strings.HasPrefix(billing, "x-anthropic-billing-header:") || !strings.Contains(billing, "cch=") {
+		t.Fatalf("billing = %q, want signed cch on api.anthropic.com", billing)
+	}
+	if strings.Contains(billing, "cch=00000") {
+		t.Fatalf("billing = %q, want finalized cch signature", billing)
 	}
 	userID := gjson.GetBytes(seenBody, "metadata.user_id").String()
 	if !helps.IsValidUserID(userID) || gjson.Get(userID, "account_uuid").String() == "" {
@@ -759,7 +772,9 @@ func TestKimiExecutor_ClaudeMessagesWithAndWithoutClaudeCodeCLIFingerprint(t *te
 		t.Fatalf("default Kimi User-Agent = %q, want caller value", got)
 	}
 
-	// Opt-in Kimi requests use the complete CLI fingerprint, including signed CCH.
+	// Opt-in Kimi requests use the complete CLI fingerprint. Kimi is not a native
+	// cch origin, so the billing header goes out unsigned, exactly as native does
+	// against a non-first-party base URL.
 	userID := gjson.GetBytes(seenBodies[1], "metadata.user_id").String()
 	if !helps.IsValidUserID(userID) {
 		t.Fatalf("opt-in Kimi metadata.user_id = %q, want valid synthesized user_id", userID)
@@ -768,11 +783,11 @@ func TestKimiExecutor_ClaudeMessagesWithAndWithoutClaudeCodeCLIFingerprint(t *te
 		t.Fatal("opt-in Kimi request should have non-empty synthesized account_uuid")
 	}
 	billing := gjson.GetBytes(seenBodies[1], "system.0.text").String()
-	if !strings.HasPrefix(billing, "x-anthropic-billing-header:") || !strings.Contains(billing, "cch=") {
-		t.Fatalf("opt-in Kimi request must carry signed Claude billing/CCH attribution: %s", seenBodies[1])
+	if !strings.HasPrefix(billing, "x-anthropic-billing-header:") {
+		t.Fatalf("opt-in Kimi request must carry Claude billing attribution: %s", seenBodies[1])
 	}
-	if strings.Contains(billing, "cch=00000") {
-		t.Fatalf("opt-in Kimi CCH must be finalized: %q", billing)
+	if strings.Contains(billing, "cch=") {
+		t.Fatalf("opt-in Kimi billing = %q, want no cch off first-party origins", billing)
 	}
 	betas := claudeFingerprintHeaderValue(seenHeaders[1], "Anthropic-Beta")
 	if !strings.Contains(betas, "oauth-2025-04-20") || !strings.Contains(betas, "extended-cache-ttl-2025-04-11") {
@@ -780,7 +795,7 @@ func TestKimiExecutor_ClaudeMessagesWithAndWithoutClaudeCodeCLIFingerprint(t *te
 	}
 }
 
-func TestKimiExecutor_ClaudeCodeCLIProfileStreamSignsCCHAndCountTokensKeepsNativeShape(t *testing.T) {
+func TestKimiExecutor_ClaudeCodeCLIProfileKeepsUnsignedBillingAndNativeCountTokens(t *testing.T) {
 	for _, test := range []struct {
 		name string
 		run  func(context.Context, *KimiExecutor, *cliproxyauth.Auth, []byte) error
@@ -843,11 +858,11 @@ func TestKimiExecutor_ClaudeCodeCLIProfileStreamSignsCCHAndCountTokensKeepsNativ
 				return
 			}
 			billing := gjson.GetBytes(seenBody, "system.0.text").String()
-			if !strings.HasPrefix(billing, "x-anthropic-billing-header:") || !strings.Contains(billing, "cch=") {
-				t.Fatalf("upstream body is missing opt-in billing/CCH: %s", seenBody)
+			if !strings.HasPrefix(billing, "x-anthropic-billing-header:") {
+				t.Fatalf("upstream body is missing opt-in billing attribution: %s", seenBody)
 			}
-			if strings.Contains(billing, "cch=00000") {
-				t.Fatalf("opt-in Kimi CCH must be finalized: %q", billing)
+			if strings.Contains(billing, "cch=") {
+				t.Fatalf("opt-in Kimi billing = %q, want no cch off first-party origins", billing)
 			}
 			if !strings.Contains(betas, "oauth-2025-04-20") || !strings.Contains(betas, "extended-cache-ttl-2025-04-11") {
 				t.Fatalf("Anthropic-Beta = %q, want full OAuth CLI beta set", betas)
@@ -1157,6 +1172,71 @@ func TestKimiExecutor_StripsCallerClaudeCodeCCH(t *testing.T) {
 	}
 	if !strings.Contains(string(seenBody), "Keep this rule.") {
 		t.Fatalf("Kimi upstream body dropped caller system text: %s", seenBody)
+	}
+}
+
+// Profile resolution runs several times per request, so an unrecognized value must
+// not turn one config typo into a per-request log flood.
+func TestNormalizeClaudeFingerprintProfileWarnsOncePerValue(t *testing.T) {
+	var buf bytes.Buffer
+	previous := log.StandardLogger().Out
+	log.SetOutput(&buf)
+	defer log.SetOutput(previous)
+
+	const (
+		firstTypo  = "claude-code-cli-test-typo-a"
+		secondTypo = "claude-code-cli-test-typo-b"
+	)
+	defer claudeFingerprintProfileWarned.Delete(firstTypo)
+	defer claudeFingerprintProfileWarned.Delete(secondTypo)
+
+	for i := 0; i < 5; i++ {
+		if got := normalizeClaudeFingerprintProfile(firstTypo); got != claudeFingerprintProfileDefault {
+			t.Fatalf("normalizeClaudeFingerprintProfile(%q) = %q, want default", firstTypo, got)
+		}
+	}
+	normalizeClaudeFingerprintProfile(secondTypo)
+	for i := 0; i < 3; i++ {
+		normalizeClaudeFingerprintProfile("claude-code-cli")
+		normalizeClaudeFingerprintProfile("")
+	}
+
+	if got := strings.Count(buf.String(), firstTypo); got != 1 {
+		t.Fatalf("warnings for %q = %d, want exactly 1: %s", firstTypo, got, buf.String())
+	}
+	if got := strings.Count(buf.String(), secondTypo); got != 1 {
+		t.Fatalf("warnings for %q = %d, want exactly 1: %s", secondTypo, got, buf.String())
+	}
+	if got := strings.Count(buf.String(), "unrecognized claude fingerprint-profile"); got != 2 {
+		t.Fatalf("total warnings = %d, want 2 (one per distinct value): %s", got, buf.String())
+	}
+}
+
+// The CLI profile is credential-scoped: the same credential resolves the same
+// policy regardless of which upstream URL the request is being built for. Origin
+// only decides CCH signing, through claudeCCHSigningEnabled.
+func TestResolveClaudeFingerprintPolicyIsOriginIndependent(t *testing.T) {
+	t.Parallel()
+
+	cfg := &config.Config{ClaudeKey: []config.ClaudeKey{{
+		APIKey:             "key-origin-independent",
+		FingerprintProfile: "claude-code-cli",
+	}}}
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "key-origin-independent"}}
+
+	policy := resolveClaudeFingerprintPolicy(cfg, auth, "key-origin-independent")
+	if !policy.ProfileClaudeCodeCLI || policy.AuthIsOAuthToken {
+		t.Fatalf("policy = %+v, want opted-in non-OAuth profile", policy)
+	}
+	for _, origin := range []string{
+		"https://api.anthropic.com/v1/messages?beta=true",
+		"https://gateway.example/v1/messages?beta=true",
+		"https://api.kimi.com/v1/messages",
+	} {
+		wantCCH := origin == "https://api.anthropic.com/v1/messages?beta=true"
+		if got := claudeCCHSigningEnabled("key-origin-independent", claudeCCHUpstreamAnthropic, policy.ProfileClaudeCodeCLI, origin); got != wantCCH {
+			t.Fatalf("claudeCCHSigningEnabled(%q) = %t, want %t", origin, got, wantCCH)
+		}
 	}
 }
 

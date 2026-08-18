@@ -126,7 +126,7 @@ func (e *ClaudeExecutor) countTokensUpstream(ctx context.Context, auth *cliproxy
 		baseURL = "https://api.anthropic.com"
 	}
 	url := fmt.Sprintf("%s/v1/messages/count_tokens?beta=true", baseURL)
-	fp := resolveClaudeFingerprintPolicyForOrigin(e.cfg, auth, apiKey, url)
+	fp := resolveClaudeFingerprintPolicy(e.cfg, auth, apiKey)
 
 	from := opts.SourceFormat
 	responseFormat := cliproxyexecutor.ResponseFormatOrSource(opts)
@@ -160,7 +160,7 @@ func (e *ClaudeExecutor) countTokensUpstream(ctx context.Context, auth *cliproxy
 	// that still have to hold: relocate the caller's system prompt into messages
 	// so its tokens stay counted, and obfuscate sensitive words exactly like the
 	// Messages path. Kimi opt-in uses the same contract.
-	policy, settings := resolveClaudeWirePolicy(e.cfg, auth, apiKey, confirmedClaudeCode, url)
+	policy, settings := resolveClaudeWirePolicy(e.cfg, auth, apiKey, confirmedClaudeCode)
 	cloaked := policy.Cloak
 	if cloaked {
 		if !settings.strictMode {

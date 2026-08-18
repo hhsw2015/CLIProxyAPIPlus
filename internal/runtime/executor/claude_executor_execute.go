@@ -28,10 +28,11 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		baseURL = "https://api.anthropic.com"
 	}
 	url := fmt.Sprintf("%s/v1/messages?beta=true", baseURL)
-	fp := resolveClaudeFingerprintPolicyForOrigin(e.cfg, auth, apiKey, url)
-	// Real Claude OAuth and explicit fingerprint-profile opt-ins sign CCH.
+	fp := resolveClaudeFingerprintPolicy(e.cfg, auth, apiKey)
+	// Real Claude OAuth always signs CCH. An opted-in API key signs only where
+	// native does, so a third-party gateway keeps a cache-stable billing header.
 	// Default API-key and delegated-provider requests preserve the caller body.
-	cchSigning := claudeCCHSigningEnabled(apiKey, claudeCCHUpstreamAnthropic, fp.ProfileClaudeCodeCLI)
+	cchSigning := claudeCCHSigningEnabled(apiKey, claudeCCHUpstreamAnthropic, fp.ProfileClaudeCodeCLI, url)
 
 	reporter := helps.NewExecutorUsageReporter(ctx, e, baseModel, auth)
 	defer reporter.TrackFailure(ctx, &err)

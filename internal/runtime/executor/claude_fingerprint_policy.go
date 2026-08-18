@@ -2,6 +2,7 @@ package executor
 
 import (
 	"strings"
+	"sync"
 
 	claudeauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/claude"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
@@ -10,11 +11,17 @@ import (
 )
 
 const (
-	claudeFingerprintProfileDefault       = ""
-	claudeFingerprintProfileClaudeCodeCLI = "claude-code-cli"
-	claudeFingerprintProfileOAuthCLI      = "oauth-cli" // legacy compatibility alias
+	claudeFingerprintProfileDefault       = config.ClaudeFingerprintProfileDefault
+	claudeFingerprintProfileClaudeCodeCLI = config.ClaudeFingerprintProfileClaudeCodeCLI
 	claudeFingerprintProfileAttr          = "fingerprint_profile"
 )
+
+// claudeFingerprintProfileWarned deduplicates the unrecognized-value warning.
+// Profile resolution runs several times per request (policy, wire policy,
+// headers), so warning on every call turns one config typo into a per-request
+// log flood. Management writes reject unknown values outright; this only covers
+// values that reached the process through a config file or auth JSON.
+var claudeFingerprintProfileWarned sync.Map
 
 // claudeFingerprintPolicy is a single switch-driven view of Claude fingerprint
 // behavior for Anthropic Messages. The heavy algorithms stay shared:
@@ -42,16 +49,13 @@ type claudeFingerprintPolicy struct {
 }
 
 func normalizeClaudeFingerprintProfile(raw string) string {
-	trimmed := strings.ToLower(strings.TrimSpace(raw))
-	switch trimmed {
-	case claudeFingerprintProfileClaudeCodeCLI, claudeFingerprintProfileOAuthCLI:
-		return claudeFingerprintProfileClaudeCodeCLI
-	case "":
-		return claudeFingerprintProfileDefault
-	default:
-		log.Warnf("unrecognized claude fingerprint-profile %q (supported: %q); falling back to default", raw, claudeFingerprintProfileClaudeCodeCLI)
-		return claudeFingerprintProfileDefault
+	profile, ok := config.NormalizeClaudeFingerprintProfile(raw)
+	if !ok {
+		if _, warned := claudeFingerprintProfileWarned.LoadOrStore(strings.TrimSpace(raw), struct{}{}); !warned {
+			log.Warnf("unrecognized claude fingerprint-profile %q (supported: %q); falling back to default", raw, claudeFingerprintProfileClaudeCodeCLI)
+		}
 	}
+	return profile
 }
 
 func claudeFingerprintProfileFromAuth(auth *cliproxyauth.Auth) string {
@@ -83,16 +87,11 @@ func claudeFingerprintProfileFromConfig(cfg *config.Config, auth *cliproxyauth.A
 	return normalizeClaudeFingerprintProfile(entry.FingerprintProfile)
 }
 
-func fingerprintOriginFromAuth(auth *cliproxyauth.Auth) string {
-	_, baseURL := claudeCreds(auth)
-	return baseURL
-}
-
+// resolveClaudeFingerprintPolicy resolves credential-scoped fingerprint
+// behavior. It is deliberately independent of the upstream origin: the wire
+// profile follows the credential, while the one origin-sensitive decision (CCH
+// signing) is resolved separately by claudeCCHSigningEnabled.
 func resolveClaudeFingerprintPolicy(cfg *config.Config, auth *cliproxyauth.Auth, apiKey string) claudeFingerprintPolicy {
-	return resolveClaudeFingerprintPolicyForOrigin(cfg, auth, apiKey, fingerprintOriginFromAuth(auth))
-}
-
-func resolveClaudeFingerprintPolicyForOrigin(cfg *config.Config, auth *cliproxyauth.Auth, apiKey, _ string) claudeFingerprintPolicy {
 	// Keep actual Claude OAuth lifecycle authority separate from the broader
 	// request fingerprint policy used by API keys and delegated providers.
 	authIsOAuth := isClaudeOAuthToken(apiKey)

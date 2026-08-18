@@ -160,15 +160,42 @@ func isKimiMessagesUpstream(auth *cliproxyauth.Auth, endpoint string) bool {
 	return isKimiAPIEndpoint(endpoint)
 }
 
-// claudeCCHSigningEnabled applies CPA's CCH policy. Real Claude OAuth tokens
-// and explicit claude-code-cli fingerprint profiles sign. Default API-key and
-// delegated-provider requests preserve the caller body instead. Vertex keeps
-// its existing provider-native signing behavior.
-func claudeCCHSigningEnabled(apiKey string, kind claudeCCHUpstreamKind, cliFingerprint bool) bool {
-	if isClaudeOAuthToken(apiKey) || cliFingerprint {
+// claudeCCHSigningEnabled applies CPA's CCH policy.
+//
+// Native gate, identical in Claude Code 2.1.220 through 2.1.234:
+//
+//	s = (provider === "firstParty" && isFirstPartyBaseURL()) || provider === "vertex"
+//	      ? " cch=00000;" : ""
+//
+// where isFirstPartyBaseURL() is true when ANTHROPIC_BASE_URL is unset or its
+// host is api.anthropic.com. Every other backend (bedrock, foundry, mantle,
+// anthropicAws, anthropicGoogleCloud, gateway, any custom base URL) sends the
+// billing header without cch.
+//
+// CPA maps that onto two authorities:
+//
+//   - A real Claude OAuth credential always signs, on every upstream. CPA is the
+//     hop that restores the first-party shape: a downstream Claude Code pointed at
+//     CPA sees a non-first-party base URL and therefore omits cch itself, so the
+//     value has to be regenerated here rather than inherited.
+//   - An API key or delegated provider signs only when it explicitly opted into
+//     the claude-code-cli profile AND the upstream is one the native gate accepts.
+//     On any other gateway the billing header still goes out, but without cch, so
+//     a per-request hash cannot bust that gateway's prompt cache.
+//
+// origin is the concrete upstream URL of the request being built. CPA additionally
+// requires https and the default port, which native does not check.
+func claudeCCHSigningEnabled(apiKey string, kind claudeCCHUpstreamKind, cliFingerprint bool, origin string) bool {
+	if isClaudeOAuthToken(apiKey) {
 		return true
 	}
-	return kind == claudeCCHUpstreamVertex
+	if kind == claudeCCHUpstreamVertex {
+		return true
+	}
+	if !cliFingerprint {
+		return false
+	}
+	return kind == claudeCCHUpstreamAnthropic && isAnthropicUpstreamBase(origin)
 }
 
 // signAnthropicMessagesBody reproduces Claude Code 2.1.220's final-body CCH.

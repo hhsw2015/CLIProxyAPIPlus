@@ -683,12 +683,8 @@ func applyClaudeHeadersWithNativeProfile(
 	// explicit fingerprint-profile opt-ins receive the CLI wire profile.
 	credentialUsesBearer := claudeCredentialUsesOAuth(auth, apiKey)
 	useAPIKey := !credentialUsesBearer
-	origin := ""
-	if r.URL != nil {
-		origin = r.URL.String()
-	}
-	fp := resolveClaudeFingerprintPolicyForOrigin(cfg, auth, apiKey, origin)
-	wirePolicy, _ := resolveClaudeWirePolicy(cfg, auth, apiKey, confirmedClaudeCode, origin)
+	fp := resolveClaudeFingerprintPolicy(cfg, auth, apiKey)
+	wirePolicy, _ := resolveClaudeWirePolicy(cfg, auth, apiKey, confirmedClaudeCode)
 	applyCLIFingerprint := fp.ProfileClaudeCodeCLI || wirePolicy.Cloak
 	preserveCallerFingerprint := !applyCLIFingerprint && !confirmedClaudeCode
 	useOAuthBetas := fp.UseOAuthBetas

@@ -496,18 +496,23 @@ nonstream-keepalive-interval: 0
 #     #   omit / empty        = caller-owned API-key fingerprint (respects caller)
 #     #   "claude-code-cli"   = same Messages fingerprint as Claude Code OAuth CLI,
 #     #                         including official Anthropic API keys: OAuth Anthropic-Beta
-#     #                         set, CCH signing, stable CLI metadata.user_id / session_id /
-#     #                         device identity. API keys seed identity from the key;
+#     #                         set, CCH signing on api.anthropic.com, stable CLI
+#     #                         metadata.user_id / session_id / device identity.
+#     #                         API keys seed identity from the key;
 #     #                         delegated OAuth providers use stable auth ID instead of
 #     #                         rotating access tokens. "oauth-cli" is a legacy alias.
 #     #
 #     # count_tokens keeps the native model/messages/tools shape for every origin, including
 #     # Kimi opt-in. It does not send billing/CCH, currentDate, metadata, or diagnostics.
 #     #
-#     # CCH warning: the billing block includes a per-request cch hash. api.anthropic.com
-#     # strips that block (0 tokens, no cache impact). Gateways that keep it as prompt text
-#     # will miss cache on every Messages request. Kimi strips the block by default, but an
-#     # explicit fingerprint-profile opt-in keeps and signs it on Messages.
+#     # CCH: the billing block may carry a per-request cch hash. CPA emits it exactly where
+#     # Claude Code does, which is api.anthropic.com (first-party) and Vertex only. An opt-in
+#     # on any other gateway (including Kimi) still sends the billing block, but without cch,
+#     # so a per-request hash cannot bust that gateway's prompt cache. api.anthropic.com
+#     # strips the block itself (0 tokens, no cache impact). Kimi drops the whole block by
+#     # default and keeps it, unsigned, after an explicit fingerprint-profile opt-in.
+#     # A real Claude OAuth credential always signs, on every upstream: a downstream Claude
+#     # Code pointed at CPA cannot produce that value itself.
 #     #
 #     # Example (official Anthropic or a custom Messages gateway):
 #     #   - api-key: "your-key"
@@ -526,7 +531,8 @@ nonstream-keepalive-interval: 0
 #     #   }
 #     # fingerprint-profile: "claude-code-cli" # optional: default is empty (caller-owned); uncomment to opt into Claude Code CLI Messages fingerprinting
 #     experimental-cch-signing: false # deprecated compatibility field; CCH is generated automatically
-#                                     # for real Claude OAuth and explicit claude-code-cli profiles; Vertex keeps provider-native signing
+#                                     # for real Claude OAuth on any upstream, and for claude-code-cli profiles
+#                                     # only on api.anthropic.com; Vertex keeps provider-native signing
 
 # Anthropic-Beta is assembled per request rather than sent as a fixed list, matching
 # Claude Code 2.1.220: context-1m sits right after claude-code, mid-conversation-system

@@ -30,13 +30,15 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		baseURL = "https://api.anthropic.com"
 	}
 	url := fmt.Sprintf("%s/v1/messages?beta=true", baseURL)
-	fp := resolveClaudeFingerprintPolicyForOrigin(e.cfg, auth, apiKey, url)
+	fp := resolveClaudeFingerprintPolicy(e.cfg, auth, apiKey)
 	defer func() {
 		if cancelErr := newClaudeOAuthCancellationError(ctx, fp.OAuthCancellation, err); cancelErr != nil {
 			err = cancelErr
 		}
 	}()
-	cchSigning := claudeCCHSigningEnabled(apiKey, claudeCCHUpstreamAnthropic, fp.ProfileClaudeCodeCLI)
+	// Same split as Execute: OAuth signs everywhere, an opted-in API key only on
+	// upstreams the native gate accepts.
+	cchSigning := claudeCCHSigningEnabled(apiKey, claudeCCHUpstreamAnthropic, fp.ProfileClaudeCodeCLI, url)
 
 	reporter := helps.NewExecutorUsageReporter(ctx, e, baseModel, auth)
 	defer reporter.TrackFailure(ctx, &err)

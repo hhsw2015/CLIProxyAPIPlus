@@ -942,7 +942,7 @@ type claudeCloakSettings struct {
 	cacheUserID    bool
 }
 
-func resolveClaudeWirePolicy(cfg *config.Config, auth *cliproxyauth.Auth, apiKey string, confirmedClaudeCode bool, origin string) (claudeWirePolicy, claudeCloakSettings) {
+func resolveClaudeWirePolicy(cfg *config.Config, auth *cliproxyauth.Auth, apiKey string, confirmedClaudeCode bool) (claudeWirePolicy, claudeCloakSettings) {
 	cloakCfg := resolveClaudeKeyCloakConfig(cfg, auth)
 	attrMode, attrStrict, attrWords, attrCache := getCloakConfigFromAuth(auth)
 
@@ -973,10 +973,7 @@ func resolveClaudeWirePolicy(cfg *config.Config, auth *cliproxyauth.Auth, apiKey
 		}
 	}
 
-	if strings.TrimSpace(origin) == "" {
-		origin = fingerprintOriginFromAuth(auth)
-	}
-	fp := resolveClaudeFingerprintPolicyForOrigin(cfg, auth, apiKey, origin)
+	fp := resolveClaudeFingerprintPolicy(cfg, auth, apiKey)
 	cloakConfigured := cloakCfg != nil || attrMode != "" || attrStrict || len(attrWords) > 0 || attrCache
 	policy := claudeWirePolicy{
 		OAuth:                fp.AuthIsOAuthToken,
@@ -1015,7 +1012,7 @@ func applyCloaking(
 	confirmedClaudeCode bool,
 	cchSigning bool,
 ) ([]byte, bool, error) {
-	policy, settings := resolveClaudeWirePolicy(cfg, auth, apiKey, confirmedClaudeCode, "")
+	policy, settings := resolveClaudeWirePolicy(cfg, auth, apiKey, confirmedClaudeCode)
 	if !policy.Cloak {
 		return payload, false, nil
 	}

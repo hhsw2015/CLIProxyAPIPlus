@@ -386,10 +386,12 @@ type ClaudeKey struct {
 	// delegated providers such as Kimi into the Claude Code OAuth CLI Messages
 	// shape (OAuth betas, CCH signing, stable CLI identity) without treating the
 	// credential as a real OAuth token for refresh/profile/runtime semantics.
-	// CCH is a per-request hash; api.anthropic.com strips it, but gateways that
-	// treat the billing block as prompt text will miss cache. Kimi strips the
-	// attribution by default and keeps/signs it on Messages only after an explicit
-	// profile opt-in. count_tokens keeps the native model/messages/tools shape.
+	// CCH is a per-request hash and follows the native gate: it is emitted only on
+	// api.anthropic.com and Vertex, so an opt-in on any other gateway sends the
+	// billing block unsigned and cannot bust that gateway's prompt cache. Kimi
+	// strips the attribution entirely by default and keeps it, unsigned, after an
+	// explicit opt-in. count_tokens keeps the native model/messages/tools shape.
+	// Recognized values are defined by NormalizeClaudeFingerprintProfile.
 	FingerprintProfile string `yaml:"fingerprint-profile,omitempty" json:"fingerprint-profile,omitempty"`
 
 	// ExperimentalCCHSigning is retained for configuration compatibility.
