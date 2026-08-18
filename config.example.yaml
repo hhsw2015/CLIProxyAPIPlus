@@ -312,6 +312,9 @@ nonstream-keepalive-interval: 0
 #     base-url: "https://generativelanguage.googleapis.com"
 #     headers:
 #       X-Custom-Header: "custom-value"
+#       # Values starting with "$" dynamically copy the header value from downstream client requests.
+#       # If the client did not send the specified header, the header is omitted.
+#       # X-Claude-Code-Session-Id: "$ABC" # copies client's "ABC" header
 #     proxy-url: "socks5://proxy.example.com:1080"
 #     # proxy-url: "direct" # optional: explicit direct connect for this credential
 #     models:
@@ -346,6 +349,9 @@ nonstream-keepalive-interval: 0
 #     base-url: "https://generativelanguage.googleapis.com"
 #     headers:
 #       X-Custom-Header: "custom-value"
+#       # Values starting with "$" dynamically copy the header value from downstream client requests.
+#       # If the client did not send the specified header, the header is omitted.
+#       # X-Claude-Code-Session-Id: "$ABC" # copies client's "ABC" header
 #     proxy-url: "socks5://proxy.example.com:1080"
 #     # proxy-url: "direct" # optional: explicit direct connect for this credential
 #     models:
@@ -374,6 +380,9 @@ nonstream-keepalive-interval: 0
 #     alpha-search: false # optional: allow this key to serve /v1/alpha/search via base-url + /alpha/search
 #     headers:
 #       X-Custom-Header: "custom-value"
+#       # Values starting with "$" dynamically copy the header value from downstream client requests.
+#       # If the client did not send the specified header, the header is omitted.
+#       # X-Claude-Code-Session-Id: "$ABC" # copies client's "ABC" header
 #     proxy-url: "socks5://proxy.example.com:1080" # optional: per-key proxy override
 #     # proxy-url: "direct" # optional: explicit direct connect for this credential
 #     models:
@@ -413,6 +422,9 @@ nonstream-keepalive-interval: 0
 #     websockets: true # optional: use the xAI upstream websocket transport for downstream websocket requests
 #     headers:
 #       X-Custom-Header: "custom-value"
+#       # Values starting with "$" dynamically copy the header value from downstream client requests.
+#       # If the client did not send the specified header, the header is omitted.
+#       # X-Claude-Code-Session-Id: "$ABC" # copies client's "ABC" header
 #     proxy-url: "socks5://proxy.example.com:1080" # optional: per-key proxy override
 #     # proxy-url: "direct" # optional: explicit direct connect for this credential
 #     models:
@@ -444,6 +456,9 @@ nonstream-keepalive-interval: 0
 #     base-url: "https://www.example.com" # use the custom claude API endpoint
 #     headers:
 #       X-Custom-Header: "custom-value"
+#       # Values starting with "$" dynamically copy the header value from downstream client requests.
+#       # If the client did not send the specified header, the header is omitted.
+#       # X-Claude-Code-Session-Id: "$ABC" # copies client's "ABC" header
 #     proxy-url: "socks5://proxy.example.com:1080" # optional: per-key proxy override
 #     # proxy-url: "direct" # optional: explicit direct connect for this credential
 #     models:
@@ -589,6 +604,9 @@ nonstream-keepalive-interval: 0
 #         action: "stop" # "stop", "stop-and-cooldown", "continue", "continue-and-cooldown"
 #     headers:
 #       X-Custom-Header: "custom-value"
+#       # Values starting with "$" dynamically copy the header value from downstream client requests.
+#       # If the client did not send the specified header, the header is omitted.
+#       # X-Claude-Code-Session-Id: "$ABC" # copies client's "ABC" header
 #     api-key-entries:
 #       - api-key: "sk-or-v1-...b780"
 #         weight: 5 # optional: weighted-round-robin share; omitted defaults to 1; maximum 1,000,000
@@ -630,6 +648,9 @@ nonstream-keepalive-interval: 0
 #     # proxy-url: "direct" # optional: explicit direct connect for this credential
 #     headers:
 #       X-Custom-Header: "custom-value"
+#       # Values starting with "$" dynamically copy the header value from downstream client requests.
+#       # If the client did not send the specified header, the header is omitted.
+#       # X-Claude-Code-Session-Id: "$ABC" # copies client's "ABC" header
 #     models:                                     # optional: map aliases to upstream model names
 #       - name: "gemini-2.5-flash"                # upstream model name
 #         alias: "vertex-flash"                   # client-visible alias
