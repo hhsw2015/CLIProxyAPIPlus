@@ -120,8 +120,6 @@ func addRequestScopedErrorsToMetadata(rules []config.RequestScopedErrorRule, met
 	metadata["request_scoped_errors"] = rules
 }
 
-// addConfigHeadersToAttrs adds header configuration to auth attributes.
-// Headers are prefixed with "header:" in the attributes map.
 func fingerprintProfileFromMetadata(metadata map[string]any) string {
 	if metadata == nil {
 		return ""
@@ -152,6 +150,8 @@ func applyFingerprintProfileAttribute(auth *coreauth.Auth, metadata map[string]a
 	auth.Attributes["fingerprint_profile"] = profile
 }
 
+// addConfigHeadersToAttrs adds header configuration to auth attributes.
+// Headers are prefixed with "header:" in the attributes map.
 func addConfigHeadersToAttrs(headers map[string]string, attrs map[string]string) {
 	if len(headers) == 0 || attrs == nil {
 		return

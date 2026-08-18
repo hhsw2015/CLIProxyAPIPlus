@@ -163,22 +163,9 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	}
 	bodyForUpstream = sanitizeClaudeMessagesForClaudeUpstreamWithDebug(ctx, bodyForUpstream, baseModel, helps.APIKeyModelIsCompat(req))
 	if fp.ApplyCLIIdentity {
-		// ApplyCLIIdentity and ProfileClaudeCodeCLI are the same predicate, so
-		// claudeSessionID was already resolved above by ClaudeAgentSessionUUIDForRequest,
-		// which always returns a UUID. Do not add a second session source here: a
-		// per-apiKey cached ID would silently break agent-conversation continuity.
-		identitySeed := apiKey
-		if isKimiMessagesUpstream(auth, url) {
-			identitySeed = helps.ClaudeCLIAuthIdentitySeed(auth)
-		}
-		var identityAuth *cliproxyauth.Auth
-		identityAuth, err = helps.PrepareClaudeCLIFingerprintAuth(auth, identitySeed, fp.SynthesizeIdentity)
+		bodyForUpstream, err = applyClaudeCLIIdentity(bodyForUpstream, auth, apiKey, url, claudeSessionID, fp.SynthesizeIdentity)
 		if err != nil {
-			return nil, fmt.Errorf("ensure Claude CLI fingerprint identity: %w", err)
-		}
-		bodyForUpstream, _, err = helps.ApplyClaudeCredentialMetadata(bodyForUpstream, identityAuth, claudeSessionID)
-		if err != nil {
-			return nil, fmt.Errorf("apply Claude credential metadata: %w", err)
+			return nil, err
 		}
 	}
 	cchBilling := ""
