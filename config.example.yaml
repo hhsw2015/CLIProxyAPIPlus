@@ -732,6 +732,48 @@ nonstream-keepalive-interval: 0
 #   xai:
 #     - "grok-3-mini"
 
+# OAuth provider request-scoped error rules (custom error classification for OAuth credentials)
+# oauth-request-scoped-errors:
+#   vertex:
+#     - status: 400
+#       match:
+#         - "maximum_context_length"
+#         - "context_length_exceeded"
+#       match-regexr:
+#         - "maximum_context_length$"
+#         - "^context_length_exceeded"
+#       action: "stop" # options: "stop", "stop-and-cooldown", "continue", "continue-and-cooldown"
+#   aistudio:
+#     - status: 400
+#       match:
+#         - "invalid_argument"
+#       action: "stop"
+#   antigravity:
+#     - status: 500
+#       match:
+#         - "internal_server_error"
+#       action: "stop-and-cooldown"
+#   claude:
+#     - status: 400
+#       match:
+#         - "prompt is too long"
+#       action: "stop"
+#   codex:
+#     - status: 400
+#       match:
+#         - "context_window_exceeded"
+#       action: "stop"
+#   kimi:
+#     - status: 400
+#       match:
+#         - "length_limit"
+#       action: "stop"
+#   xai:
+#     - status: 400
+#       match:
+#         - "max_tokens_exceeded"
+#       action: "stop"
+
 # Optional payload configuration
 # payload:
 #   default: # Default rules only set parameters when they are missing in the payload.
