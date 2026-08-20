@@ -235,14 +235,7 @@ func (h *Handler) PatchGeminiKey(c *gin.Context) {
 
 	entry := h.cfg.GeminiKey[targetIndex]
 	if body.Value.APIKey != nil {
-		trimmed := strings.TrimSpace(*body.Value.APIKey)
-		if trimmed == "" {
-			h.cfg.GeminiKey = append(h.cfg.GeminiKey[:targetIndex], h.cfg.GeminiKey[targetIndex+1:]...)
-			h.cfg.SanitizeGeminiKeys()
-			h.persistLocked(c)
-			return
-		}
-		entry.APIKey = trimmed
+		entry.APIKey = strings.TrimSpace(*body.Value.APIKey)
 	}
 	if len(body.Value.Weight) > 0 {
 		weight, errWeight := parseCredentialWeightPatch(body.Value.Weight)
@@ -275,6 +268,12 @@ func (h *Handler) PatchGeminiKey(c *gin.Context) {
 	}
 	if body.Value.RequestScopedErrors != nil {
 		entry.RequestScopedErrors = append([]config.RequestScopedErrorRule(nil), *body.Value.RequestScopedErrors...)
+	}
+	if entry.APIKey == "" && entry.BaseURL == "" {
+		h.cfg.GeminiKey = append(h.cfg.GeminiKey[:targetIndex], h.cfg.GeminiKey[targetIndex+1:]...)
+		h.cfg.SanitizeGeminiKeys()
+		h.persistLocked(c)
+		return
 	}
 	h.cfg.GeminiKey[targetIndex] = entry
 	h.cfg.SanitizeGeminiKeys()
@@ -421,14 +420,7 @@ func (h *Handler) PatchInteractionsKey(c *gin.Context) {
 
 	entry := h.cfg.InteractionsKey[targetIndex]
 	if body.Value.APIKey != nil {
-		trimmed := strings.TrimSpace(*body.Value.APIKey)
-		if trimmed == "" {
-			h.cfg.InteractionsKey = append(h.cfg.InteractionsKey[:targetIndex], h.cfg.InteractionsKey[targetIndex+1:]...)
-			h.cfg.SanitizeInteractionsKeys()
-			h.persistLocked(c)
-			return
-		}
-		entry.APIKey = trimmed
+		entry.APIKey = strings.TrimSpace(*body.Value.APIKey)
 	}
 	if len(body.Value.Weight) > 0 {
 		weight, errWeight := parseCredentialWeightPatch(body.Value.Weight)
@@ -461,6 +453,12 @@ func (h *Handler) PatchInteractionsKey(c *gin.Context) {
 	}
 	if body.Value.RequestScopedErrors != nil {
 		entry.RequestScopedErrors = append([]config.RequestScopedErrorRule(nil), *body.Value.RequestScopedErrors...)
+	}
+	if entry.APIKey == "" && entry.BaseURL == "" {
+		h.cfg.InteractionsKey = append(h.cfg.InteractionsKey[:targetIndex], h.cfg.InteractionsKey[targetIndex+1:]...)
+		h.cfg.SanitizeInteractionsKeys()
+		h.persistLocked(c)
+		return
 	}
 	h.cfg.InteractionsKey[targetIndex] = entry
 	h.cfg.SanitizeInteractionsKeys()
@@ -986,14 +984,7 @@ func (h *Handler) PatchVertexCompatKey(c *gin.Context) {
 		entry.Prefix = strings.TrimSpace(*body.Value.Prefix)
 	}
 	if body.Value.BaseURL != nil {
-		trimmed := strings.TrimSpace(*body.Value.BaseURL)
-		if trimmed == "" {
-			h.cfg.VertexCompatAPIKey = append(h.cfg.VertexCompatAPIKey[:targetIndex], h.cfg.VertexCompatAPIKey[targetIndex+1:]...)
-			h.cfg.SanitizeVertexCompatKeys()
-			h.persistLocked(c)
-			return
-		}
-		entry.BaseURL = trimmed
+		entry.BaseURL = strings.TrimSpace(*body.Value.BaseURL)
 	}
 	if body.Value.ProxyURL != nil {
 		entry.ProxyURL = strings.TrimSpace(*body.Value.ProxyURL)

@@ -88,6 +88,9 @@ func (e *GeminiExecutor) PrepareRequest(req *http.Request, auth *cliproxyauth.Au
 	if apiKey != "" {
 		req.Header.Set("x-goog-api-key", apiKey)
 		req.Header.Del("Authorization")
+	} else {
+		req.Header.Del("x-goog-api-key")
+		req.Header.Del("Authorization")
 	}
 	applyGeminiHeaders(req, auth)
 	return nil

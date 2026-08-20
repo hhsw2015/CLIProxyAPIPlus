@@ -3843,6 +3843,47 @@ func TestXAIExecutorComposerReusesClaudeCodeSession(t *testing.T) {
 	}
 }
 
+func TestApplyXAIHeaders_EmptyAPIKey_OmitsAuthorization(t *testing.T) {
+	req, err := http.NewRequest(http.MethodPost, "https://example.com/v1/chat/completions", nil)
+	if err != nil {
+		t.Fatalf("NewRequest() error = %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer preexisting-bearer")
+	auth := &cliproxyauth.Auth{
+		Provider: "xai",
+		Attributes: map[string]string{
+			"auth_kind":           "apikey",
+			"base_url":            "https://custom-xai.example.com",
+			"header:Custom-Token": "xai-custom",
+		},
+	}
+	applyXAIHeaders(req, auth, "", false, "session-123")
+
+	if got := req.Header.Get("Authorization"); got != "" {
+		t.Fatalf("Authorization = %q, want empty for empty API key", got)
+	}
+	if got := req.Header.Get("x-grok-conv-id"); got != "session-123" {
+		t.Fatalf("x-grok-conv-id = %q, want session-123", got)
+	}
+	if got := req.Header.Get("Custom-Token"); got != "xai-custom" {
+		t.Fatalf("Custom-Token = %q, want xai-custom", got)
+	}
+
+	// Also verify PrepareRequest
+	req2, _ := http.NewRequest(http.MethodPost, "https://example.com/v1/chat/completions", nil)
+	req2.Header.Set("Authorization", "Bearer preexisting-bearer")
+	exec := &XAIExecutor{}
+	if errPrep := exec.PrepareRequest(req2, auth); errPrep != nil {
+		t.Fatalf("PrepareRequest() error = %v", errPrep)
+	}
+	if got := req2.Header.Get("Authorization"); got != "" {
+		t.Fatalf("PrepareRequest Authorization = %q, want empty", got)
+	}
+	if got := req2.Header.Get("Custom-Token"); got != "xai-custom" {
+		t.Fatalf("PrepareRequest Custom-Token = %q, want xai-custom", got)
+	}
+}
+
 func TestSanitizeXAIInputEncryptedContent_DropsInvalidReasoningBlob(t *testing.T) {
 	body := []byte(`{"model":"grok-4.3","input":[{"type":"reasoning","summary":[],"encrypted_content":"bad"},{"type":"reasoning","summary":[],"encrypted_content":"gAAAAABinvalid-gpt-shape"},{"role":"user","content":"hi"}]}`)
 	got := sanitizeXAIInputEncryptedContent(body)
