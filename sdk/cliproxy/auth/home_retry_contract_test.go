@@ -563,23 +563,23 @@ func TestHomeRetryPolicyUsesRemoteCredentialOverrideBeforeSelection(t *testing.T
 		hasRequestRetry: true,
 	}
 
-	wait, shouldRetry := manager.shouldRetryAfterErrorWithHomeRetryLimit(context.Background(), cliproxyexecutor.Options{}, errRemoteCooldown, 0, []string{"home-retry-contract"}, "gpt", time.Second, -1)
+	wait, shouldRetry := manager.shouldRetryAfterErrorWithHomeRetryLimit(context.Background(), cliproxyexecutor.Options{}, errRemoteCooldown, 0, []string{"home-retry-contract"}, "gpt", time.Second, -1, 0)
 	if !shouldRetry || wait != 10*time.Millisecond {
 		t.Fatalf("remote credential override retry = (%v, %t), want (10ms, true)", wait, shouldRetry)
 	}
-	if _, shouldRetry = manager.shouldRetryAfterErrorWithHomeRetryLimit(context.Background(), cliproxyexecutor.Options{}, errRemoteCooldown, 1, []string{"home-retry-contract"}, "gpt", time.Second, -1); shouldRetry {
+	if _, shouldRetry = manager.shouldRetryAfterErrorWithHomeRetryLimit(context.Background(), cliproxyexecutor.Options{}, errRemoteCooldown, 1, []string{"home-retry-contract"}, "gpt", time.Second, -1, 0); shouldRetry {
 		t.Fatal("remote credential override allowed more than one additional round")
 	}
 	pinnedOpts := cliproxyexecutor.Options{Metadata: map[string]any{
 		cliproxyexecutor.PinnedAuthMetadataKey: "home-retry-a",
 	}}
-	if _, shouldRetry = manager.shouldRetryAfterErrorWithHomeRetryLimit(context.Background(), pinnedOpts, errRemoteCooldown, 0, []string{"home-retry-contract"}, "gpt", time.Second, -1); shouldRetry {
+	if _, shouldRetry = manager.shouldRetryAfterErrorWithHomeRetryLimit(context.Background(), pinnedOpts, errRemoteCooldown, 0, []string{"home-retry-contract"}, "gpt", time.Second, -1, 0); shouldRetry {
 		t.Fatal("aggregate retry limit from unpinned Home credentials affected a pinned request")
 	}
 
 	errRemoteCooldown.requestRetry = 0
 	manager.SetRetryConfig(3, time.Second, 0)
-	if _, shouldRetry = manager.shouldRetryAfterErrorWithHomeRetryLimit(context.Background(), cliproxyexecutor.Options{}, errRemoteCooldown, 0, []string{"home-retry-contract"}, "gpt", time.Second, -1); shouldRetry {
+	if _, shouldRetry = manager.shouldRetryAfterErrorWithHomeRetryLimit(context.Background(), cliproxyexecutor.Options{}, errRemoteCooldown, 0, []string{"home-retry-contract"}, "gpt", time.Second, -1, 0); shouldRetry {
 		t.Fatal("explicit remote credential override 0 did not suppress the global retry setting")
 	}
 	retryLimit := 3
@@ -779,7 +779,7 @@ func TestHomeRetryRoundUsesAuthoritativeRemoteCooldown(t *testing.T) {
 		{
 			name: "stream",
 			execute: func(manager *Manager, retryLimit *int) error {
-				_, errExecute := manager.executeStreamMixedOnce(context.Background(), []string{"home-retry-contract"}, cliproxyexecutor.Request{Model: "gpt"}, cliproxyexecutor.Options{Stream: true}, 2, retryLimit)
+				_, errExecute := manager.executeStreamMixedOnce(context.Background(), []string{"home-retry-contract"}, cliproxyexecutor.Request{Model: "gpt"}, cliproxyexecutor.Options{Stream: true}, 2, retryLimit, 0, 0)
 				return errExecute
 			},
 		},
@@ -831,7 +831,7 @@ func TestHomeCooldownClassificationPreservesNonRetryableRoundStatus(t *testing.T
 		{
 			name: "stream",
 			execute: func(manager *Manager, retryLimit *int) error {
-				_, errExecute := manager.executeStreamMixedOnce(context.Background(), []string{"home-retry-contract"}, cliproxyexecutor.Request{Model: "gpt"}, cliproxyexecutor.Options{Stream: true}, 2, retryLimit)
+				_, errExecute := manager.executeStreamMixedOnce(context.Background(), []string{"home-retry-contract"}, cliproxyexecutor.Request{Model: "gpt"}, cliproxyexecutor.Options{Stream: true}, 2, retryLimit, 0, 0)
 				return errExecute
 			},
 		},
@@ -860,7 +860,7 @@ func TestHomeCooldownClassificationPreservesNonRetryableRoundStatus(t *testing.T
 			if retryLimit != 2 {
 				t.Fatalf("observed retry limit = %d, want authoritative Home limit 2", retryLimit)
 			}
-			if wait, shouldRetry := manager.shouldRetryAfterErrorWithHomeRetryLimit(context.Background(), cliproxyexecutor.Options{}, errExecute, 0, []string{"home-retry-contract"}, "gpt", time.Second, retryLimit); shouldRetry || wait != 0 {
+			if wait, shouldRetry := manager.shouldRetryAfterErrorWithHomeRetryLimit(context.Background(), cliproxyexecutor.Options{}, errExecute, 0, []string{"home-retry-contract"}, "gpt", time.Second, retryLimit, 0); shouldRetry || wait != 0 {
 				t.Fatalf("401 round retry = (%v, %t), want (0, false)", wait, shouldRetry)
 			}
 		})
@@ -882,7 +882,7 @@ func TestHomeRetryRoundStartsImmediatelyWhenHomeReportsAvailableNextRound(t *tes
 		{
 			name: "stream",
 			execute: func(manager *Manager, retryLimit *int) error {
-				_, errExecute := manager.executeStreamMixedOnce(context.Background(), []string{"home-retry-contract"}, cliproxyexecutor.Request{Model: "gpt"}, cliproxyexecutor.Options{Stream: true}, 0, retryLimit)
+				_, errExecute := manager.executeStreamMixedOnce(context.Background(), []string{"home-retry-contract"}, cliproxyexecutor.Request{Model: "gpt"}, cliproxyexecutor.Options{Stream: true}, 0, retryLimit, 0, 0)
 				return errExecute
 			},
 		},
@@ -911,7 +911,7 @@ func TestHomeRetryRoundStartsImmediatelyWhenHomeReportsAvailableNextRound(t *tes
 			if !isHomeRetryRoundExhausted(errExecute) {
 				t.Fatalf("execution error = %v, want exhausted retry round", errExecute)
 			}
-			wait, shouldRetry := manager.shouldRetryAfterErrorWithHomeRetryLimit(context.Background(), cliproxyexecutor.Options{}, errExecute, 0, []string{"home-retry-contract"}, "gpt", 10*time.Second, retryLimit)
+			wait, shouldRetry := manager.shouldRetryAfterErrorWithHomeRetryLimit(context.Background(), cliproxyexecutor.Options{}, errExecute, 0, []string{"home-retry-contract"}, "gpt", 10*time.Second, retryLimit, 0)
 			if !shouldRetry || wait != 0 {
 				t.Fatalf("next-round retry = (%v, %t), want immediate", wait, shouldRetry)
 			}
@@ -934,7 +934,7 @@ func TestHomeRetryRoundUsesRemoteCooldownWhenAttemptedErrorHasNoTiming(t *testin
 		{
 			name: "stream",
 			execute: func(manager *Manager, retryLimit *int) error {
-				_, errExecute := manager.executeStreamMixedOnce(context.Background(), []string{"home-retry-contract"}, cliproxyexecutor.Request{Model: "gpt"}, cliproxyexecutor.Options{Stream: true}, 2, retryLimit)
+				_, errExecute := manager.executeStreamMixedOnce(context.Background(), []string{"home-retry-contract"}, cliproxyexecutor.Request{Model: "gpt"}, cliproxyexecutor.Options{Stream: true}, 2, retryLimit, 0, 0)
 				return errExecute
 			},
 		},
@@ -1274,7 +1274,7 @@ func TestHomeLocalSelectionRejectionWaitsForReleaseAcknowledgement(t *testing.T)
 			blockedGroup:        executionregistry.ReleaseGroup{CredentialID: "home-retry-a", Model: "gpt"},
 			blockedSequence:     2,
 			execute: func(manager *Manager, maxRetryCredentials int, retryLimit *int) error {
-				_, errExecute := manager.executeStreamMixedOnce(context.Background(), []string{"home-retry-contract"}, cliproxyexecutor.Request{Model: "gpt"}, cliproxyexecutor.Options{Stream: true}, maxRetryCredentials, retryLimit)
+				_, errExecute := manager.executeStreamMixedOnce(context.Background(), []string{"home-retry-contract"}, cliproxyexecutor.Request{Model: "gpt"}, cliproxyexecutor.Options{Stream: true}, maxRetryCredentials, retryLimit, 0, 0)
 				return errExecute
 			},
 		},
@@ -1289,7 +1289,7 @@ func TestHomeLocalSelectionRejectionWaitsForReleaseAcknowledgement(t *testing.T)
 			blockedGroup:        executionregistry.ReleaseGroup{CredentialID: "home-retry-b", Model: "gpt"},
 			blockedSequence:     1,
 			execute: func(manager *Manager, maxRetryCredentials int, retryLimit *int) error {
-				_, errExecute := manager.executeStreamMixedOnce(context.Background(), []string{"home-retry-contract"}, cliproxyexecutor.Request{Model: "gpt"}, cliproxyexecutor.Options{Stream: true}, maxRetryCredentials, retryLimit)
+				_, errExecute := manager.executeStreamMixedOnce(context.Background(), []string{"home-retry-contract"}, cliproxyexecutor.Request{Model: "gpt"}, cliproxyexecutor.Options{Stream: true}, maxRetryCredentials, retryLimit, 0, 0)
 				return errExecute
 			},
 		},

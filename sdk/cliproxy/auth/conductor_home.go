@@ -19,7 +19,8 @@ import (
 )
 
 const (
-	homeAuthCountMetadataKey = "__cliproxy_home_auth_count"
+	homeAuthCountMetadataKey  = "__cliproxy_home_auth_count"
+	homeRetryRoundMetadataKey = "request_retry_round"
 	// ExcludedAuthIDsMetadataKey stores credential IDs already attempted in the
 	// current request retry round.
 	ExcludedAuthIDsMetadataKey = "excluded_auth_ids"
@@ -357,12 +358,20 @@ type homeDispatchConstraintsDispatcher interface {
 	RPopAuthWithConstraints(ctx context.Context, requestedModel string, sessionID string, headers http.Header, count int, excludedAuthIDs []string, pinnedAuthID string) ([]byte, error)
 }
 
+type homeDispatchRetryRoundConstraintsDispatcher interface {
+	RPopAuthWithRetryRoundConstraints(ctx context.Context, requestedModel string, sessionID string, headers http.Header, count int, retryRound int, excludedAuthIDs []string, pinnedAuthID string) ([]byte, error)
+}
+
 type homeCredentialPolicyDispatcher interface {
 	RPopAuthWithPolicy(ctx context.Context, requestedModel string, sessionID string, headers http.Header, count int, credentialPolicy string) ([]byte, error)
 }
 
 type homeCredentialPolicyConstraintsDispatcher interface {
 	RPopAuthWithPolicyAndConstraints(ctx context.Context, requestedModel string, sessionID string, headers http.Header, count int, credentialPolicy string, excludedAuthIDs []string, pinnedAuthID string) ([]byte, error)
+}
+
+type homeCredentialPolicyRetryRoundConstraintsDispatcher interface {
+	RPopAuthWithPolicyAndRetryRoundConstraints(ctx context.Context, requestedModel string, sessionID string, headers http.Header, count int, credentialPolicy string, retryRound int, excludedAuthIDs []string, pinnedAuthID string) ([]byte, error)
 }
 
 var currentHomeDispatcher = func() homeAuthDispatcher {
@@ -507,7 +516,7 @@ func (m *Manager) retainedHomeSessionSelection(ctx context.Context, opts cliprox
 	routeModel, validRouteModel := validCanonicalHomeConcurrencyModelKey(model)
 	var retained *HomeDispatchSelection
 	var ended []*HomeDispatchSelection
-	fallbackAttempt := homeAuthCountFromMetadata(opts.Metadata) > 1
+	fallbackAttempt := homeAuthCountFromMetadata(opts.Metadata) > 1 || homeRetryRoundFromMetadata(opts.Metadata) > 0
 	m.mu.Lock()
 	selections := m.homeSessionSelections[sessionID]
 	for key, selection := range selections {
@@ -910,6 +919,7 @@ func (m *Manager) pickHomeDispatchSelection(ctx context.Context, model string, o
 		requestedModel = requestedModelFromMetadata(opts.Metadata, model)
 	}
 	pinnedAuthID := pinnedAuthIDFromMetadata(opts.Metadata)
+	retryRound := homeRetryRoundFromMetadata(opts.Metadata)
 	excludedAuthIDList := homeExcludedAuthIDsFromMetadata(opts.Metadata)
 	excludedAuthIDs := make(map[string]struct{}, len(excludedAuthIDList))
 	for _, authID := range excludedAuthIDList {
@@ -955,11 +965,15 @@ func (m *Manager) pickHomeDispatchSelection(ctx context.Context, model string, o
 	var raw []byte
 	var errRPop error
 	if credentialPolicy == "" {
-		if constrainedClient, okConstraints := client.(homeDispatchConstraintsDispatcher); okConstraints {
+		if retryRoundClient, okRetryRound := client.(homeDispatchRetryRoundConstraintsDispatcher); okRetryRound {
+			raw, errRPop = retryRoundClient.RPopAuthWithRetryRoundConstraints(ctx, requestedModel, sessionID, dispatchHeaders, homeAuthCountFromMetadata(opts.Metadata), retryRound, excludedAuthIDList, pinnedAuthID)
+		} else if constrainedClient, okConstraints := client.(homeDispatchConstraintsDispatcher); okConstraints {
 			raw, errRPop = constrainedClient.RPopAuthWithConstraints(ctx, requestedModel, sessionID, dispatchHeaders, homeAuthCountFromMetadata(opts.Metadata), excludedAuthIDList, pinnedAuthID)
 		} else {
 			raw, errRPop = client.RPopAuth(ctx, requestedModel, sessionID, dispatchHeaders, homeAuthCountFromMetadata(opts.Metadata))
 		}
+	} else if retryRoundPolicyClient, okRetryRound := client.(homeCredentialPolicyRetryRoundConstraintsDispatcher); okRetryRound {
+		raw, errRPop = retryRoundPolicyClient.RPopAuthWithPolicyAndRetryRoundConstraints(ctx, requestedModel, sessionID, dispatchHeaders, homeAuthCountFromMetadata(opts.Metadata), credentialPolicy, retryRound, excludedAuthIDList, pinnedAuthID)
 	} else if policyClient, okPolicy := client.(homeCredentialPolicyDispatcher); okPolicy {
 		if constrainedClient, okConstraints := client.(homeCredentialPolicyConstraintsDispatcher); okConstraints {
 			raw, errRPop = constrainedClient.RPopAuthWithPolicyAndConstraints(ctx, requestedModel, sessionID, dispatchHeaders, homeAuthCountFromMetadata(opts.Metadata), credentialPolicy, excludedAuthIDList, pinnedAuthID)
@@ -1142,6 +1156,27 @@ func (m *Manager) pickHomeDispatchSelection(ctx context.Context, model string, o
 		}
 	}
 	return selection, nil
+}
+
+func homeRetryRoundFromMetadata(metadata map[string]any) int {
+	if metadata == nil {
+		return 0
+	}
+	switch value := metadata[homeRetryRoundMetadataKey].(type) {
+	case int:
+		if value > 0 {
+			return value
+		}
+	case int64:
+		if value > 0 {
+			return int(value)
+		}
+	case float64:
+		if value > 0 && value == float64(int(value)) {
+			return int(value)
+		}
+	}
+	return 0
 }
 
 func requestedModelFromMetadata(metadata map[string]any, fallback string) string {

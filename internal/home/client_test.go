@@ -131,6 +131,54 @@ func TestAuthDispatchRequestIncludesPinnedAuthID(t *testing.T) {
 	}
 }
 
+func TestAuthDispatchRequestDistinguishesLegacyAndRetryRoundProtocol(t *testing.T) {
+	excludedAuthIDs := []string{"auth-a"}
+	legacy := newAuthDispatchRequest("gpt-5.4", "", nil, 3, "", &excludedAuthIDs, "")
+	legacyRaw, errMarshal := json.Marshal(&legacy)
+	if errMarshal != nil {
+		t.Fatalf("marshal legacy auth dispatch request: %v", errMarshal)
+	}
+	var legacyPayload map[string]any
+	if errUnmarshal := json.Unmarshal(legacyRaw, &legacyPayload); errUnmarshal != nil {
+		t.Fatalf("unmarshal legacy auth dispatch request: %v", errUnmarshal)
+	}
+	if _, present := legacyPayload["retry_round"]; present {
+		t.Fatalf("legacy request unexpectedly included retry_round: %#v", legacyPayload["retry_round"])
+	}
+
+	initial := newAuthDispatchRequestWithRetryRound("gpt-5.4", "", nil, 3, "", 0, &excludedAuthIDs, "")
+	initialRaw, errMarshal := json.Marshal(&initial)
+	if errMarshal != nil {
+		t.Fatalf("marshal initial auth dispatch request: %v", errMarshal)
+	}
+	var initialPayload map[string]any
+	if errUnmarshal := json.Unmarshal(initialRaw, &initialPayload); errUnmarshal != nil {
+		t.Fatalf("unmarshal initial auth dispatch request: %v", errUnmarshal)
+	}
+	if got := int(initialPayload["retry_round"].(float64)); got != 0 {
+		t.Fatalf("initial retry_round = %d, want explicit 0", got)
+	}
+	if got := int(initialPayload["count"].(float64)); got != 1 {
+		t.Fatalf("initial retry-contract count = %d, want 1", got)
+	}
+
+	additional := newAuthDispatchRequestWithRetryRound("gpt-5.4", "", nil, 3, "", 2, &excludedAuthIDs, "")
+	additionalRaw, errMarshal := json.Marshal(&additional)
+	if errMarshal != nil {
+		t.Fatalf("marshal additional auth dispatch request: %v", errMarshal)
+	}
+	var additionalPayload map[string]any
+	if errUnmarshal := json.Unmarshal(additionalRaw, &additionalPayload); errUnmarshal != nil {
+		t.Fatalf("unmarshal additional auth dispatch request: %v", errUnmarshal)
+	}
+	if got := int(additionalPayload["retry_round"].(float64)); got != 2 {
+		t.Fatalf("retry_round = %d, want 2", got)
+	}
+	if got := additionalPayload["excluded_auth_ids"].([]any); len(got) != 1 || got[0] != "auth-a" {
+		t.Fatalf("excluded_auth_ids = %#v, want [auth-a]", additionalPayload["excluded_auth_ids"])
+	}
+}
+
 func TestRedisOptionsHomeTLSDisabled(t *testing.T) {
 	client := New(config.HomeConfig{
 		Enabled: true,

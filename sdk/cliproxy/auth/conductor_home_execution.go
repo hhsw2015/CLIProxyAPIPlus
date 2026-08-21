@@ -15,14 +15,14 @@ func (m *Manager) executeHome(ctx context.Context, providers []string, req clipr
 	if unlockSession := m.lockHomeWebsocketSession(ctx, opts); unlockSession != nil {
 		defer unlockSession()
 	}
-	_, maxRetryCredentials, maxWait := m.retrySettings()
+	defaultRequestRetry, maxRetryCredentials, maxWait := m.retrySettings()
 	retryModel := authSelectionModelFromOptions(opts, req.Model)
 	homeRetryLimit := -1
 	attempt := 0
 	retryRoundPending := false
 	retryRoundWaited := false
 	for {
-		response, errExecute := m.executeHomeOnce(ctx, providers, req, opts, countTokens, maxRetryCredentials, &homeRetryLimit)
+		response, errExecute := m.executeHomeOnce(ctx, providers, req, opts, countTokens, maxRetryCredentials, &homeRetryLimit, attempt)
 		if errExecute == nil {
 			return response, nil
 		}
@@ -43,7 +43,7 @@ func (m *Manager) executeHome(ctx context.Context, providers []string, req clipr
 		if isRequestTerminatedError(errExecute) || isRequestStopError(errExecute) {
 			return cliproxyexecutor.Response{}, unwrapRequestStopError(errExecute)
 		}
-		wait, shouldRetry := m.shouldRetryAfterErrorWithHomeRetryLimit(ctx, opts, errExecute, attempt, providers, retryModel, maxWait, homeRetryLimit)
+		wait, shouldRetry := m.shouldRetryAfterErrorWithHomeRetryLimit(ctx, opts, errExecute, attempt, providers, retryModel, maxWait, homeRetryLimit, defaultRequestRetry)
 		if !shouldRetry {
 			return cliproxyexecutor.Response{}, unwrapRequestStopError(errExecute)
 		}
@@ -56,7 +56,11 @@ func (m *Manager) executeHome(ctx context.Context, providers []string, req clipr
 	}
 }
 
-func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, countTokens bool, maxRetryCredentials int, homeRetryLimit *int) (cliproxyexecutor.Response, error) {
+func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, countTokens bool, maxRetryCredentials int, homeRetryLimit *int, retryRounds ...int) (cliproxyexecutor.Response, error) {
+	retryRound := 0
+	if len(retryRounds) > 0 {
+		retryRound = retryRounds[0]
+	}
 	routeModel := authSelectionModelFromOptions(opts, req.Model)
 	responseAlias := requestedModelAliasFromOptions(opts, routeModel)
 	executionModel, restoreExecutionModel := executionModelForAuthSelection(opts, req.Model)
@@ -72,7 +76,8 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 			}
 			return cliproxyexecutor.Response{}, &Error{Code: "auth_not_found", Message: "no auth available"}
 		}
-		pickOpts := withHomeAuthCount(opts, homeAuthCount)
+		pickOpts := withHomeRetryRound(opts, retryRound)
+		pickOpts = withHomeAuthCount(pickOpts, homeAuthCount)
 		pickOpts = withHomeExcludedAuthIDs(pickOpts, tried)
 		selection, errSelection := m.pickHomeDispatchSelection(ctx, routeModel, pickOpts)
 		if errSelection != nil {
