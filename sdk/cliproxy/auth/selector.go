@@ -951,9 +951,9 @@ func (s *SessionAffinitySelector) OnResult(res Result) {
 	if raw, ok := res.Options.Metadata[cliproxyexecutor.SessionAffinityProviderMetadataKey].(string); ok && raw != "" {
 		ns = raw
 	}
-	nsModel := res.Model
+	nsModel := canonicalModelKey(res.Model)
 	if raw, ok := res.Options.Metadata[cliproxyexecutor.SessionAffinityModelMetadataKey].(string); ok && raw != "" {
-		nsModel = raw
+		nsModel = canonicalModelKey(raw)
 	}
 
 	cacheKey := ns + "::" + primaryID + "::" + nsModel
