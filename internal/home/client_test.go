@@ -26,7 +26,7 @@ import (
 )
 
 func TestAuthDispatchRequestIncludesCount(t *testing.T) {
-	req := newAuthDispatchRequest("gpt-5.4", "session-1", http.Header{"Authorization": {"Bearer test"}}, 2, "")
+	req := newAuthDispatchRequest("gpt-5.4", "session-1", http.Header{"Authorization": {"Bearer test"}}, 2, "", nil, "")
 
 	raw, err := json.Marshal(&req)
 	if err != nil {
@@ -43,10 +43,13 @@ func TestAuthDispatchRequestIncludesCount(t *testing.T) {
 	if got := int(payload["concurrency_protocol"].(float64)); got != 1 {
 		t.Fatalf("concurrency_protocol = %d, want 1", got)
 	}
+	if _, present := payload["excluded_auth_ids"]; present {
+		t.Fatalf("legacy request unexpectedly included excluded_auth_ids: %#v", payload["excluded_auth_ids"])
+	}
 }
 
 func TestAuthDispatchRequestDefaultsCountToOne(t *testing.T) {
-	req := newAuthDispatchRequest("gpt-5.4", "", nil, 0, "")
+	req := newAuthDispatchRequest("gpt-5.4", "", nil, 0, "", nil, "")
 
 	if req.Count != 1 {
 		t.Fatalf("count = %d, want 1", req.Count)
@@ -57,7 +60,7 @@ func TestAuthDispatchRequestDefaultsCountToOne(t *testing.T) {
 }
 
 func TestAuthDispatchRequestIncludesCredentialPolicy(t *testing.T) {
-	req := newAuthDispatchRequest("gpt-5.4", "", nil, 1, "codex_alpha_search_v1")
+	req := newAuthDispatchRequest("gpt-5.4", "", nil, 1, "codex_alpha_search_v1", nil, "")
 	raw, errMarshal := json.Marshal(&req)
 	if errMarshal != nil {
 		t.Fatalf("marshal auth dispatch request: %v", errMarshal)
@@ -68,6 +71,63 @@ func TestAuthDispatchRequestIncludesCredentialPolicy(t *testing.T) {
 	}
 	if got := payload["credential_policy"]; got != "codex_alpha_search_v1" {
 		t.Fatalf("credential_policy = %#v, want codex_alpha_search_v1", got)
+	}
+}
+
+func TestAuthDispatchRequestIncludesExcludedAuthIDs(t *testing.T) {
+	excludedAuthIDs := []string{"auth-a", "auth-b"}
+	req := newAuthDispatchRequest("gpt-5.4", "", nil, 2, "", &excludedAuthIDs, "")
+	if req.Count != 1 {
+		t.Fatalf("new retry-contract count = %d, want 1 for legacy Home compatibility", req.Count)
+	}
+	raw, errMarshal := json.Marshal(&req)
+	if errMarshal != nil {
+		t.Fatalf("marshal auth dispatch request: %v", errMarshal)
+	}
+	var payload map[string]any
+	if errUnmarshal := json.Unmarshal(raw, &payload); errUnmarshal != nil {
+		t.Fatalf("unmarshal auth dispatch request: %v", errUnmarshal)
+	}
+	got, ok := payload["excluded_auth_ids"].([]any)
+	if !ok || len(got) != 2 || got[0] != "auth-a" || got[1] != "auth-b" {
+		t.Fatalf("excluded_auth_ids = %#v, want [auth-a auth-b]", payload["excluded_auth_ids"])
+	}
+}
+
+func TestAuthDispatchRequestIncludesEmptyExcludedAuthIDs(t *testing.T) {
+	excludedAuthIDs := []string{}
+	req := newAuthDispatchRequest("gpt-5.4", "", nil, 2, "", &excludedAuthIDs, "")
+	if req.Count != 1 {
+		t.Fatalf("new retry-contract count = %d, want 1 for legacy Home compatibility", req.Count)
+	}
+	raw, errMarshal := json.Marshal(&req)
+	if errMarshal != nil {
+		t.Fatalf("marshal auth dispatch request: %v", errMarshal)
+	}
+	var payload map[string]any
+	if errUnmarshal := json.Unmarshal(raw, &payload); errUnmarshal != nil {
+		t.Fatalf("unmarshal auth dispatch request: %v", errUnmarshal)
+	}
+	got, ok := payload["excluded_auth_ids"].([]any)
+	if !ok || len(got) != 0 {
+		t.Fatalf("excluded_auth_ids = %#v, want []", payload["excluded_auth_ids"])
+	}
+}
+
+func TestAuthDispatchRequestIncludesPinnedAuthID(t *testing.T) {
+	excludedAuthIDs := []string{}
+	req := newAuthDispatchRequest("gpt-5.4", "", nil, 2, "", &excludedAuthIDs, " auth-pinned ")
+
+	raw, errMarshal := json.Marshal(&req)
+	if errMarshal != nil {
+		t.Fatalf("marshal auth dispatch request: %v", errMarshal)
+	}
+	var payload map[string]any
+	if errUnmarshal := json.Unmarshal(raw, &payload); errUnmarshal != nil {
+		t.Fatalf("unmarshal auth dispatch request: %v", errUnmarshal)
+	}
+	if got := payload["pinned_auth_id"]; got != "auth-pinned" {
+		t.Fatalf("pinned_auth_id = %#v, want auth-pinned", got)
 	}
 }
 
