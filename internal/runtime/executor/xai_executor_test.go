@@ -2200,6 +2200,55 @@ func TestXAIExecutorCompactUsesCompactEndpoint(t *testing.T) {
 	}
 }
 
+func TestXAIExecutorCompactDropsOrphanedImageGenerationToolChoice(t *testing.T) {
+	var gotBody []byte
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var errRead error
+		gotBody, errRead = io.ReadAll(r.Body)
+		if errRead != nil {
+			t.Fatalf("read body: %v", errRead)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"resp_1","object":"response.compaction","output":[{"type":"compaction","encrypted_content":"opaque-out"}]}`))
+	}))
+	defer server.Close()
+
+	exec := NewXAIExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Provider: "xai",
+		Attributes: map[string]string{
+			"base_url": server.URL,
+			"api_key":  "xai-token",
+		},
+	}
+
+	_, err := exec.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model: "grok-4.6",
+		Payload: []byte(`{
+			"model":"grok-4.6",
+			"input":"compact this",
+			"tools":[{"type":"image_generation","action":"generate"}],
+			"tool_choice":{"type":"image_generation"}
+		}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatOpenAIResponse,
+		Alt:          "responses/compact",
+	})
+	if err != nil {
+		t.Fatalf("Execute compact error: %v", err)
+	}
+	if gjson.GetBytes(gotBody, "tools").Exists() {
+		t.Fatalf("tools exists in compact body: %s", gotBody)
+	}
+	if gjson.GetBytes(gotBody, "tool_choice").Exists() {
+		t.Fatalf("orphaned tool_choice leaked into compact body: %s", gotBody)
+	}
+	if gjson.GetBytes(gotBody, "parallel_tool_calls").Exists() {
+		t.Fatalf("parallel_tool_calls exists in compact body: %s", gotBody)
+	}
+}
+
 func TestXAIExecutorCompactOAuthUsesOfficialAPIHeadersNotCLIProxy(t *testing.T) {
 	var gotPath string
 	var gotHost string
