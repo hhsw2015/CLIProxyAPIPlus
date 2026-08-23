@@ -1152,6 +1152,32 @@ func TestXAIExecutorPrepareRewritesImageGenerationAllowedToolsToRequired(t *test
 	}
 }
 
+func TestXAIExecutorPrepareRewritesImageOnlyAllowedToolsAutoToAuto(t *testing.T) {
+	t.Parallel()
+
+	exec := NewXAIExecutor(&config.Config{})
+	prepared, err := exec.prepareResponsesRequest(context.Background(), cliproxyexecutor.Request{
+		Model: "grok-4.6",
+		Payload: []byte(`{
+			"model":"grok-4.6",
+			"input":"draw a red circle",
+			"tools":[{"type":"image_generation"},{"type":"web_search"}],
+			"tool_choice":{"type":"allowed_tools","mode":"auto","tools":[{"type":"image_generation"}]}
+		}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatOpenAIResponse,
+		Stream:       false,
+	}, false)
+	if err != nil {
+		t.Fatalf("prepareResponsesRequest() error = %v", err)
+	}
+
+	choice := gjson.GetBytes(prepared.body, "tool_choice")
+	if choice.Type != gjson.String || choice.String() != "auto" {
+		t.Fatalf("tool_choice = %s, want string auto; body=%s", choice.Raw, prepared.body)
+	}
+}
+
 func TestXAIExecutorPrepareStripsImageGenerationFromMixedAllowedTools(t *testing.T) {
 	t.Parallel()
 

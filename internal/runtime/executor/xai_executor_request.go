@@ -683,9 +683,10 @@ func normalizeXAIForcedWebSearchToolChoice(body []byte) []byte {
 
 // normalizeXAIForcedImageGenerationToolChoice rewrites image_generation choices
 // into a ModelToolChoice variant accepted by xAI chat-proxy. `{type: image_generation}`
-// and allowed_tools lists that only name that hosted tool become the string
-// "required". Mixed allowed_tools lists drop the image_generation entry so the
-// remaining hosted/function choices can still deserialize.
+// becomes the string "required". An allowed_tools list that only names that
+// hosted tool becomes the original mode ("auto" or "required"). Mixed lists
+// drop the image_generation entry so the remaining hosted/function choices can
+// still deserialize.
 func normalizeXAIForcedImageGenerationToolChoice(body []byte) []byte {
 	choice := gjson.GetBytes(body, "tool_choice")
 	if !choice.IsObject() {
@@ -693,11 +694,7 @@ func normalizeXAIForcedImageGenerationToolChoice(body []byte) []byte {
 	}
 	choiceType := strings.TrimSpace(choice.Get("type").String())
 	if choiceType == xaiImageGenerationToolType {
-		updated, errSet := sjson.SetBytes(body, "tool_choice", "required")
-		if errSet != nil {
-			return body
-		}
-		return updated
+		return xaiSetToolChoiceString(body, "required")
 	}
 	if choiceType != "allowed_tools" {
 		return body
@@ -719,13 +716,21 @@ func normalizeXAIForcedImageGenerationToolChoice(body []byte) []byte {
 		return body
 	}
 	if len(filtered) == 0 {
-		updated, errSet := sjson.SetBytes(body, "tool_choice", "required")
-		if errSet != nil {
-			return body
+		mode := strings.TrimSpace(choice.Get("mode").String())
+		if mode != "auto" {
+			mode = "required"
 		}
-		return updated
+		return xaiSetToolChoiceString(body, mode)
 	}
 	updated, errSet := sjson.SetRawBytes(body, "tool_choice.tools", helps.JoinRawJSONArray(filtered))
+	if errSet != nil {
+		return body
+	}
+	return updated
+}
+
+func xaiSetToolChoiceString(body []byte, value string) []byte {
+	updated, errSet := sjson.SetBytes(body, "tool_choice", value)
 	if errSet != nil {
 		return body
 	}
