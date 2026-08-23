@@ -67,11 +67,19 @@ func (s *Server) mediaProxyHandler(ep mediaEndpoint) gin.HandlerFunc {
 		// Extract model name from JSON body or form field.
 		modelName := ""
 		if ep.isMultipart {
-			// For multipart, model is in the form field. Re-parse won't work after GetRawData,
-			// so try to extract from the raw multipart. Fallback: use "whisper" default.
-			modelName = c.PostForm("model")
+			// Model lives in a multipart form field. GetRawData already drained the
+			// body, so gin's PostForm can't re-parse it; parse the captured raw body
+			// with the FULL Content-Type header. c.ContentType() drops the
+			// "; boundary=..." parameter, which makes multipart parsing fail and the
+			// model silently fall back to "whisper" (wrong provider -> Azure 404).
+			modelName = extractModelFromMultipart(body, c.GetHeader("Content-Type"))
 			if modelName == "" {
-				modelName = extractModelFromMultipart(body, c.ContentType())
+				modelName = c.PostForm("model")
+			}
+			// Some callers send a JSON body to /images/edits; honor its model field
+			// instead of defaulting to an unrelated media provider.
+			if modelName == "" {
+				modelName = gjson.GetBytes(body, "model").String()
 			}
 			if modelName == "" {
 				modelName = "whisper"
