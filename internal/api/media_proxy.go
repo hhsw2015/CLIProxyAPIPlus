@@ -226,6 +226,18 @@ func (s *Server) resolveMediaProvider(modelName string, ep mediaEndpoint) *media
 						}
 					}
 					u.Path = p + "/" + ep.pathSuffix
+					// Azure gpt-image edits only exist on api-version 2025-04-01-preview;
+					// older configured versions (e.g. 2024-02-01, used for generations)
+					// return 404 on /images/edits. Bump just the edits endpoint so
+					// generations keeps its configured version.
+					// ponytail: pinned version; revisit if Azure GAs image edits.
+					if ep.pathSuffix == "images/edits" && strings.HasPrefix(strings.ToLower(modelName), "gpt-image") {
+						q := u.Query()
+						if q.Get("api-version") != "" {
+							q.Set("api-version", "2025-04-01-preview")
+							u.RawQuery = q.Encode()
+						}
+					}
 					return &mediaProviderConfig{baseURL: u.String(), apiKey: apiKey}
 				}
 				// Fallback: legacy string concatenation (no query present).
