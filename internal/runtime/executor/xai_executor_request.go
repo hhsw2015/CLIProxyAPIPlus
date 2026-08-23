@@ -98,8 +98,10 @@ func (e *XAIExecutor) prepareResponsesRequestTo(ctx context.Context, req cliprox
 	// configured x_search injection, so no surviving choice references a deleted tool.
 	body = normalizeXAINamespaceToolChoice(body)
 	body = normalizeXAIForcedWebSearchToolChoice(body)
-	body = normalizeXAIForcedImageGenerationToolChoice(body)
+	// Prune before rewriting image_generation choices so older models that still
+	// strip the tool do not keep a leftover "required" selection.
 	body = pruneXAIOrphanedToolChoice(body)
+	body = normalizeXAIForcedImageGenerationToolChoice(body)
 	body = normalizeXAIToolChoiceForTools(body)
 	if e.cfg != nil && e.cfg.XAI.InjectXSearch {
 		body = ensureXAINativeXSearchTool(body)
@@ -679,10 +681,55 @@ func normalizeXAIForcedWebSearchToolChoice(body []byte) []byte {
 	return normalizeXAIForcedHostedToolChoice(body, xaiWebSearchToolType)
 }
 
-// normalizeXAIForcedImageGenerationToolChoice rewrites a forced image_generation
-// choice into the same allowed_tools form used for web_search.
+// normalizeXAIForcedImageGenerationToolChoice rewrites image_generation choices
+// into a ModelToolChoice variant accepted by xAI chat-proxy. `{type: image_generation}`
+// and allowed_tools lists that only name that hosted tool become the string
+// "required". Mixed allowed_tools lists drop the image_generation entry so the
+// remaining hosted/function choices can still deserialize.
 func normalizeXAIForcedImageGenerationToolChoice(body []byte) []byte {
-	return normalizeXAIForcedHostedToolChoice(body, xaiImageGenerationToolType)
+	choice := gjson.GetBytes(body, "tool_choice")
+	if !choice.IsObject() {
+		return body
+	}
+	choiceType := strings.TrimSpace(choice.Get("type").String())
+	if choiceType == xaiImageGenerationToolType {
+		updated, errSet := sjson.SetBytes(body, "tool_choice", "required")
+		if errSet != nil {
+			return body
+		}
+		return updated
+	}
+	if choiceType != "allowed_tools" {
+		return body
+	}
+	allowed := choice.Get("tools")
+	if !allowed.IsArray() {
+		return body
+	}
+	filtered := make([][]byte, 0, len(allowed.Array()))
+	stripped := false
+	for _, tool := range allowed.Array() {
+		if strings.TrimSpace(tool.Get("type").String()) == xaiImageGenerationToolType {
+			stripped = true
+			continue
+		}
+		filtered = append(filtered, []byte(tool.Raw))
+	}
+	if !stripped {
+		return body
+	}
+	if len(filtered) == 0 {
+		updated, errSet := sjson.SetBytes(body, "tool_choice", "required")
+		if errSet != nil {
+			return body
+		}
+		return updated
+	}
+	updated, errSet := sjson.SetRawBytes(body, "tool_choice.tools", helps.JoinRawJSONArray(filtered))
+	if errSet != nil {
+		return body
+	}
+	return updated
 }
 
 func normalizeXAIForcedHostedToolChoice(body []byte, toolType string) []byte {
