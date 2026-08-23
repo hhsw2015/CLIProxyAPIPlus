@@ -7,6 +7,7 @@ import (
 	"mime"
 	"mime/multipart"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -200,13 +201,27 @@ func (s *Server) resolveMediaProvider(modelName string, ep mediaEndpoint) *media
 			}
 
 			// Otherwise, construct Azure-style URL:
-			// base-url should be like: https://host/openai/deployments/{model}/images/generations?api-version=...
-			// But we need to figure out what format the base-url is in.
-			// If it looks like an Azure deployment URL, append the media path.
+			// base-url is typically a full Azure endpoint like
+			//   https://host/openai/deployments/{dep}/images/generations?api-version=...
+			// Rebuild it to target ep.pathSuffix while preserving the query string
+			// (Azure requires ?api-version=...). It must operate on the URL path, not
+			// the raw string: naive concatenation places the new path after the query
+			// (".../images/generations?api-version=X/images/edits"), which corrupts both
+			// the path and the api-version and makes Azure return 404.
 			if strings.Contains(baseURL, "/openai/deployments/") {
-				// Already has deployment path; append media path suffix.
+				if u, errParse := url.Parse(baseURL); errParse == nil && u.Path != "" {
+					p := strings.TrimSuffix(u.Path, "/")
+					for _, suffix := range []string{"/chat/completions", "/images/generations", "/images/edits", "/audio/transcriptions", "/audio/translations", "/audio/speech"} {
+						if strings.HasSuffix(p, suffix) {
+							p = strings.TrimSuffix(p, suffix)
+							break
+						}
+					}
+					u.Path = p + "/" + ep.pathSuffix
+					return &mediaProviderConfig{baseURL: u.String(), apiKey: apiKey}
+				}
+				// Fallback: legacy string concatenation (no query present).
 				trimmed := strings.TrimSuffix(baseURL, "/")
-				// Remove any existing chat/completions suffix.
 				trimmed = strings.TrimSuffix(trimmed, "/chat/completions")
 				return &mediaProviderConfig{
 					baseURL: trimmed + "/" + ep.pathSuffix,
