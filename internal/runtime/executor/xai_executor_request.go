@@ -1159,6 +1159,22 @@ func normalizeXAITool(tool gjson.Result, namespaceName string, keepImageGenerati
 	raw := []byte(tool.Raw)
 	schemaTool := tool
 	if toolType == xaiFunctionToolType || toolType == xaiCustomToolType {
+		if rawParams := schemaTool.Get("parameters"); rawParams.Exists() {
+			inlinedParams := util.InlineLocalRefs(rawParams.Raw)
+			if inlinedParams != rawParams.Raw {
+				if updated, errSet := sjson.SetRawBytes(raw, "parameters", []byte(inlinedParams)); errSet == nil {
+					if inlinedDefs := gjson.GetBytes(updated, "parameters.$defs"); inlinedDefs.Exists() {
+						updated, _ = sjson.DeleteBytes(updated, "parameters.$defs")
+					}
+					if inlinedDefinitions := gjson.GetBytes(updated, "parameters.definitions"); inlinedDefinitions.Exists() {
+						updated, _ = sjson.DeleteBytes(updated, "parameters.definitions")
+					}
+					raw = updated
+					schemaTool = gjson.ParseBytes(raw)
+					changed = true
+				}
+			}
+		}
 		updatedTool, schemaChanged, ok := normalizeXAIObjectRootUnionBranchTypes(raw)
 		if !ok {
 			return nil, false, false

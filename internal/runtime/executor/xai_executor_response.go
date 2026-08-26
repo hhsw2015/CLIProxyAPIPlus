@@ -365,7 +365,7 @@ func normalizeXAIObjectRootUnionBranchTypes(tool []byte) ([]byte, bool, bool) {
 			continue
 		}
 		for index, branch := range union.Array() {
-			if !branch.IsObject() || branch.Get("type").Exists() {
+			if !branch.IsObject() || branch.Get("type").Exists() || branch.Get("$ref").Exists() {
 				continue
 			}
 			updated, errSet := sjson.SetBytes(tool, fmt.Sprintf("parameters.%s.%d.type", unionName, index), "object")
@@ -398,6 +398,18 @@ func xaiSchemaTypeIsObjectOnly(schemaType gjson.Result) bool {
 	return true
 }
 
+func isXAICodexAppAutomationUpdate(toolName, namespaceName string) bool {
+	cleanNamespace := strings.TrimPrefix(strings.TrimSpace(namespaceName), "mcp__")
+	cleanTool := strings.TrimPrefix(strings.TrimSpace(toolName), "mcp__")
+	if strings.EqualFold(cleanTool, xaiAutomationUpdateToolName) && (strings.EqualFold(cleanNamespace, xaiCodexAppNamespaceName) || strings.EqualFold(cleanNamespace, "codex_apps")) {
+		return true
+	}
+	if strings.EqualFold(cleanTool, xaiCodexAppNamespaceName+"__"+xaiAutomationUpdateToolName) || strings.EqualFold(cleanTool, "codex_apps__"+xaiAutomationUpdateToolName) {
+		return true
+	}
+	return false
+}
+
 // xaiFunctionParametersNeedSimplification reports whether a function tool, or
 // a custom tool normalized to a function, has a schema that xAI cannot accept.
 func xaiFunctionParametersNeedSimplification(tool gjson.Result, namespaceName string) bool {
@@ -409,10 +421,7 @@ func xaiFunctionParametersNeedSimplification(tool gjson.Result, namespaceName st
 	}
 
 	toolName := strings.TrimSpace(tool.Get("name").String())
-	qualifiedAutomationName := xaiCodexAppNamespaceName + "__" + xaiAutomationUpdateToolName
-	if isFunction && (strings.EqualFold(toolName, qualifiedAutomationName) ||
-		(strings.EqualFold(strings.TrimSpace(namespaceName), xaiCodexAppNamespaceName) &&
-			strings.EqualFold(toolName, xaiAutomationUpdateToolName))) {
+	if isFunction && isXAICodexAppAutomationUpdate(toolName, namespaceName) {
 		return true
 	}
 
@@ -423,7 +432,7 @@ func xaiFunctionParametersNeedSimplification(tool gjson.Result, namespaceName st
 			continue
 		}
 		for _, branch := range union.Array() {
-			if !xaiSchemaTypeIsObjectOnly(branch.Get("type")) {
+			if branch.Get("$ref").Exists() || !xaiSchemaTypeIsObjectOnly(branch.Get("type")) {
 				return true
 			}
 		}
