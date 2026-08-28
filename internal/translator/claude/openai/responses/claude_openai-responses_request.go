@@ -476,7 +476,7 @@ func convertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 	flushPendingMessage()
 	hadMessages := len(messageBlocks) > 0
 	if !preserveEmptyThinkingBlocks {
-		messageBlocks = dropUnsupportedFableAssistantPrefill(modelName, messageBlocks)
+		messageBlocks = dropUnsupportedClaudeAssistantPrefill(modelName, messageBlocks)
 	}
 	// Preserve a minimal conversational turn for system-only inputs or when messages became empty
 	// so downstream validation still sees a Claude-shaped request.
@@ -579,11 +579,11 @@ func isResponsesSystemLevelRole(role string) bool {
 	}
 }
 
-// dropUnsupportedFableAssistantPrefill removes a trailing assistant message for
-// Claude Fable models, which reject assistant message prefill.
-func dropUnsupportedFableAssistantPrefill(modelName string, messages [][]byte) [][]byte {
-	normalized := strings.ToLower(strings.TrimSpace(modelName))
-	if !strings.Contains(normalized, "fable") || len(messages) == 0 {
+// dropUnsupportedClaudeAssistantPrefill removes a trailing assistant message for
+// Claude model families that reject assistant message prefill (e.g., Fable,
+// Opus 5, Sonnet 4.6).
+func dropUnsupportedClaudeAssistantPrefill(modelName string, messages [][]byte) [][]byte {
+	if !claudeModelRejectsAssistantPrefill(modelName) || len(messages) == 0 {
 		return messages
 	}
 	last := gjson.ParseBytes(messages[len(messages)-1])
@@ -591,6 +591,18 @@ func dropUnsupportedFableAssistantPrefill(modelName string, messages [][]byte) [
 		return messages
 	}
 	return messages[:len(messages)-1]
+}
+
+// claudeModelRejectsAssistantPrefill reports whether a Claude model family
+// disallows trailing assistant prefill in its conversation history.
+func claudeModelRejectsAssistantPrefill(modelName string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(modelName))
+	for _, family := range []string{"fable", "opus-5", "sonnet-4-6"} {
+		if strings.Contains(normalized, family) {
+			return true
+		}
+	}
+	return false
 }
 
 // responsesSystemUnsupportedBlock represents a system-level content part that

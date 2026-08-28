@@ -1026,7 +1026,7 @@ func TestConvertOpenAIResponsesRequestToClaude_SystemLevelInputsBecomeSeparateSy
 		]
 	}`
 
-	result := ConvertOpenAIResponsesRequestToClaude("claude-opus-5", []byte(inputJSON), false)
+	result := ConvertOpenAIResponsesRequestToClaude("claude-sonnet-4-5", []byte(inputJSON), false)
 	root := gjson.ParseBytes(result)
 
 	system := root.Get("system").Array()
@@ -1496,24 +1496,62 @@ func TestConvertOpenAIResponsesRequestToClaude_FableOnlyAssistantMessageYieldsFa
 	}
 }
 
-func TestConvertOpenAIResponsesRequestToClaude_NonFablePreservesAssistantPrefill(t *testing.T) {
-	raw := []byte(`{
-		"model": "claude-sonnet-4-5",
-		"input": [
-			{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hello"}]},
-			{"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "prefill text"}]}
-		]
-	}`)
-	out := ConvertOpenAIResponsesRequestToClaude("claude-sonnet-4-5", raw, false)
-	messages := gjson.GetBytes(out, "messages").Array()
-	if len(messages) != 2 {
-		t.Fatalf("expected 2 messages preserving assistant prefill, got %d: %s", len(messages), string(out))
+func TestConvertOpenAIResponsesRequestToClaude_UnsupportedPrefillModelsStripTrailingAssistant(t *testing.T) {
+	unsupportedModels := []string{
+		"claude-fable-5",
+		"claude-opus-5",
+		"claude-sonnet-4-6",
 	}
-	if got := messages[1].Get("role").String(); got != "assistant" {
-		t.Fatalf("expected second message role = assistant, got %q", got)
+	for _, model := range unsupportedModels {
+		t.Run(model, func(t *testing.T) {
+			raw := []byte(fmt.Sprintf(`{
+				"model": %q,
+				"input": [
+					{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hello"}]},
+					{"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "progress update"}]}
+				]
+			}`, model))
+			out := ConvertOpenAIResponsesRequestToClaude(model, raw, false)
+			messages := gjson.GetBytes(out, "messages").Array()
+			if len(messages) != 1 {
+				t.Fatalf("expected 1 message after stripping trailing assistant prefill for model %s, got %d: %s", model, len(messages), string(out))
+			}
+			if got := messages[0].Get("role").String(); got != "user" {
+				t.Fatalf("expected final message role = %q, got %q", "user", got)
+			}
+			if got := messages[0].Get("content").String(); got != "hello" {
+				t.Fatalf("expected content = %q, got %q", "hello", got)
+			}
+		})
 	}
-	if got := messages[1].Get("content").String(); got != "prefill text" {
-		t.Fatalf("expected content = %q, got %q", "prefill text", got)
+}
+
+func TestConvertOpenAIResponsesRequestToClaude_SupportedPrefillModelsPreserveAssistantPrefill(t *testing.T) {
+	supportedModels := []string{
+		"claude-sonnet-4-5",
+		"claude-haiku-4-5",
+	}
+	for _, model := range supportedModels {
+		t.Run(model, func(t *testing.T) {
+			raw := []byte(fmt.Sprintf(`{
+				"model": %q,
+				"input": [
+					{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hello"}]},
+					{"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "prefill text"}]}
+				]
+			}`, model))
+			out := ConvertOpenAIResponsesRequestToClaude(model, raw, false)
+			messages := gjson.GetBytes(out, "messages").Array()
+			if len(messages) != 2 {
+				t.Fatalf("expected 2 messages preserving assistant prefill for model %s, got %d: %s", model, len(messages), string(out))
+			}
+			if got := messages[1].Get("role").String(); got != "assistant" {
+				t.Fatalf("expected second message role = assistant, got %q", got)
+			}
+			if got := messages[1].Get("content").String(); got != "prefill text" {
+				t.Fatalf("expected content = %q, got %q", "prefill text", got)
+			}
+		})
 	}
 }
 
