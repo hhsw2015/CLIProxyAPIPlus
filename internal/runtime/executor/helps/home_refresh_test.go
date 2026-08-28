@@ -124,8 +124,8 @@ func TestRefreshAuthViaHomeUsesGenericMessageForLegacyErrorEnvelope(t *testing.T
 	if strings.Contains(errRefresh.Error(), "provider-secret") {
 		t.Fatalf("refresh error included legacy Home detail: %v", errRefresh)
 	}
-	if diagnosticErr, ok := errRefresh.(interface{ LogDiagnostic() string }); !ok || diagnosticErr.LogDiagnostic() != errRefresh.Error() {
-		t.Fatalf("legacy Home message became trusted diagnostic: %T/%v", errRefresh, errRefresh)
+	if diagnosticErr, ok := errRefresh.(interface{ LogDiagnostic() string }); !ok || diagnosticErr.LogDiagnostic() != "Home refresh failed: type=error" {
+		t.Fatalf("legacy Home error type log diagnostic = %T/%v", errRefresh, errRefresh)
 	}
 }
 
@@ -217,6 +217,7 @@ func TestRefreshAuthViaHomeUsesGenericMessageForLegacyProviderDiagnostics(t *tes
 		raw        []byte
 		wantStatus int
 		wantError  string
+		wantLog    string
 	}{
 		{
 			name:       "transient transport diagnostic",
@@ -224,6 +225,7 @@ func TestRefreshAuthViaHomeUsesGenericMessageForLegacyProviderDiagnostics(t *tes
 			raw:        []byte(`{"error":{"type":"refresh_temporarily_unavailable","message":"antigravity refresh: Post https://oauth.example/token?access_token=provider-secret: connection refused"}}`),
 			wantStatus: http.StatusServiceUnavailable,
 			wantError:  "credential refresh temporarily unavailable",
+			wantLog:    "Home refresh failed: type=refresh_temporarily_unavailable",
 		},
 		{
 			name:       "terminal legacy diagnostic",
@@ -231,6 +233,7 @@ func TestRefreshAuthViaHomeUsesGenericMessageForLegacyProviderDiagnostics(t *tes
 			raw:        []byte(`{"error":{"type":"authentication_error","message":"codex refresh: invalid_grant refresh_token=provider-secret"}}`),
 			wantStatus: http.StatusUnauthorized,
 			wantError:  "credential unauthorized",
+			wantLog:    "Home refresh failed: type=authentication_error",
 		},
 	}
 	for _, tt := range tests {
@@ -252,6 +255,16 @@ func TestRefreshAuthViaHomeUsesGenericMessageForLegacyProviderDiagnostics(t *tes
 			}
 			if strings.Contains(errRefresh.Error(), "provider-secret") {
 				t.Fatalf("legacy refresh error leaked provider detail: %v", errRefresh)
+			}
+			diagnosticErr, okDiagnostic := errRefresh.(interface{ LogDiagnostic() string })
+			if !okDiagnostic {
+				t.Fatalf("legacy refresh log diagnostic type = %T, want LogDiagnostic", errRefresh)
+			}
+			if got := diagnosticErr.LogDiagnostic(); got != tt.wantLog {
+				t.Fatalf("legacy refresh log diagnostic = %q, want %q", got, tt.wantLog)
+			}
+			if strings.Contains(diagnosticErr.LogDiagnostic(), "provider-secret") {
+				t.Fatalf("legacy refresh log diagnostic leaked provider detail: %q", diagnosticErr.LogDiagnostic())
 			}
 		})
 	}

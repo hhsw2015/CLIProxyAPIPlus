@@ -18,6 +18,7 @@ type homeStatusErr struct {
 	code       int
 	msg        string
 	diagnostic string
+	errorType  string
 	upstream   bool
 }
 
@@ -39,6 +40,9 @@ func (e homeStatusErr) LogDiagnostic() string {
 	}
 	if e.upstream {
 		return fmt.Sprintf("Home refresh upstream response: status=%d", e.code)
+	}
+	if errorType := strings.ToLower(strings.TrimSpace(e.errorType)); errorType != "" {
+		return logging.SafeDiagnosticForLog("Home refresh failed: type=" + errorType)
 	}
 	return logging.SafeDiagnosticForLog(e.Error())
 }
@@ -124,17 +128,18 @@ func RefreshAuthViaHome(ctx context.Context, cfg *config.Config, auth *cliproxya
 
 	var env homeErrorEnvelope
 	if errUnmarshal := json.Unmarshal(raw, &env); errUnmarshal == nil && env.Error != nil {
+		code := strings.TrimSpace(env.Error.Type)
+		if code == "" {
+			code = strings.TrimSpace(env.Error.Code)
+		}
 		if env.Error.Upstream != nil {
 			return nil, true, homeStatusErr{
 				code:       env.Error.Upstream.Status,
 				msg:        string(env.Error.Upstream.Body),
 				diagnostic: env.Error.Diagnostic,
+				errorType:  code,
 				upstream:   true,
 			}
-		}
-		code := strings.TrimSpace(env.Error.Type)
-		if code == "" {
-			code = strings.TrimSpace(env.Error.Code)
 		}
 		statusCode := statusFromHomeErrorCode(code)
 		message := "credential refresh temporarily unavailable"
@@ -144,7 +149,7 @@ func RefreshAuthViaHome(ctx context.Context, cfg *config.Config, auth *cliproxya
 		case http.StatusNotFound:
 			message = "credential refresh target not found"
 		}
-		return nil, true, homeStatusErr{code: statusCode, msg: message, diagnostic: env.Error.Diagnostic}
+		return nil, true, homeStatusErr{code: statusCode, msg: message, diagnostic: env.Error.Diagnostic, errorType: code}
 	}
 
 	updated, returnedIndex, errParse := parseHomeRefreshAuth(raw)
