@@ -476,6 +476,7 @@ func convertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 	flushPendingMessage()
 	hadMessages := len(messageBlocks) > 0
 	if !preserveEmptyThinkingBlocks {
+		messageBlocks = stripTrailingClaudeThinkingBlocks(messageBlocks)
 		messageBlocks = dropUnsupportedClaudeAssistantPrefill(modelName, messageBlocks)
 	}
 	// Preserve a minimal conversational turn for system-only inputs or when messages became empty
@@ -591,6 +592,58 @@ func dropUnsupportedClaudeAssistantPrefill(modelName string, messages [][]byte) 
 		return messages
 	}
 	return messages[:len(messages)-1]
+}
+
+// stripTrailingClaudeThinkingBlocks removes trailing thinking and
+// redacted_thinking blocks from the final assistant message. Anthropic rejects
+// requests whose final assistant content block is thinking. If no content
+// blocks remain after stripping, the assistant message itself is dropped.
+func stripTrailingClaudeThinkingBlocks(messages [][]byte) [][]byte {
+	if len(messages) == 0 {
+		return messages
+	}
+	lastIdx := len(messages) - 1
+	last := gjson.ParseBytes(messages[lastIdx])
+	if !strings.EqualFold(strings.TrimSpace(last.Get("role").String()), "assistant") {
+		return messages
+	}
+	content := last.Get("content")
+	if !content.IsArray() {
+		return messages
+	}
+	parts := content.Array()
+	end := len(parts)
+	for end > 0 {
+		partType := strings.TrimSpace(parts[end-1].Get("type").String())
+		if partType == "thinking" || partType == "redacted_thinking" {
+			end--
+		} else {
+			break
+		}
+	}
+	if end == len(parts) {
+		return messages
+	}
+	if end == 0 {
+		return messages[:lastIdx]
+	}
+	remainingParts := make([][]byte, end)
+	for i := 0; i < end; i++ {
+		remainingParts[i] = []byte(parts[i].Raw)
+	}
+	var updatedMsg []byte
+	if end == 1 {
+		part := parts[0]
+		if part.Get("type").String() == "text" && !part.Get("cache_control").Exists() && !part.Get("citations").Exists() {
+			updatedMsg, _ = sjson.SetBytes(messages[lastIdx], "content", part.Get("text").String())
+		} else {
+			updatedMsg, _ = sjson.SetRawBytes(messages[lastIdx], "content", common.JoinRawArray(remainingParts))
+		}
+	} else {
+		updatedMsg, _ = sjson.SetRawBytes(messages[lastIdx], "content", common.JoinRawArray(remainingParts))
+	}
+	messages[lastIdx] = updatedMsg
+	return messages
 }
 
 // claudeModelRejectsAssistantPrefill reports whether a Claude model family

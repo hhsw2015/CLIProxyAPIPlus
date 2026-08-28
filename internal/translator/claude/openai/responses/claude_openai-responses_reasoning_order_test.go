@@ -92,11 +92,13 @@ func TestConvertOpenAIResponsesRequestToClaude_NonThinkingBlocksSeparateReasonin
 		responsesReasoningItem(secondRaw, "second reasoning"),
 		`{"type":"reasoning","encrypted_content":"`+ClaudeResponsesRedactedThinkingPrefix+redactedData+`","summary":[]}`,
 		responsesReasoningItem(firstRaw, "third reasoning"),
+		responsesFunctionCallItem("call_separator", "separator_tool"),
+		responsesFunctionCallOutputItem("call_separator", "done"),
 	)
 
 	out := ConvertOpenAIResponsesRequestToClaude("claude-test", raw, false)
 	content := gjson.GetBytes(out, "messages.0.content").Array()
-	wantTypes := []string{"thinking", "text", "thinking", "redacted_thinking", "thinking"}
+	wantTypes := []string{"thinking", "text", "thinking", "redacted_thinking", "thinking", "tool_use"}
 	if len(content) != len(wantTypes) {
 		t.Fatalf("assistant content count = %d, want %d. Output: %s", len(content), len(wantTypes), out)
 	}
@@ -116,6 +118,9 @@ func TestConvertOpenAIResponsesRequestToClaude_NonThinkingBlocksSeparateReasonin
 	}
 	if got := content[4].Get("signature").String(); got != firstSignature {
 		t.Fatalf("third thinking signature = %q, want %q", got, firstSignature)
+	}
+	if got := content[5].Get("id").String(); got != "call_separator" {
+		t.Fatalf("tool_use id = %q, want call_separator", got)
 	}
 }
 
