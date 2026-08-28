@@ -226,6 +226,32 @@ func convertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 		pendingRole = "assistant"
 		pendingToolUseParts = append(pendingToolUseParts, toolUse)
 	}
+	appendReasoning := func(reasoningPart []byte) {
+		if len(reasoningPart) == 0 {
+			return
+		}
+		if pendingRole != "" && pendingRole != "assistant" {
+			flushPendingMessage()
+		}
+		pendingRole = "assistant"
+
+		// Client tool calls normally stay at the end of an assistant message, but
+		// a later reasoning item makes them a real separator between thinking blocks.
+		if len(pendingToolUseParts) > 0 {
+			pendingParts = append(pendingParts, pendingToolUseParts...)
+			pendingToolUseParts = nil
+		}
+
+		currentType := gjson.GetBytes(reasoningPart, "type").String()
+		if currentType == "thinking" && len(pendingParts) > 0 {
+			lastIdx := len(pendingParts) - 1
+			if gjson.GetBytes(pendingParts[lastIdx], "type").String() == "thinking" {
+				pendingParts[lastIdx] = reasoningPart
+				return
+			}
+		}
+		pendingParts = append(pendingParts, reasoningPart)
+	}
 
 	lastToolResult := map[string]gjson.Result{}
 	if input := root.Get("input"); input.Exists() && input.IsArray() {
@@ -379,9 +405,7 @@ func convertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 				}
 
 			case "reasoning":
-				if thinkingPart := convertResponsesReasoningToClaudeThinking(item, preserveEmptyThinkingBlocks); len(thinkingPart) > 0 {
-					appendParts("assistant", thinkingPart)
-				}
+				appendReasoning(convertResponsesReasoningToClaudeThinking(item, preserveEmptyThinkingBlocks))
 
 			case "function_call", "custom_tool_call":
 				// Map to assistant tool_use. Freeform custom input is wrapped in an
