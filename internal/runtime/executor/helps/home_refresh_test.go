@@ -61,6 +61,21 @@ func TestRefreshAuthViaHomePreservesContextErrors(t *testing.T) {
 	}
 }
 
+func TestHomeStatusErrLogDiagnosticSanitizesUpstreamFallback(t *testing.T) {
+	errRefresh := homeStatusErr{
+		code:     http.StatusBadGateway,
+		msg:      "upstream EOF access_token=provider-secret",
+		upstream: true,
+	}
+	diagnostic := errRefresh.LogDiagnostic()
+	if diagnostic != "Home refresh upstream response: status=502" || strings.Contains(diagnostic, "provider-secret") {
+		t.Fatalf("LogDiagnostic() = %q, want safe upstream fallback", diagnostic)
+	}
+	if errRefresh.Error() != "upstream EOF access_token=provider-secret" {
+		t.Fatalf("Error() = %q, want exact upstream response", errRefresh.Error())
+	}
+}
+
 func TestRefreshAuthViaHomeMapsTransportFailureToGeneric503(t *testing.T) {
 	client := &fakeHomeRefreshClient{err: errors.New("dial failed with provider-secret")}
 	oldCurrentHomeRefreshClient := currentHomeRefreshClient
@@ -84,6 +99,13 @@ func TestRefreshAuthViaHomeMapsTransportFailureToGeneric503(t *testing.T) {
 	if !okDirect || direct.DirectResponse() {
 		t.Fatalf("transport error direct response = %v/%v, want false", okDirect, direct)
 	}
+	diagnosticErr, okDiagnostic := errRefresh.(interface{ LogDiagnostic() string })
+	if !okDiagnostic || !strings.Contains(diagnosticErr.LogDiagnostic(), "dial_failed") {
+		t.Fatalf("transport log diagnostic = %T/%v, want allowlisted transport cause", errRefresh, errRefresh)
+	}
+	if strings.Contains(diagnosticErr.LogDiagnostic(), "provider-secret") {
+		t.Fatalf("transport log diagnostic leaked provider detail: %q", diagnosticErr.LogDiagnostic())
+	}
 }
 
 func TestRefreshAuthViaHomeUsesGenericMessageForLegacyErrorEnvelope(t *testing.T) {
@@ -102,6 +124,31 @@ func TestRefreshAuthViaHomeUsesGenericMessageForLegacyErrorEnvelope(t *testing.T
 	if strings.Contains(errRefresh.Error(), "provider-secret") {
 		t.Fatalf("refresh error included legacy Home detail: %v", errRefresh)
 	}
+	if diagnosticErr, ok := errRefresh.(interface{ LogDiagnostic() string }); !ok || diagnosticErr.LogDiagnostic() != errRefresh.Error() {
+		t.Fatalf("legacy Home message became trusted diagnostic: %T/%v", errRefresh, errRefresh)
+	}
+}
+
+func TestRefreshAuthViaHomeUsesDedicatedDiagnosticOnlyForLogs(t *testing.T) {
+	const diagnostic = "antigravity refresh failed: stage=transport err=EOF"
+	client := &fakeHomeRefreshClient{raw: []byte(`{"error":{"type":"refresh_temporarily_unavailable","message":"untrusted provider-secret","diagnostic":"` + diagnostic + `"}}`)}
+	oldCurrentHomeRefreshClient := currentHomeRefreshClient
+	currentHomeRefreshClient = func() homeRefreshClient { return client }
+	t.Cleanup(func() { currentHomeRefreshClient = oldCurrentHomeRefreshClient })
+
+	cfg := &config.Config{Home: config.HomeConfig{Enabled: true}}
+	auth := &cliproxyauth.Auth{ID: "home-auth", Index: "home-auth", Provider: "antigravity"}
+	_, handled, errRefresh := RefreshAuthViaHome(context.Background(), cfg, auth)
+	if !handled || errRefresh == nil || errRefresh.Error() != "credential refresh temporarily unavailable" {
+		t.Fatalf("RefreshAuthViaHome() = handled %v err %v, want generic client error", handled, errRefresh)
+	}
+	diagnosticErr, ok := errRefresh.(interface{ LogDiagnostic() string })
+	if !ok || diagnosticErr.LogDiagnostic() != diagnostic {
+		t.Fatalf("log diagnostic = %T/%v, want %q", errRefresh, errRefresh, diagnostic)
+	}
+	if strings.Contains(errRefresh.Error(), diagnostic) || strings.Contains(errRefresh.Error(), "provider-secret") {
+		t.Fatalf("client error exposed internal detail: %v", errRefresh)
+	}
 }
 
 func TestRefreshAuthViaHomePreservesUpstreamStatusAndBodyExactly(t *testing.T) {
@@ -119,8 +166,9 @@ func TestRefreshAuthViaHomePreservesUpstreamStatusAndBodyExactly(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			raw, errMarshal := json.Marshal(homeErrorEnvelope{Error: &homeErrorDetail{
-				Type:    "refresh_temporarily_unavailable",
-				Message: "credential refresh temporarily unavailable",
+				Type:       "refresh_temporarily_unavailable",
+				Message:    "credential refresh temporarily unavailable",
+				Diagnostic: "antigravity refresh failed: stage=upstream_response status=400",
 				Upstream: &homeUpstreamResponse{
 					Status: tt.status,
 					Body:   tt.body,
@@ -153,6 +201,10 @@ func TestRefreshAuthViaHomePreservesUpstreamStatusAndBodyExactly(t *testing.T) {
 			}
 			if got := direct.ResponseBody(); !bytes.Equal(got, tt.body) {
 				t.Fatalf("direct response body = %q, want exact body %q", got, tt.body)
+			}
+			diagnosticErr, okDiagnostic := errRefresh.(interface{ LogDiagnostic() string })
+			if !okDiagnostic || !strings.Contains(diagnosticErr.LogDiagnostic(), "stage=upstream_response") {
+				t.Fatalf("upstream log diagnostic = %T/%v", errRefresh, errRefresh)
 			}
 		})
 	}

@@ -42,6 +42,18 @@ func (e statusErrorLogTestError) Error() string { return e.message }
 
 func (e statusErrorLogTestError) StatusCode() int { return e.statusCode }
 
+type markedDiagnosticStatusError struct {
+	message    string
+	diagnostic string
+	statusCode int
+}
+
+func (e markedDiagnosticStatusError) Error() string { return e.message }
+
+func (e markedDiagnosticStatusError) StatusCode() int { return e.statusCode }
+
+func (e markedDiagnosticStatusError) LogDiagnostic() string { return e.diagnostic }
+
 func TestWarnLogUpstreamFailureIncludesStructuredStatusCodeAndSafeDiagnostic(t *testing.T) {
 	hook := setupTestLoggerHook(t)
 	diagnostic := `  antigravity refresh: upstream request failed with status 400 error="invalid_request" error_description="Malformed request, retry & inspect"  `
@@ -67,10 +79,44 @@ func TestWarnLogUpstreamFailureIncludesStructuredStatusCodeAndSafeDiagnostic(t *
 	t.Fatalf("expected upstream failure Warn log, got logs: %#v", hook.AllEntries())
 }
 
+func TestWarnLogUpstreamFailureUsesMarkedHomeDiagnostic(t *testing.T) {
+	hook := setupTestLoggerHook(t)
+	errRefresh := markedDiagnosticStatusError{
+		message:    "credential refresh temporarily unavailable",
+		diagnostic: "antigravity refresh failed: stage=transport err=EOF access_token=provider-secret",
+		statusCode: http.StatusServiceUnavailable,
+	}
+
+	warnLogUpstreamFailure(
+		context.Background(),
+		nil,
+		"antigravity",
+		"gemini-3.7-flash-high",
+		&Auth{ID: "auth-1", Provider: "antigravity"},
+		129*time.Millisecond,
+		errRefresh,
+	)
+
+	for _, entry := range hook.AllEntries() {
+		if entry.Level != log.WarnLevel || !strings.Contains(entry.Message, "upstream execution failed") {
+			continue
+		}
+		if !strings.Contains(entry.Message, "stage=transport") || !strings.Contains(entry.Message, "err=EOF") {
+			t.Fatalf("Warn log lost marked Home diagnostic: %q", entry.Message)
+		}
+		if strings.Contains(entry.Message, "provider-secret") || strings.Contains(entry.Message, errRefresh.message) {
+			t.Fatalf("Warn log exposed secret or used generic client message: %q", entry.Message)
+		}
+		return
+	}
+	t.Fatalf("expected upstream failure Warn log, got logs: %#v", hook.AllEntries())
+}
+
 func TestHomeCredentialBoundaryWarnLogUsesSafeDiagnostic(t *testing.T) {
 	diagnostic := "antigravity refresh: access token expired access_token=provider-secret\nforged log line"
-	upstreamErr := statusErrorLogTestError{
-		message:    diagnostic,
+	upstreamErr := markedDiagnosticStatusError{
+		message:    "credential refresh temporarily unavailable",
+		diagnostic: diagnostic,
 		statusCode: http.StatusServiceUnavailable,
 	}
 	hook := setupTestLoggerHook(t)
@@ -78,8 +124,8 @@ func TestHomeCredentialBoundaryWarnLogUsesSafeDiagnostic(t *testing.T) {
 	executor := &requestPrepareExecutor{prepareErr: upstreamErr}
 	selection := &HomeDispatchSelection{Auth: auth, Executor: executor, Provider: "antigravity"}
 	_, errPrepare := NewManager(nil, nil, nil).prepareHomeRequestAuth(context.Background(), executor, selection)
-	if errPrepare == nil || errPrepare.Error() != diagnostic {
-		t.Fatalf("operation error = %v, want original error %q", errPrepare, diagnostic)
+	if errPrepare == nil || errPrepare.Error() != upstreamErr.message {
+		t.Fatalf("operation error = %v, want generic error %q", errPrepare, upstreamErr.message)
 	}
 
 	matches := 0

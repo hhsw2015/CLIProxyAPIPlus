@@ -10,13 +10,15 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/home"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 )
 
 type homeStatusErr struct {
-	code     int
-	msg      string
-	upstream bool
+	code       int
+	msg        string
+	diagnostic string
+	upstream   bool
 }
 
 func (e homeStatusErr) Error() string {
@@ -30,6 +32,16 @@ func (e homeStatusErr) Error() string {
 }
 
 func (e homeStatusErr) StatusCode() int { return e.code }
+
+func (e homeStatusErr) LogDiagnostic() string {
+	if strings.TrimSpace(e.diagnostic) != "" {
+		return logging.SafeDiagnosticForLog(e.diagnostic)
+	}
+	if e.upstream {
+		return fmt.Sprintf("Home refresh upstream response: status=%d", e.code)
+	}
+	return logging.SafeDiagnosticForLog(e.Error())
+}
 
 func (e homeStatusErr) DirectResponse() bool { return e.upstream }
 
@@ -50,10 +62,11 @@ type homeRefreshAuthEnvelope struct {
 }
 
 type homeErrorDetail struct {
-	Type     string                `json:"type"`
-	Message  string                `json:"message"`
-	Code     string                `json:"code,omitempty"`
-	Upstream *homeUpstreamResponse `json:"upstream,omitempty"`
+	Type       string                `json:"type"`
+	Message    string                `json:"message"`
+	Code       string                `json:"code,omitempty"`
+	Diagnostic string                `json:"diagnostic,omitempty"`
+	Upstream   *homeUpstreamResponse `json:"upstream,omitempty"`
 }
 
 type homeUpstreamResponse struct {
@@ -102,16 +115,21 @@ func RefreshAuthViaHome(ctx context.Context, cfg *config.Config, auth *cliproxya
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return nil, true, err
 		}
-		return nil, true, homeStatusErr{code: http.StatusServiceUnavailable, msg: "home refresh temporarily unavailable"}
+		return nil, true, homeStatusErr{
+			code:       http.StatusServiceUnavailable,
+			msg:        "home refresh temporarily unavailable",
+			diagnostic: "Home refresh transport failed: " + logging.SafeErrorDiagnostic(err),
+		}
 	}
 
 	var env homeErrorEnvelope
 	if errUnmarshal := json.Unmarshal(raw, &env); errUnmarshal == nil && env.Error != nil {
 		if env.Error.Upstream != nil {
 			return nil, true, homeStatusErr{
-				code:     env.Error.Upstream.Status,
-				msg:      string(env.Error.Upstream.Body),
-				upstream: true,
+				code:       env.Error.Upstream.Status,
+				msg:        string(env.Error.Upstream.Body),
+				diagnostic: env.Error.Diagnostic,
+				upstream:   true,
 			}
 		}
 		code := strings.TrimSpace(env.Error.Type)
@@ -126,12 +144,16 @@ func RefreshAuthViaHome(ctx context.Context, cfg *config.Config, auth *cliproxya
 		case http.StatusNotFound:
 			message = "credential refresh target not found"
 		}
-		return nil, true, homeStatusErr{code: statusCode, msg: message}
+		return nil, true, homeStatusErr{code: statusCode, msg: message, diagnostic: env.Error.Diagnostic}
 	}
 
 	updated, returnedIndex, errParse := parseHomeRefreshAuth(raw)
 	if errParse != nil {
-		return nil, true, homeStatusErr{code: http.StatusBadGateway, msg: "home returned invalid auth payload"}
+		return nil, true, homeStatusErr{
+			code:       http.StatusBadGateway,
+			msg:        "home returned invalid auth payload",
+			diagnostic: "Home refresh response decode failed: " + logging.SafeErrorDiagnostic(errParse),
+		}
 	}
 	if updated.Disabled || updated.Status == cliproxyauth.StatusDisabled {
 		return nil, true, homeStatusErr{code: http.StatusUnauthorized, msg: "credential unauthorized"}
