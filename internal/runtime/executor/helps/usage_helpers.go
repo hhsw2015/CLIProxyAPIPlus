@@ -3,6 +3,7 @@ package helps
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -16,6 +17,7 @@ import (
 	internallogging "github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -403,8 +405,18 @@ func failFromErrors(errs ...error) usage.Failure {
 		if err == nil {
 			continue
 		}
+		body := strings.TrimSpace(err.Error())
+		type responseBodyProvider interface {
+			ResponseBody() []byte
+		}
+		var responseErr responseBodyProvider
+		if errors.As(err, &responseErr) && responseErr != nil {
+			if responseBody := responseErr.ResponseBody(); len(responseBody) > 0 {
+				body = string(responseBody)
+			}
+		}
 		return usage.Failure{
-			Body:       strings.TrimSpace(err.Error()),
+			Body:       body,
 			StatusCode: clienterror.HTTPStatusFromError(err),
 		}
 	}
@@ -462,6 +474,7 @@ type usageTTFTRoundTripper struct {
 }
 
 func (t usageTTFTRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	cliproxyexecutor.MarkUpstreamAttempt(req.Context())
 	t.reporter.StartResponseTTFT()
 	resp, errRoundTrip := t.base.RoundTrip(req)
 	if errRoundTrip != nil {
