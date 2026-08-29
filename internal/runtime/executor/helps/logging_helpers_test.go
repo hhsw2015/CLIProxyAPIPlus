@@ -11,7 +11,37 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 )
+
+func TestRequestLoggingDoesNotMarkUpstreamAttempt(t *testing.T) {
+	tests := []struct {
+		name   string
+		record func(context.Context)
+	}{
+		{
+			name: "HTTP",
+			record: func(ctx context.Context) {
+				RecordAPIRequest(ctx, &config.Config{}, UpstreamRequestLog{URL: "https://api.example.com", Method: http.MethodPost})
+			},
+		},
+		{
+			name: "websocket",
+			record: func(ctx context.Context) {
+				RecordAPIWebsocketRequest(ctx, &config.Config{}, UpstreamRequestLog{URL: "wss://api.example.com", Method: "WEBSOCKET"})
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := cliproxyexecutor.WithUpstreamAttemptTracker(context.Background())
+			test.record(ctx)
+			if cliproxyexecutor.UpstreamAttempted(ctx) {
+				t.Fatal("request logging marked an upstream attempt before transport")
+			}
+		})
+	}
+}
 
 func TestRecordAPIRequestClonesDeferredBodyWhenRequestLogDisabled(t *testing.T) {
 	gin.SetMode(gin.TestMode)

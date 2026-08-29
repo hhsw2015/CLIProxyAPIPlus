@@ -35,10 +35,16 @@ func newStreamBootstrapError(err error, headers http.Header) error {
 	if err == nil {
 		return nil
 	}
-	return &streamBootstrapError{
+	upstreamAttempt := hasUpstreamExecutionAttempt(err)
+	err = unwrapUpstreamExecutionAttempt(err)
+	bootstrapErr := &streamBootstrapError{
 		cause:   err,
 		headers: cloneHTTPHeader(headers),
 	}
+	if upstreamAttempt {
+		return markUpstreamExecutionAttempt(bootstrapErr)
+	}
+	return bootstrapErr
 }
 
 func (e *streamBootstrapError) Error() string {
@@ -203,6 +209,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 	}
 	ctx = contextWithRequestedModelAlias(ctx, opts, routeModel)
 	var lastErr error
+	var upstreamErr error
 	didRefreshOnUnauthorized := false
 	for idx, execModel := range execModels {
 		ctx = newUpstreamAttemptContext(ctx)
@@ -227,6 +234,10 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 		entry := logEntryWithRequestID(ctx)
 		startStream := time.Now()
 		streamResult, errStream := executor.ExecuteStream(ctx, auth, execReq, execOpts)
+		errStream = markUpstreamExecutionAttemptFromContext(ctx, errStream)
+		if hasUpstreamExecutionAttempt(errStream) {
+			upstreamErr = errStream
+		}
 		durationStream := time.Since(startStream)
 		if errStream != nil {
 			if errCtx := ctx.Err(); errCtx != nil {
@@ -242,6 +253,10 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 					ctx = newUpstreamAttemptContext(ctx)
 					startRetry := time.Now()
 					streamResult, errStream = executor.ExecuteStream(ctx, auth, execReq, execOpts)
+					errStream = markUpstreamExecutionAttemptFromContext(ctx, errStream)
+					if hasUpstreamExecutionAttempt(errStream) {
+						upstreamErr = errStream
+					}
 					durationRetry := time.Since(startRetry)
 					if errStream != nil {
 						warnLogUpstreamFailure(ctx, entry, provider, execModel, auth, durationRetry, errStream)
@@ -262,6 +277,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			}
 		}
 		streamResult, errStream = validateStreamResult(streamResult, errStream)
+		errStream = markUpstreamExecutionAttemptFromContext(ctx, errStream)
 		if errStream != nil {
 			rerr := resultErrorFromError(errStream)
 			action, okAction := matchRequestScopedErrorAction(auth, errStream, m.runtimeConfigSnapshot())
@@ -278,7 +294,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 				}
 				lastErr = errStream
 				if result.CredentialScope {
-					return nil, errStream
+					return nil, preferredExecutionAttemptError(errStream, upstreamErr)
 				}
 				continue
 			}
@@ -287,12 +303,16 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			}
 			lastErr = errStream
 			if result.CredentialScope {
-				return nil, errStream
+				return nil, preferredExecutionAttemptError(errStream, upstreamErr)
 			}
 			continue
 		}
 
 		buffered, closed, bootstrapErr := readStreamBootstrap(ctx, streamResult.Chunks)
+		bootstrapErr = markUpstreamExecutionAttemptFromContext(ctx, bootstrapErr)
+		if hasUpstreamExecutionAttempt(bootstrapErr) {
+			upstreamErr = newStreamBootstrapError(bootstrapErr, streamResult.Headers)
+		}
 		if bootstrapErr != nil {
 			if errCtx := ctx.Err(); errCtx != nil {
 				discardStreamChunks(streamResult.Chunks)
@@ -309,7 +329,9 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 					ctx = newUpstreamAttemptContext(ctx)
 					startRetry := time.Now()
 					retryStream, retryErr := executor.ExecuteStream(ctx, auth, execReq, execOpts)
+					retryErr = markUpstreamExecutionAttemptFromContext(ctx, retryErr)
 					retryStream, retryErr = validateStreamResult(retryStream, retryErr)
+					retryErr = markUpstreamExecutionAttemptFromContext(ctx, retryErr)
 					if retryErr != nil {
 						if errCtx := ctx.Err(); errCtx != nil {
 							return nil, errCtx
@@ -320,6 +342,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 					} else {
 						streamResult = retryStream
 						buffered, closed, bootstrapErr = readStreamBootstrap(ctx, streamResult.Chunks)
+						bootstrapErr = markUpstreamExecutionAttemptFromContext(ctx, bootstrapErr)
 						if bootstrapErr != nil {
 							warnLogUpstreamFailure(ctx, entry, provider, execModel, auth, time.Since(startRetry), bootstrapErr)
 						}
@@ -329,6 +352,9 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 				}
 			} else {
 				warnLogUpstreamFailure(ctx, entry, provider, execModel, auth, time.Since(startStream), bootstrapErr)
+			}
+			if hasUpstreamExecutionAttempt(bootstrapErr) {
+				upstreamErr = newStreamBootstrapError(bootstrapErr, streamResult.Headers)
 			}
 		}
 		if !ephemeralResult {
@@ -354,7 +380,8 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 				}
 				lastErr = bootstrapErr
 				if result.CredentialScope {
-					return nil, newStreamBootstrapError(bootstrapErr, streamResult.Headers)
+					currentErr := newStreamBootstrapError(bootstrapErr, streamResult.Headers)
+					return nil, preferredExecutionAttemptError(currentErr, upstreamErr)
 				}
 				continue
 			}
@@ -380,7 +407,8 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 				discardStreamChunks(streamResult.Chunks)
 				lastErr = bootstrapErr
 				if result.CredentialScope {
-					return nil, newStreamBootstrapError(bootstrapErr, streamResult.Headers)
+					currentErr := newStreamBootstrapError(bootstrapErr, streamResult.Headers)
+					return nil, preferredExecutionAttemptError(currentErr, upstreamErr)
 				}
 				continue
 			}
@@ -392,19 +420,24 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			}
 			m.recordExecutionResult(ctx, result, auth, ephemeralResult)
 			discardStreamChunks(streamResult.Chunks)
-			return nil, newStreamBootstrapError(bootstrapErr, streamResult.Headers)
+			currentErr := newStreamBootstrapError(bootstrapErr, streamResult.Headers)
+			return nil, preferredExecutionAttemptError(currentErr, upstreamErr)
 		}
 
 		if closed && len(buffered) == 0 {
-			emptyErr := &Error{Code: "empty_stream", Message: "upstream stream closed before first payload", Retryable: true}
+			emptyErr := markUpstreamExecutionAttemptFromContext(ctx, &Error{Code: "empty_stream", Message: "upstream stream closed before first payload", Retryable: true})
+			currentErr := newStreamBootstrapError(emptyErr, streamResult.Headers)
+			if hasUpstreamExecutionAttempt(emptyErr) {
+				upstreamErr = currentErr
+			}
 			warnLogUpstreamFailure(ctx, entry, provider, execModel, auth, time.Since(startStream), emptyErr)
-			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: emptyErr, Options: execOpts}
+			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: resultErrorFromError(emptyErr), Options: execOpts}
 			m.recordExecutionResult(ctx, result, auth, ephemeralResult)
 			if idx < len(execModels)-1 {
 				lastErr = emptyErr
 				continue
 			}
-			return nil, newStreamBootstrapError(emptyErr, streamResult.Headers)
+			return nil, preferredExecutionAttemptError(currentErr, upstreamErr)
 		}
 
 		remaining := streamResult.Chunks
@@ -419,5 +452,5 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 	if lastErr == nil {
 		lastErr = &Error{Code: "auth_not_found", Message: "no upstream model available"}
 	}
-	return nil, lastErr
+	return nil, preferredExecutionAttemptError(lastErr, upstreamErr)
 }

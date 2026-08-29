@@ -170,10 +170,15 @@ func markHomeRetryRoundExhausted(err error, retryAfter *time.Duration, retryNow 
 	if err == nil {
 		return nil
 	}
+	upstreamAttempt := hasUpstreamExecutionAttempt(err)
+	err = unwrapUpstreamExecutionAttempt(err)
 	marked := &homeRetryRoundExhaustedError{cause: err, retryNow: retryNow}
 	if retryAfter != nil {
 		marked.retryAfter = *retryAfter
 		marked.hasRetryAfter = true
+	}
+	if upstreamAttempt {
+		return markUpstreamExecutionAttempt(marked)
 	}
 	return marked
 }
