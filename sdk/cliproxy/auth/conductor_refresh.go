@@ -331,6 +331,8 @@ func (m *Manager) markRefreshPending(id string, now time.Time) bool {
 		return false
 	}
 	auth.NextRefreshAfter = now.Add(refreshPendingBackoff)
+	auth.Generation++
+	auth.UpdatedAt = now
 	m.auths[id] = auth
 	m.mu.Unlock()
 
@@ -481,6 +483,8 @@ func (m *Manager) refreshAuthForRequest(ctx context.Context, id, failedAccessTok
 		shouldReschedule := false
 		m.mu.Lock()
 		if current := m.auths[id]; current != nil {
+			current.Generation++
+			current.UpdatedAt = now
 			current.LastError = refreshErrorFromError(err)
 			if unauthorized {
 				current.NextRefreshAfter = time.Time{}
@@ -519,13 +523,25 @@ func (m *Manager) refreshAuthForRequest(ctx context.Context, id, failedAccessTok
 		updated.Status = StatusActive
 	}
 	updated.UpdatedAt = now
-	modelsToResume := clearUnauthorizedModelStates(updated, now)
+	_ = clearUnauthorizedModelStates(updated, now)
 	if m.shouldRefresh(updated, now) {
 		updated.NextRefreshAfter = now.Add(refreshIneffectiveBackoff)
 	}
 	saved, errUpdate := m.Update(ctx, updated)
-	for _, model := range modelsToResume {
-		registry.GetGlobalRegistry().ResumeClientModel(id, model)
+	targetAuth := saved
+	if targetAuth == nil {
+		targetAuth = updated
+	}
+	supportedModels, regEpoch := registry.GetGlobalRegistry().GetModelsAndEpochForClient(id)
+	projections := make([]registry.ClientModelProjection, 0, len(supportedModels))
+	for _, sm := range supportedModels {
+		if sm == nil || strings.TrimSpace(sm.ID) == "" {
+			continue
+		}
+		projections = append(projections, m.clientModelProjectionForAuth(targetAuth, sm.ID, now))
+	}
+	if targetAuth != nil && len(projections) > 0 {
+		registry.GetGlobalRegistry().ApplyClientModelProjections(id, regEpoch, targetAuth.Generation, projections)
 	}
 	if errUpdate != nil {
 		log.Debugf("persist refreshed auth %s (%s) failed: %v", auth.Provider, auth.ID, errUpdate)
