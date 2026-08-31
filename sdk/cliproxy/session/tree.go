@@ -16,6 +16,7 @@ import (
 const (
 	defaultMaxTreeNodes = 65536
 	defaultTreeTTL      = 24 * time.Hour
+	maxTreeDepth        = 128
 )
 
 // SessionTreeNode represents a node in the hierarchical session tree.
@@ -769,9 +770,16 @@ func (s *InMemorySessionTreeStore) computeNodeLineageLocked(node *SessionTreeNod
 
 	if node.ParentSessionID != "" && node.ParentSessionID != node.SessionID && !s.isDescendantLocked(node.ParentSessionID, node.SessionID) {
 		if parent, ok := s.nodes[node.ParentSessionID]; ok {
-			newRoot = parent.RootSessionID
-			newPath = parent.TreePath + "/" + node.SessionID
-			newDepth = parent.TreeDepth + 1
+			if parent.TreeDepth < maxTreeDepth {
+				newRoot = parent.RootSessionID
+				newPath = parent.TreePath + "/" + node.SessionID
+				newDepth = parent.TreeDepth + 1
+			} else {
+				node.ParentSessionID = ""
+				newRoot = node.SessionID
+				newPath = node.SessionID
+				newDepth = 0
+			}
 		} else {
 			newRoot = node.ParentSessionID
 			newPath = node.ParentSessionID + "/" + node.SessionID

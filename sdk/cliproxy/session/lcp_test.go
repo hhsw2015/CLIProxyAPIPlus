@@ -525,6 +525,27 @@ func TestMerklePrefixMatcherTouchExpiredEntry(t *testing.T) {
 	}
 }
 
+func TestExtractCanonicalTurnsAntigravityNestedRequest(t *testing.T) {
+	t.Parallel()
+
+	nested := []byte(`{
+		"project_id": "proj-123",
+		"request": {
+			"systemInstruction": {"parts":[{"text":"system prompt"}]},
+			"contents": [
+				{"role":"user","parts":[{"text":"hello antigravity"}]}
+			]
+		}
+	}`)
+	turns := ExtractCanonicalTurns(sdktranslator.FormatAntigravity, nested)
+	if len(turns) != 2 {
+		t.Fatalf("len(turns) = %d, want 2", len(turns))
+	}
+	if turns[0].Role != "system" || turns[1].Role != "user" {
+		t.Fatalf("unexpected turn roles: %+v", turns)
+	}
+}
+
 func BenchmarkExtractCanonicalTurns(b *testing.B) {
 	payload := []byte(`{
 		"messages": [

@@ -611,6 +611,34 @@ func TestExtractTreeInfoGeminiAndAntigravityHierarchy(t *testing.T) {
 	}
 }
 
+func TestSessionTreeStoreMaxDepthCapping(t *testing.T) {
+	t.Parallel()
+
+	store := NewInMemorySessionTreeStore(500, time.Hour)
+	current := "node-0"
+	store.RecordNode(SessionTreeInfo{SessionID: current})
+
+	// Create a chain exceeding maxTreeDepth (128)
+	for i := 1; i <= 150; i++ {
+		next := fmt.Sprintf("node-%d", i)
+		node := store.RecordNode(SessionTreeInfo{
+			SessionID:       next,
+			ParentSessionID: current,
+		})
+		if i <= 128 {
+			if node.TreeDepth != i {
+				t.Fatalf("expected depth %d, got %d", i, node.TreeDepth)
+			}
+		} else {
+			// Once exceeding maxTreeDepth, the chain is capped and the node becomes its own root
+			if node.TreeDepth > maxTreeDepth {
+				t.Fatalf("depth %d exceeded maxTreeDepth %d", node.TreeDepth, maxTreeDepth)
+			}
+		}
+		current = next
+	}
+}
+
 func BenchmarkSessionTreeRecordAndCascade(b *testing.B) {
 	store := NewInMemorySessionTreeStore(10000, time.Hour)
 	// Pre-populate root and parent

@@ -69,7 +69,7 @@ func ClaudeMetadataIdentities(payload []byte) (sessionID, parentSessionID, agent
 		parsed := gjson.Parse(userID)
 		sessionID = NormalizeExplicitID(parsed.Get("session_id").String())
 		parentSessionID = NormalizeExplicitID(parsed.Get("parent_session_id").String())
-		agentID = strings.TrimSpace(parsed.Get("agent_id").String())
+		agentID = NormalizeExplicitID(parsed.Get("agent_id").String())
 		return sessionID, parentSessionID, agentID
 	}
 	if matches := legacyClaudeSessionPattern.FindStringSubmatch(userID); len(matches) >= 2 {
@@ -254,12 +254,16 @@ func DeriveID(format sdktranslator.Format, payload []byte, callerScope string) s
 		Format:      format.String(),
 		CallerScope: strings.TrimSpace(callerScope),
 	}
-	if sourceFormatEqual(format, sdktranslator.FormatGemini) {
-		root.Resource = stringField(body, "cachedContent", "cached_content")
+	if sourceFormatEqual(format, sdktranslator.FormatGemini) || sourceFormatEqual(format, sdktranslator.FormatAntigravity) {
+		reqBody := body
+		if req, ok := body["request"].(map[string]any); ok {
+			reqBody = req
+		}
+		root.Resource = stringField(reqBody, "cachedContent", "cached_content")
 	}
 
 	switch {
-	case sourceFormatEqual(format, sdktranslator.FormatGemini):
+	case sourceFormatEqual(format, sdktranslator.FormatGemini), sourceFormatEqual(format, sdktranslator.FormatAntigravity):
 		root.Instructions, root.User = geminiRoot(body)
 	case sourceFormatEqual(format, sdktranslator.FormatInteractions):
 		root.Instructions, root.User = interactionsRoot(body)
@@ -294,7 +298,10 @@ func messagesRoot(body map[string]any, includeTopLevelSystem bool) ([]string, []
 		case "system", "developer":
 			instructions = appendInstruction(instructions, message["content"])
 		case "user":
-			return instructions, canonicalParts(message["content"])
+			parts := canonicalParts(message["content"])
+			if len(parts) > 0 {
+				return instructions, parts
+			}
 		}
 	}
 	return instructions, nil
@@ -323,13 +330,19 @@ func responsesRoot(body map[string]any) ([]string, []canonicalPart) {
 		case "system", "developer":
 			instructions = appendInstruction(instructions, item["content"])
 		case "user":
-			return instructions, canonicalParts(item["content"])
+			parts := canonicalParts(item["content"])
+			if len(parts) > 0 {
+				return instructions, parts
+			}
 		}
 	}
 	return instructions, nil
 }
 
 func geminiRoot(body map[string]any) ([]string, []canonicalPart) {
+	if req, ok := body["request"].(map[string]any); ok {
+		body = req
+	}
 	instructions := make([]string, 0)
 	if value, ok := firstField(body, "systemInstruction", "system_instruction"); ok {
 		instructions = appendInstruction(instructions, contentValue(value))
@@ -340,7 +353,10 @@ func geminiRoot(body map[string]any) ([]string, []canonicalPart) {
 		if !okContent || normalizedString(content["role"]) != "user" {
 			continue
 		}
-		return instructions, canonicalParts(contentValue(content))
+		parts := canonicalParts(contentValue(content))
+		if len(parts) > 0 {
+			return instructions, parts
+		}
 	}
 	return instructions, nil
 }

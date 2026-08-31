@@ -274,7 +274,12 @@ func (m *Manager) homeDispatchSessionIDs(opts cliproxyexecutor.Options) (string,
 	}
 
 	cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
-	canonical := m.homeSessionAliases.canonical(primary, aliasFallback, homeSessionAliasTTL(cfg), time.Now())
+	ttl := homeSessionAliasTTL(cfg)
+	now := time.Now()
+	canonical := m.homeSessionAliases.canonical(primary, aliasFallback, ttl, now)
+	if parentSessionID != "" {
+		parentSessionID = m.homeSessionAliases.canonical(parentSessionID, "", ttl, now)
+	}
 	return canonical, parentSessionID
 }
 

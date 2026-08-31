@@ -693,6 +693,74 @@ func TestSessionAffinitySelectorSessionTreeIntegration(t *testing.T) {
 	}
 }
 
+func TestSessionCacheCompareAndDeleteMultipleAliases(t *testing.T) {
+	t.Parallel()
+
+	cache := NewSessionCache(time.Hour)
+	defer cache.Stop()
+
+	// Set 3 aliases in the same group
+	cache.SetAliases("auth-1", "s1", "s2", "s3")
+
+	if authID, ok := cache.Get("s1"); !ok || authID != "auth-1" {
+		t.Fatalf("s1 = %q, %v", authID, ok)
+	}
+	if authID, ok := cache.Get("s2"); !ok || authID != "auth-1" {
+		t.Fatalf("s2 = %q, %v", authID, ok)
+	}
+	if authID, ok := cache.Get("s3"); !ok || authID != "auth-1" {
+		t.Fatalf("s3 = %q, %v", authID, ok)
+	}
+
+	// Compare and delete s1
+	if !cache.CompareAndDelete("s1", "auth-1") {
+		t.Fatal("CompareAndDelete s1 failed")
+	}
+
+	// s1 should be gone
+	if _, ok := cache.Get("s1"); ok {
+		t.Fatal("s1 still exists after CompareAndDelete")
+	}
+
+	// s2 and s3 should still exist and point to auth-1
+	if authID, ok := cache.Get("s2"); !ok || authID != "auth-1" {
+		t.Fatalf("s2 = %q, %v", authID, ok)
+	}
+	if authID, ok := cache.Get("s3"); !ok || authID != "auth-1" {
+		t.Fatalf("s3 = %q, %v", authID, ok)
+	}
+}
+
+type nilSelector struct{}
+
+func (nilSelector) Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, candidates []*Auth) (*Auth, error) {
+	return nil, nil
+}
+
+func TestSessionAffinitySelectorNilFallbackNoPanic(t *testing.T) {
+	t.Parallel()
+
+	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
+		Fallback: nilSelector{},
+		TTL:      time.Hour,
+	})
+	defer selector.Stop()
+
+	opts := cliproxyexecutor.Options{
+		Headers: http.Header{
+			"X-Session-ID": []string{"sess-nil-test"},
+		},
+	}
+	candidates := []*Auth{{ID: "auth-1", Status: StatusActive}}
+	auth, err := selector.Pick(context.Background(), "openai", "gpt-4o", opts, candidates)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if auth != nil {
+		t.Fatalf("expected nil auth, got %+v", auth)
+	}
+}
+
 func TestSessionCacheTinyTTLNoPanic(t *testing.T) {
 	t.Parallel()
 

@@ -108,6 +108,9 @@ func ExtractCanonicalTurns(format sdktranslator.Format, payload []byte) []Canoni
 }
 
 func inferCanonicalFormat(root gjson.Result) sdktranslator.Format {
+	if req := root.Get("request"); req.Exists() && !root.Get("contents").Exists() {
+		root = req
+	}
 	if root.Get("contents").IsArray() || root.Get("systemInstruction").Exists() || root.Get("system_instruction").Exists() {
 		return sdktranslator.FormatGemini
 	}
@@ -207,6 +210,9 @@ func appendResponsesTurns(turns *[]CanonicalTurn, root gjson.Result) {
 }
 
 func appendGeminiTurns(turns *[]CanonicalTurn, root gjson.Result) {
+	if req := root.Get("request"); req.Exists() && !root.Get("contents").Exists() {
+		root = req
+	}
 	cached := root.Get("cachedContent")
 	if !cached.Exists() {
 		cached = root.Get("cached_content")

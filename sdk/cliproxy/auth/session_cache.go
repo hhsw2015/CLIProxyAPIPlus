@@ -302,21 +302,19 @@ func (c *SessionCache) CompareAndDelete(sessionID, expectedAuthID string) bool {
 		return false
 	}
 	delete(c.entries, sessionID)
+
+	surviving := make([]string, 0, len(entry.aliases))
 	for _, alias := range entry.aliases {
-		if alias == sessionID {
-			continue
+		if alias != sessionID {
+			surviving = append(surviving, alias)
 		}
+	}
+	for _, alias := range surviving {
 		current, exists := c.entries[alias]
 		if !exists || current.authID != entry.authID {
 			continue
 		}
-		filtered := make([]string, 0, len(current.aliases))
-		for _, candidate := range current.aliases {
-			if candidate != sessionID {
-				filtered = append(filtered, candidate)
-			}
-		}
-		current.aliases = filtered
+		current.aliases = append([]string(nil), surviving...)
 		c.entries[alias] = current
 	}
 	return true
@@ -332,21 +330,18 @@ func (c *SessionCache) Invalidate(sessionID string) {
 	entry, ok := c.entries[sessionID]
 	delete(c.entries, sessionID)
 	if ok {
+		surviving := make([]string, 0, len(entry.aliases))
 		for _, alias := range entry.aliases {
-			if alias == sessionID {
-				continue
+			if alias != sessionID {
+				surviving = append(surviving, alias)
 			}
+		}
+		for _, alias := range surviving {
 			current, exists := c.entries[alias]
 			if !exists || current.authID != entry.authID {
 				continue
 			}
-			filtered := make([]string, 0, len(current.aliases))
-			for _, candidate := range current.aliases {
-				if candidate != sessionID {
-					filtered = append(filtered, candidate)
-				}
-			}
-			current.aliases = filtered
+			current.aliases = append([]string(nil), surviving...)
 			c.entries[alias] = current
 		}
 	}
