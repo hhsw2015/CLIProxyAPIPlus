@@ -546,6 +546,40 @@ func TestExtractCanonicalTurnsAntigravityNestedRequest(t *testing.T) {
 	}
 }
 
+func TestMerklePrefixMatcherFingerprintsBounding(t *testing.T) {
+	t.Parallel()
+
+	matcher := NewMerklePrefixMatcherWithConfig(MerklePrefixMatcherConfig{
+		MaxTurns: 10,
+		TTL:      time.Hour,
+	})
+
+	fps := make([]string, 50)
+	for i := range fps {
+		fps[i] = fmt.Sprintf("fp-%d", i)
+	}
+
+	// Binding 50 fingerprints with MaxTurns=10 should truncate to 10
+	sid := matcher.BindFingerprints("ns", fps, 2, "auth-1")
+	if sid == "" {
+		t.Fatal("BindFingerprints failed")
+	}
+
+	// Match should succeed with 50 fingerprints (truncated to 10)
+	match, ok := matcher.MatchFingerprints("ns", fps, 2)
+	if !ok || match.PrefixLength != 10 {
+		t.Fatalf("expected 10 matched turns, got %d (ok=%v)", match.PrefixLength, ok)
+	}
+
+	// Touch and Remove should also handle 50 fingerprints cleanly
+	if !matcher.TouchFingerprints("ns", fps, 2, "auth-1") {
+		t.Fatal("TouchFingerprints failed")
+	}
+	if !matcher.RemoveFingerprints("ns", fps, "auth-1") {
+		t.Fatal("RemoveFingerprints failed")
+	}
+}
+
 func BenchmarkExtractCanonicalTurns(b *testing.B) {
 	payload := []byte(`{
 		"messages": [

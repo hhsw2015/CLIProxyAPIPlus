@@ -637,6 +637,64 @@ func TestSessionTreeStoreMaxDepthCapping(t *testing.T) {
 		}
 		current = next
 	}
+
+	// Verify that the capped node's parent index was cleaned up
+	cappedParent := fmt.Sprintf("node-%d", 128)
+	cappedNode := fmt.Sprintf("node-%d", 129)
+	store.mu.Lock()
+	if children, ok := store.parentIndex[cappedParent]; ok {
+		if _, exists := children[cappedNode]; exists {
+			store.mu.Unlock()
+			t.Fatalf("capped node %s still found in parentIndex[%s]", cappedNode, cappedParent)
+		}
+	}
+	store.mu.Unlock()
+}
+
+func TestSessionTreeStoreMetadataDeepRecursionProtection(t *testing.T) {
+	t.Parallel()
+
+	store := NewInMemorySessionTreeStore(100, time.Hour)
+
+	// Create deeply nested map
+	nested := map[string]any{"level": 0}
+	curr := nested
+	for i := 1; i <= 30; i++ {
+		next := map[string]any{"level": i}
+		curr["child"] = next
+		curr = next
+	}
+
+	// Recording node should succeed without stack overflow
+	node := store.RecordNode(SessionTreeInfo{
+		SessionID: "sess-deep-meta",
+		Metadata:  nested,
+	})
+	if node.SessionID != "sess-deep-meta" {
+		t.Fatalf("expected sess-deep-meta, got %s", node.SessionID)
+	}
+}
+
+func TestExtractTreeInfoNestedAntigravityRequest(t *testing.T) {
+	t.Parallel()
+
+	payload := []byte(`{
+		"project_id": "proj-123",
+		"request": {
+			"parentSessionId": "parent-sess-456",
+			"sessionId": "child-sess-789"
+		}
+	}`)
+	info, ok := ExtractTreeInfo(nil, payload, nil)
+	if !ok {
+		t.Fatal("ExtractTreeInfo failed on nested Antigravity payload")
+	}
+	if info.SessionID != "session:child-sess-789" {
+		t.Fatalf("SessionID = %q, want session:child-sess-789", info.SessionID)
+	}
+	if info.ParentSessionID != "session:parent-sess-456" {
+		t.Fatalf("ParentSessionID = %q, want session:parent-sess-456", info.ParentSessionID)
+	}
 }
 
 func BenchmarkSessionTreeRecordAndCascade(b *testing.B) {

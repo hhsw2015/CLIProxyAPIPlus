@@ -761,6 +761,38 @@ func TestSessionAffinitySelectorNilFallbackNoPanic(t *testing.T) {
 	}
 }
 
+func TestSessionAffinitySelectorPromptCacheKeyCamelCase(t *testing.T) {
+	t.Parallel()
+
+	payload := []byte(`{"promptCacheKey":"camel-pck-123","input":"hello"}`)
+	primary, fallback := extractExplicitSessionIDs(nil, payload, nil)
+	if primary != "pck:camel-pck-123" {
+		t.Fatalf("primary = %q, want pck:camel-pck-123", primary)
+	}
+	if fallback != "" {
+		t.Fatalf("fallback = %q, want empty", fallback)
+	}
+}
+
+func TestSessionAffinitySelectorNestedAntigravityPayload(t *testing.T) {
+	t.Parallel()
+
+	payload := []byte(`{
+		"project_id": "proj-123",
+		"request": {
+			"parentSessionId": "parent-456",
+			"sessionId": "child-789"
+		}
+	}`)
+	primary, fallback := extractExplicitSessionIDs(nil, payload, nil)
+	if primary != "session:child-789" {
+		t.Fatalf("primary = %q, want session:child-789", primary)
+	}
+	if fallback != "session:parent-456" {
+		t.Fatalf("fallback = %q, want session:parent-456", fallback)
+	}
+}
+
 func TestSessionCacheTinyTTLNoPanic(t *testing.T) {
 	t.Parallel()
 

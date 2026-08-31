@@ -1126,6 +1126,12 @@ func extractExplicitSessionIDs(headers http.Header, payload []byte, metadata map
 	var parentIDCandidate string
 	if len(payload) > 0 {
 		root = util.ParseGJSONBytesNoCopy(payload)
+		reqRoot := root
+		req := root.Get("request")
+		hasNestedReq := req.Exists() && !root.Get("contents").Exists()
+		if hasNestedReq {
+			reqRoot = req
+		}
 		for _, parentPath := range []string{
 			"parent_session_id", "parentSessionId",
 			"parent_thread_id", "parentThreadId",
@@ -1137,6 +1143,12 @@ func extractExplicitSessionIDs(headers http.Header, payload []byte, metadata map
 			if psid := normalizedSessionCandidate(root.Get(parentPath).String()); psid != "" {
 				parentIDCandidate = psid
 				break
+			}
+			if hasNestedReq {
+				if psid := normalizedSessionCandidate(reqRoot.Get(parentPath).String()); psid != "" {
+					parentIDCandidate = psid
+					break
+				}
 			}
 		}
 		if parentIDCandidate == "" {
@@ -1306,9 +1318,20 @@ func extractExplicitSessionIDs(headers http.Header, payload []byte, metadata map
 
 	// 5. Body payload inspection
 	if len(payload) > 0 && root.Exists() {
+		reqRoot := root
+		req := root.Get("request")
+		hasNestedReq := req.Exists() && !root.Get("contents").Exists()
+		if hasNestedReq {
+			reqRoot = req
+		}
+
 		// Google Gemini Context Caching
 		for _, cachePath := range []string{"cachedContent", "cached_content"} {
-			if cacheID := normalizedSessionCandidate(root.Get(cachePath).String()); cacheID != "" {
+			cacheID := normalizedSessionCandidate(root.Get(cachePath).String())
+			if cacheID == "" && hasNestedReq {
+				cacheID = normalizedSessionCandidate(reqRoot.Get(cachePath).String())
+			}
+			if cacheID != "" {
 				if parentIDCandidate != "" && parentIDCandidate != cacheID {
 					return "geminicache:" + cacheID, "geminicache:" + parentIDCandidate
 				}
@@ -1318,7 +1341,11 @@ func extractExplicitSessionIDs(headers http.Header, payload []byte, metadata map
 
 		// OpenAI Assistants / Threads
 		for _, threadPath := range []string{"thread_id", "threadId", "metadata.thread_id"} {
-			if tid := normalizedSessionCandidate(root.Get(threadPath).String()); tid != "" {
+			tid := normalizedSessionCandidate(root.Get(threadPath).String())
+			if tid == "" && hasNestedReq {
+				tid = normalizedSessionCandidate(reqRoot.Get(threadPath).String())
+			}
+			if tid != "" {
 				if parentIDCandidate != "" && parentIDCandidate != tid {
 					return "thread:" + tid, "thread:" + parentIDCandidate
 				}
@@ -1332,7 +1359,11 @@ func extractExplicitSessionIDs(headers http.Header, payload []byte, metadata map
 			agentID = normalizedSessionCandidate(root.Get("metadata.subagent_id").String())
 		}
 		for _, path := range []string{"session_id", "sessionId", "sessionID", "metadata.session_id", "extra_body.session_id"} {
-			if sid := normalizedSessionCandidate(root.Get(path).String()); sid != "" {
+			sid := normalizedSessionCandidate(root.Get(path).String())
+			if sid == "" && hasNestedReq {
+				sid = normalizedSessionCandidate(reqRoot.Get(path).String())
+			}
+			if sid != "" {
 				if agentID != "" && agentID != "main" {
 					primary = "session:" + sid + ":agent:" + agentID
 					fallback = "session:" + sid
@@ -1350,6 +1381,9 @@ func extractExplicitSessionIDs(headers http.Header, payload []byte, metadata map
 
 		conversationID := ""
 		conversation := root.Get("conversation")
+		if !conversation.Exists() && hasNestedReq {
+			conversation = reqRoot.Get("conversation")
+		}
 		if sid := normalizedSessionCandidate(conversation.Get("id").String()); sid != "" {
 			conversationID = "conv:" + sid
 		} else if conversation.Type == gjson.String {
@@ -1357,7 +1391,11 @@ func extractExplicitSessionIDs(headers http.Header, payload []byte, metadata map
 				conversationID = "conv:" + sid
 			}
 		}
-		if sid := normalizedSessionCandidate(root.Get("prompt_cache_key").String()); sid != "" {
+		pck := root.Get("prompt_cache_key")
+		if !pck.Exists() {
+			pck = root.Get("promptCacheKey")
+		}
+		if sid := normalizedSessionCandidate(pck.String()); sid != "" {
 			return "pck:" + sid, conversationID
 		}
 		if conversationID != "" {
@@ -1370,7 +1408,11 @@ func extractExplicitSessionIDs(headers http.Header, payload []byte, metadata map
 			return "user:" + userID, ""
 		}
 		for _, convPath := range []string{"conversation_id", "conversationId", "chat_id", "chatId", "metadata.conversation_id", "extra_body.conversation_id"} {
-			if cid := normalizedSessionCandidate(root.Get(convPath).String()); cid != "" {
+			cid := normalizedSessionCandidate(root.Get(convPath).String())
+			if cid == "" && hasNestedReq {
+				cid = normalizedSessionCandidate(reqRoot.Get(convPath).String())
+			}
+			if cid != "" {
 				if parentIDCandidate != "" && ("conv:"+parentIDCandidate) != ("conv:"+cid) {
 					return "conv:" + cid, "conv:" + parentIDCandidate
 				}

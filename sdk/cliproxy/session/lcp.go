@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 	"github.com/tidwall/gjson"
 )
@@ -83,10 +84,13 @@ func writeFingerprintField(hash interface{ Write([]byte) (int, error) }, value s
 // ExtractCanonicalTurns extracts all logical turns from the five supported inbound protocols.
 // Invalid or empty payloads return an empty slice.
 func ExtractCanonicalTurns(format sdktranslator.Format, payload []byte) []CanonicalTurn {
-	if len(payload) == 0 || !gjson.ValidBytes(payload) {
+	if len(payload) == 0 {
 		return nil
 	}
-	root := gjson.ParseBytes(payload)
+	root := util.ParseGJSONBytesNoCopy(payload)
+	if !root.Exists() {
+		return nil
+	}
 	if format == "" {
 		format = inferCanonicalFormat(root)
 	}
@@ -715,16 +719,37 @@ func (m *MerklePrefixMatcher) Match(namespace string, turns []CanonicalTurn) (Me
 	return m.MatchFingerprints(namespace, fingerprints, minPrefixLength)
 }
 
+func (m *MerklePrefixMatcher) sanitizeFingerprints(fingerprints []string, minPrefixLength int) ([]string, int, bool) {
+	if len(fingerprints) == 0 || minPrefixLength <= 0 || minPrefixLength > len(fingerprints) {
+		return nil, 0, false
+	}
+	maxTurns := m.maxTurns
+	if maxTurns <= 0 {
+		maxTurns = defaultMatcherMaxTurns
+	}
+	if len(fingerprints) > maxTurns {
+		fingerprints = fingerprints[:maxTurns]
+		if minPrefixLength > len(fingerprints) {
+			return nil, 0, false
+		}
+	}
+	return fingerprints, minPrefixLength, true
+}
+
 // MatchFingerprints returns the longest known prefix match without reparsing turns.
 func (m *MerklePrefixMatcher) MatchFingerprints(namespace string, fingerprints []string, minPrefixLength int) (MerklePrefixMatch, bool) {
-	if m == nil || namespace == "" || len(fingerprints) == 0 || minPrefixLength <= 0 || minPrefixLength > len(fingerprints) {
+	if m == nil || namespace == "" {
+		return MerklePrefixMatch{}, false
+	}
+	var ok bool
+	if fingerprints, minPrefixLength, ok = m.sanitizeFingerprints(fingerprints, minPrefixLength); !ok {
 		return MerklePrefixMatch{}, false
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.prepareLocked()
-	match, ok := m.matchLocked(namespace, fingerprints, minPrefixLength, time.Now())
-	if !ok {
+	match, matchOK := m.matchLocked(namespace, fingerprints, minPrefixLength, time.Now())
+	if !matchOK {
 		return MerklePrefixMatch{}, false
 	}
 	return match, true
@@ -738,7 +763,11 @@ func (m *MerklePrefixMatcher) Bind(namespace string, turns []CanonicalTurn, auth
 
 // BindFingerprints records a precomputed request sequence for an auth.
 func (m *MerklePrefixMatcher) BindFingerprints(namespace string, fingerprints []string, minPrefixLength int, authID string) string {
-	if m == nil || strings.TrimSpace(namespace) == "" || strings.TrimSpace(authID) == "" || len(fingerprints) == 0 || minPrefixLength <= 0 || minPrefixLength > len(fingerprints) {
+	if m == nil || strings.TrimSpace(namespace) == "" || strings.TrimSpace(authID) == "" {
+		return ""
+	}
+	var ok bool
+	if fingerprints, minPrefixLength, ok = m.sanitizeFingerprints(fingerprints, minPrefixLength); !ok {
 		return ""
 	}
 	m.mu.Lock()
@@ -755,7 +784,11 @@ func (m *MerklePrefixMatcher) Touch(namespace string, turns []CanonicalTurn, aut
 
 // TouchFingerprints refreshes or binds a precomputed request sequence.
 func (m *MerklePrefixMatcher) TouchFingerprints(namespace string, fingerprints []string, minPrefixLength int, authID string) bool {
-	if m == nil || strings.TrimSpace(namespace) == "" || strings.TrimSpace(authID) == "" || len(fingerprints) == 0 || minPrefixLength <= 0 || minPrefixLength > len(fingerprints) {
+	if m == nil || strings.TrimSpace(namespace) == "" || strings.TrimSpace(authID) == "" {
+		return false
+	}
+	var ok bool
+	if fingerprints, minPrefixLength, ok = m.sanitizeFingerprints(fingerprints, minPrefixLength); !ok {
 		return false
 	}
 	m.mu.Lock()
@@ -774,6 +807,13 @@ func (m *MerklePrefixMatcher) Remove(namespace string, turns []CanonicalTurn, au
 func (m *MerklePrefixMatcher) RemoveFingerprints(namespace string, fingerprints []string, authID string) bool {
 	if m == nil || namespace == "" || authID == "" || len(fingerprints) == 0 {
 		return false
+	}
+	maxTurns := m.maxTurns
+	if maxTurns <= 0 {
+		maxTurns = defaultMatcherMaxTurns
+	}
+	if len(fingerprints) > maxTurns {
+		fingerprints = fingerprints[:maxTurns]
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()

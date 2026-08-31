@@ -49,21 +49,30 @@ func (n *SessionTreeNode) Clone() *SessionTreeNode {
 	return &res
 }
 
+const maxMetadataCloneDepth = 16
+
 func cloneTreeMetadata(metadata map[string]any) map[string]any {
-	if metadata == nil {
+	return cloneTreeMetadataWithDepth(metadata, 0)
+}
+
+func cloneTreeMetadataWithDepth(metadata map[string]any, depth int) map[string]any {
+	if metadata == nil || depth > maxMetadataCloneDepth {
 		return nil
 	}
 	cloned := make(map[string]any, len(metadata))
 	for key, value := range metadata {
-		cloned[key] = cloneTreeMetadataValue(value)
+		cloned[key] = cloneTreeMetadataValueWithDepth(value, depth+1)
 	}
 	return cloned
 }
 
-func cloneTreeMetadataValue(value any) any {
+func cloneTreeMetadataValueWithDepth(value any, depth int) any {
+	if depth > maxMetadataCloneDepth {
+		return nil
+	}
 	switch typed := value.(type) {
 	case map[string]any:
-		return cloneTreeMetadata(typed)
+		return cloneTreeMetadataWithDepth(typed, depth+1)
 	case map[string]string:
 		cloned := make(map[string]string, len(typed))
 		for k, v := range typed {
@@ -73,7 +82,7 @@ func cloneTreeMetadataValue(value any) any {
 	case []any:
 		cloned := make([]any, len(typed))
 		for index, item := range typed {
-			cloned[index] = cloneTreeMetadataValue(item)
+			cloned[index] = cloneTreeMetadataValueWithDepth(item, depth+1)
 		}
 		return cloned
 	case []string:
@@ -231,6 +240,12 @@ func ExtractTreeInfo(headers http.Header, payload []byte, metadata map[string]an
 	// 2. Payload Inspection if headers didn't fully resolve
 	if len(payload) > 0 {
 		root := util.ParseGJSONBytesNoCopy(payload)
+		reqRoot := root
+		req := root.Get("request")
+		hasNestedReq := req.Exists() && !root.Get("contents").Exists()
+		if hasNestedReq {
+			reqRoot = req
+		}
 		var parentCandidate string
 		for _, p := range []string{
 			"parent_session_id", "parentSessionId",
@@ -243,6 +258,12 @@ func ExtractTreeInfo(headers http.Header, payload []byte, metadata map[string]an
 			if val := normalizedSessionCandidate(root.Get(p).String()); val != "" {
 				parentCandidate = val
 				break
+			}
+			if hasNestedReq {
+				if val := normalizedSessionCandidate(reqRoot.Get(p).String()); val != "" {
+					parentCandidate = val
+					break
+				}
 			}
 		}
 		if parentCandidate == "" {
@@ -277,7 +298,11 @@ func ExtractTreeInfo(headers http.Header, payload []byte, metadata map[string]an
 			// Gemini context caching
 			if info.SessionID == "" {
 				for _, cachePath := range []string{"cachedContent", "cached_content"} {
-					if cacheID := normalizedSessionCandidate(root.Get(cachePath).String()); cacheID != "" {
+					cacheID := normalizedSessionCandidate(root.Get(cachePath).String())
+					if cacheID == "" && hasNestedReq {
+						cacheID = normalizedSessionCandidate(reqRoot.Get(cachePath).String())
+					}
+					if cacheID != "" {
 						info.ClientType = "gemini"
 						info.SessionID = "geminicache:" + cacheID
 						if parentCandidate != "" && parentCandidate != cacheID {
@@ -294,7 +319,11 @@ func ExtractTreeInfo(headers http.Header, payload []byte, metadata map[string]an
 			// OpenAI thread in payload
 			if info.SessionID == "" {
 				for _, threadPath := range []string{"thread_id", "threadId", "metadata.thread_id"} {
-					if tid := normalizedSessionCandidate(root.Get(threadPath).String()); tid != "" {
+					tid := normalizedSessionCandidate(root.Get(threadPath).String())
+					if tid == "" && hasNestedReq {
+						tid = normalizedSessionCandidate(reqRoot.Get(threadPath).String())
+					}
+					if tid != "" {
 						info.ClientType = "openai-thread"
 						info.SessionID = "thread:" + tid
 						if parentCandidate != "" && parentCandidate != tid {
@@ -315,7 +344,11 @@ func ExtractTreeInfo(headers http.Header, payload []byte, metadata map[string]an
 					agentID = normalizedSessionCandidate(root.Get("metadata.subagent_id").String())
 				}
 				for _, path := range []string{"session_id", "sessionId", "sessionID", "metadata.session_id", "extra_body.session_id"} {
-					if sid := normalizedSessionCandidate(root.Get(path).String()); sid != "" {
+					sid := normalizedSessionCandidate(root.Get(path).String())
+					if sid == "" && hasNestedReq {
+						sid = normalizedSessionCandidate(reqRoot.Get(path).String())
+					}
+					if sid != "" {
 						info.ClientType = "generic"
 						if agentID != "" && agentID != "main" {
 							info.SessionID = "session:" + sid + ":agent:" + agentID
@@ -341,7 +374,11 @@ func ExtractTreeInfo(headers http.Header, payload []byte, metadata map[string]an
 			// Conversation paths
 			if info.SessionID == "" {
 				for _, convPath := range []string{"conversation_id", "conversationId", "chat_id", "chatId", "metadata.conversation_id", "extra_body.conversation_id"} {
-					if cid := normalizedSessionCandidate(root.Get(convPath).String()); cid != "" {
+					cid := normalizedSessionCandidate(root.Get(convPath).String())
+					if cid == "" && hasNestedReq {
+						cid = normalizedSessionCandidate(reqRoot.Get(convPath).String())
+					}
+					if cid != "" {
 						info.ClientType = "conv"
 						info.SessionID = "conv:" + cid
 						if parentCandidate != "" && parentCandidate != cid {
@@ -775,6 +812,7 @@ func (s *InMemorySessionTreeStore) computeNodeLineageLocked(node *SessionTreeNod
 				newPath = parent.TreePath + "/" + node.SessionID
 				newDepth = parent.TreeDepth + 1
 			} else {
+				s.updateParentIndexLocked(node.SessionID, node.ParentSessionID, "")
 				node.ParentSessionID = ""
 				newRoot = node.SessionID
 				newPath = node.SessionID
