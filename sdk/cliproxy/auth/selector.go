@@ -661,7 +661,6 @@ type SessionAffinitySelector struct {
 	fallback Selector
 	cache    *SessionCache
 	matcher  *cliproxysession.MerklePrefixMatcher
-	trees    *cliproxysession.InMemorySessionTreeStore
 }
 
 // SessionAffinityConfig configures the session affinity selector.
@@ -690,16 +689,13 @@ func NewSessionAffinitySelectorWithConfig(cfg SessionAffinityConfig) *SessionAff
 		fallback: cfg.Fallback,
 		cache:    NewSessionCache(cfg.TTL),
 		matcher:  cliproxysession.NewMerklePrefixMatcher(cfg.TTL),
-		trees:    cliproxysession.NewInMemorySessionTreeStore(0, cfg.TTL),
 	}
 }
 
-// Trees returns the in-memory session tree store.
+// Trees returns a backward-compatible in-memory session tree store.
+// Deprecated: Session tree management has moved to Home.
 func (s *SessionAffinitySelector) Trees() *cliproxysession.InMemorySessionTreeStore {
-	if s == nil {
-		return nil
-	}
-	return s.trees
+	return cliproxysession.NewInMemorySessionTreeStore(0, time.Hour)
 }
 
 // Pick selects an auth with session affinity when possible.
@@ -772,14 +768,6 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 			s.cache.SetAliases(authID, cacheKey, fallbackKey)
 		} else {
 			s.cache.Set(cacheKey, authID)
-		}
-		if s.trees != nil {
-			if treeInfo, ok := cliproxysession.ExtractTreeInfo(opts.Headers, opts.OriginalRequest, opts.Metadata); ok {
-				treeInfo.AuthID = authID
-				treeInfo.Provider = provider
-				treeInfo.Model = model
-				s.trees.RecordNode(treeInfo)
-			}
 		}
 	}
 
@@ -961,9 +949,6 @@ func (s *SessionAffinitySelector) Stop() {
 	}
 	if s.matcher != nil {
 		s.matcher.Clear()
-	}
-	if s.trees != nil {
-		s.trees.Clear()
 	}
 }
 

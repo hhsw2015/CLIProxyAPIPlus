@@ -612,7 +612,7 @@ func TestSessionAffinityExtendedHeadersAndPayloadIdentities(t *testing.T) {
 	}
 }
 
-func TestSessionAffinitySelectorSessionTreeIntegration(t *testing.T) {
+func TestSessionAffinitySelectorSubagentInheritance(t *testing.T) {
 	t.Parallel()
 
 	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
@@ -636,7 +636,7 @@ func TestSessionAffinitySelectorSessionTreeIntegration(t *testing.T) {
 		t.Fatalf("root Pick() error = %v", errRoot)
 	}
 
-	// 2. Subagent 1 Request (Claude Code Subagent)
+	// 2. Subagent 1 Request (Claude Code Subagent) inherits Root Auth
 	sub1Opts := cliproxyexecutor.Options{
 		Headers: http.Header{
 			"X-Claude-Code-Session-Id": []string{"tree-root-sess"},
@@ -652,44 +652,27 @@ func TestSessionAffinitySelectorSessionTreeIntegration(t *testing.T) {
 		t.Fatalf("sub1 Pick() error = %v", errSub1)
 	}
 	if sub1Auth.ID != rootAuth.ID {
-		t.Fatalf("sub1 did not inherit root auth")
+		t.Fatalf("sub1 did not inherit root auth: got %s, want %s", sub1Auth.ID, rootAuth.ID)
 	}
 
-	// 3. Verify SessionTreeStore in selector
-	trees := selector.Trees()
-	if trees == nil {
-		t.Fatalf("expected selector.Trees() to be non-nil")
+	// 3. Subagent 2 Request with explicit parent agent inherits same auth
+	sub2Opts := cliproxyexecutor.Options{
+		Headers: http.Header{
+			"X-Claude-Code-Session-Id":      []string{"tree-root-sess"},
+			"X-Claude-Code-Agent-Id":        []string{"leaf-agent"},
+			"X-Claude-Code-Parent-Agent-Id": []string{"checker-agent"},
+		},
+		OriginalRequest: []byte(`{"messages":[{"role":"user","content":"run leaf checker"}]}`),
+		Metadata: map[string]any{
+			cliproxyexecutor.CallerScopeMetadataKey: "scope-corp",
+		},
 	}
-
-	rootNode, ok := trees.GetNode("claude:tree-root-sess")
-	if !ok || rootNode == nil {
-		t.Fatalf("expected rootNode to be found in trees")
+	sub2Auth, errSub2 := selector.Pick(context.Background(), "claude", "claude-3-7-sonnet", sub2Opts, auths)
+	if errSub2 != nil {
+		t.Fatalf("sub2 Pick() error = %v", errSub2)
 	}
-	if rootNode.TreeDepth != 0 || rootNode.TreePath != "claude:tree-root-sess" {
-		t.Errorf("rootNode hierarchy mismatch: depth=%d path=%q", rootNode.TreeDepth, rootNode.TreePath)
-	}
-	if rootNode.LastAuthID != rootAuth.ID || rootNode.LastProvider != "claude" {
-		t.Errorf("rootNode affinity mismatch: %+v", rootNode)
-	}
-
-	subNode, ok := trees.GetNode("claude:tree-root-sess:agent:checker-agent")
-	if !ok || subNode == nil {
-		t.Fatalf("expected subNode to be found in trees")
-	}
-	if subNode.TreeDepth != 1 || subNode.TreePath != "claude:tree-root-sess/claude:tree-root-sess:agent:checker-agent" {
-		t.Errorf("subNode hierarchy mismatch: depth=%d path=%q", subNode.TreeDepth, subNode.TreePath)
-	}
-	if subNode.ParentSessionID != "claude:tree-root-sess" || subNode.RootSessionID != "claude:tree-root-sess" {
-		t.Errorf("subNode parent/root mismatch: %+v", subNode)
-	}
-
-	// 4. Test GetTree for root
-	fullTree := trees.GetTree("claude:tree-root-sess")
-	if len(fullTree) != 2 {
-		t.Fatalf("GetTree returned %d nodes, want 2", len(fullTree))
-	}
-	if fullTree[0].SessionID != "claude:tree-root-sess" || fullTree[1].SessionID != "claude:tree-root-sess:agent:checker-agent" {
-		t.Errorf("GetTree nodes ordering mismatch: %+v", fullTree)
+	if sub2Auth.ID != rootAuth.ID {
+		t.Fatalf("sub2 did not inherit root auth: got %s, want %s", sub2Auth.ID, rootAuth.ID)
 	}
 }
 
