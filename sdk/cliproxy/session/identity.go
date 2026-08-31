@@ -55,24 +55,41 @@ func NormalizeExplicitID(raw string) string {
 	return raw
 }
 
+// ClaudeMetadataIdentities extracts session_id, parent_session_id, and agent_id from Claude user_id metadata.
+func ClaudeMetadataIdentities(payload []byte) (sessionID, parentSessionID, agentID string) {
+	if len(payload) == 0 {
+		return "", "", ""
+	}
+	root := util.ParseGJSONBytesNoCopy(payload)
+	userID := strings.TrimSpace(root.Get("metadata.user_id").String())
+	if userID == "" {
+		return "", "", ""
+	}
+	if strings.HasPrefix(userID, "{") {
+		parsed := gjson.Parse(userID)
+		sessionID = NormalizeExplicitID(parsed.Get("session_id").String())
+		parentSessionID = NormalizeExplicitID(parsed.Get("parent_session_id").String())
+		agentID = strings.TrimSpace(parsed.Get("agent_id").String())
+		return sessionID, parentSessionID, agentID
+	}
+	if matches := legacyClaudeSessionPattern.FindStringSubmatch(userID); len(matches) >= 2 {
+		return NormalizeExplicitID(matches[1]), "", ""
+	}
+	return "", "", ""
+}
+
 // ClaudeMetadataSessionID extracts the explicit Claude Code session from
 // current JSON metadata or the legacy user_id suffix before bounding the
 // surrounding metadata container.
 func ClaudeMetadataSessionID(payload []byte) string {
-	if len(payload) == 0 {
-		return ""
-	}
-	userID := strings.TrimSpace(gjson.GetBytes(payload, "metadata.user_id").String())
-	if userID == "" {
-		return ""
-	}
-	if strings.HasPrefix(userID, "{") {
-		return NormalizeExplicitID(gjson.Get(userID, "session_id").String())
-	}
-	if matches := legacyClaudeSessionPattern.FindStringSubmatch(userID); len(matches) >= 2 {
-		return NormalizeExplicitID(matches[1])
-	}
-	return ""
+	sessionID, _, _ := ClaudeMetadataIdentities(payload)
+	return sessionID
+}
+
+// ClaudeMetadataParentSessionID extracts parent_session_id from Claude user_id metadata if present.
+func ClaudeMetadataParentSessionID(payload []byte) string {
+	_, parentSessionID, _ := ClaudeMetadataIdentities(payload)
+	return parentSessionID
 }
 
 // CallerScope returns an irreversible namespace for a downstream caller credential.
@@ -133,7 +150,28 @@ func Enrich(req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (clipro
 }
 
 func hasExplicitSession(headers map[string][]string, payload []byte) bool {
-	for _, header := range []string{"X-Claude-Code-Session-Id", "X-Session-ID", "Session-Id", "Session_id", "X-Session-Affinity", "X-Client-Request-Id"} {
+	for _, header := range []string{
+		"X-Claude-Code-Session-Id",
+		"X-Claude-Code-Agent-Id",
+		"X-Claude-Code-Parent-Agent-Id",
+		"Session-Id",
+		"Session_id",
+		"x-codex-parent-thread-id",
+		"X-Codex-Parent-Thread-Id",
+		"X-Http-Session-Id",
+		"X-Session-ID",
+		"X-Session-Affinity",
+		"X-Parent-Session-ID",
+		"X-Parent-Session-Id",
+		"X-Parent-Session-Affinity",
+		"X-Slot-Session-Id",
+		"X-Conversation-Id",
+		"X-Conversation-ID",
+		"X-Thread-Id",
+		"X-Thread-ID",
+		"Thread-Id",
+		"X-Client-Request-Id",
+	} {
 		if NormalizeExplicitID(headerValue(headers, header)) != "" {
 			return true
 		}
@@ -144,7 +182,31 @@ func hasExplicitSession(headers map[string][]string, payload []byte) bool {
 	// Parsing without copying matters here: this runs on every request and the
 	// payload can be multiple megabytes.
 	root := util.ParseGJSONBytesNoCopy(payload)
-	for _, path := range []string{"session_id", "sessionId", "conversation_id", "prompt_cache_key"} {
+	for _, path := range []string{
+		"session_id",
+		"sessionId",
+		"sessionID",
+		"cachedContent",
+		"cached_content",
+		"thread_id",
+		"threadId",
+		"conversation_id",
+		"conversationId",
+		"chat_id",
+		"chatId",
+		"prompt_cache_key",
+		"promptCacheKey",
+		"parent_session_id",
+		"parentSessionId",
+		"parent_thread_id",
+		"parentThreadId",
+		"forked_from_thread_id",
+		"forked_from_id",
+		"metadata.session_id",
+		"metadata.thread_id",
+		"metadata.conversation_id",
+		"extra_body.session_id",
+	} {
 		if NormalizeExplicitID(root.Get(path).String()) != "" {
 			return true
 		}
