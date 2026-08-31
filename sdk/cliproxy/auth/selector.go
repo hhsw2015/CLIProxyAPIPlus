@@ -759,12 +759,13 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 
 	modelKey := canonicalModelKey(model)
 	cacheKey := provider + "::" + primaryID + "::" + modelKey
+	isSubagent := isSubagentSession(primaryID, fallbackID)
 	fallbackKey := ""
 	if fallbackID != "" && fallbackID != primaryID {
 		fallbackKey = provider + "::" + fallbackID + "::" + modelKey
 	}
 	bind := func(authID string) {
-		if fallbackKey != "" {
+		if fallbackKey != "" && !isSubagent {
 			s.cache.SetAliases(authID, cacheKey, fallbackKey)
 		} else {
 			s.cache.Set(cacheKey, authID)
@@ -796,9 +797,11 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 		if cachedAuthID, ok := s.cache.Get(fallbackKey); ok {
 			for _, auth := range available {
 				if auth.ID == cachedAuthID {
-					bind(auth.ID)
-					entry.Infof("session-affinity: fallback cache hit | session=%s fallback=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), truncateSessionID(fallbackID), auth.ID, provider, model)
-					return auth, nil
+					if !isSubagent || allowsSubagentAuthInheritance(auth, model) {
+						bind(auth.ID)
+						entry.Infof("session-affinity: fallback cache hit | session=%s fallback=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), truncateSessionID(fallbackID), auth.ID, provider, model)
+						return auth, nil
+					}
 				}
 			}
 		}
@@ -1021,7 +1024,7 @@ func (s *SessionAffinitySelector) OnResult(res Result) {
 
 	cacheKey := ns + "::" + primaryID + "::" + nsModel
 	var fallbackKey string
-	if fallbackID != "" && fallbackID != primaryID {
+	if fallbackID != "" && fallbackID != primaryID && !isSubagentSession(primaryID, fallbackID) {
 		fallbackKey = ns + "::" + fallbackID + "::" + nsModel
 	}
 	if res.Success {
@@ -1043,6 +1046,39 @@ func (s *SessionAffinitySelector) OnResult(res Result) {
 // implausibly large for routing keys and logs.
 func normalizedSessionCandidate(raw string) string {
 	return cliproxysession.NormalizeExplicitID(raw)
+}
+
+func isSubagentSession(primaryID, fallbackID string) bool {
+	if strings.Contains(primaryID, ":agent:") {
+		return true
+	}
+	if fallbackID == "" || primaryID == "" || primaryID == fallbackID {
+		return false
+	}
+	return isHierarchyParent(primaryID, fallbackID)
+}
+
+func isNonInheritingProvider(provider string) bool {
+	p := strings.ToLower(strings.TrimSpace(provider))
+	return p == "antigravity" || p == "gemini" || p == "vertex" || p == "gemini-vertex" || p == "aistudio" || p == "gemini-interactions" || strings.Contains(p, "antigravity") || strings.Contains(p, "gemini")
+}
+
+func isNonInheritingModel(model string) bool {
+	baseModel := strings.ToLower(strings.TrimSpace(model))
+	if parsed := thinking.ParseSuffix(baseModel); parsed.ModelName != "" {
+		baseModel = strings.ToLower(strings.TrimSpace(parsed.ModelName))
+	}
+	return strings.HasPrefix(baseModel, "gemini-") || strings.HasPrefix(baseModel, "antigravity-")
+}
+
+func allowsSubagentAuthInheritance(auth *Auth, model string) bool {
+	if auth != nil && isNonInheritingProvider(auth.Provider) {
+		return false
+	}
+	if isNonInheritingModel(model) {
+		return false
+	}
+	return true
 }
 
 func sessionHeaderValue(headers http.Header, name string) string {
