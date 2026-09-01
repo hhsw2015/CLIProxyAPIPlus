@@ -89,6 +89,15 @@ func ExtractSessionInfo(headers http.Header, payload []byte, metadata map[string
 	if sid := sessionHeaderValue(headers, "X-Claude-Code-Session-Id"); sid != "" {
 		info.ClientType = "claude"
 		agentID := sessionHeaderValue(headers, "X-Claude-Code-Agent-Id")
+		if agentID == "" && root.Exists() {
+			agentID = normalizedSessionCandidate(root.Get("metadata.agent_id").String())
+			if agentID == "" {
+				agentID = normalizedSessionCandidate(root.Get("metadata.subagent_id").String())
+			}
+		}
+		if agentID == "" {
+			_, _, agentID = ClaudeMetadataIdentities(payload)
+		}
 		parentAgentID := sessionHeaderValue(headers, "X-Claude-Code-Parent-Agent-Id")
 		if agentID != "" && agentID != "main" {
 			info.AgentName = agentID
@@ -114,13 +123,22 @@ func ExtractSessionInfo(headers http.Header, payload []byte, metadata map[string
 	if len(payload) > 0 {
 		if sid, parentSID, agentID := ClaudeMetadataIdentities(payload); sid != "" {
 			info.ClientType = "claude"
+			if agentID == "" {
+				agentID = sessionHeaderValue(headers, "X-Claude-Code-Agent-Id")
+			}
 			if agentID == "" && root.Exists() {
 				agentID = normalizedSessionCandidate(root.Get("metadata.agent_id").String())
+				if agentID == "" {
+					agentID = normalizedSessionCandidate(root.Get("metadata.subagent_id").String())
+				}
 			}
+			parentAgentID := sessionHeaderValue(headers, "X-Claude-Code-Parent-Agent-Id")
 			if agentID != "" && agentID != "main" {
 				info.SessionID = "claude:" + sid + ":agent:" + agentID
 				info.ParentSessionID = "claude:" + sid
-				if parentSID != "" && parentSID != sid {
+				if parentAgentID != "" && parentAgentID != "main" && parentAgentID != agentID {
+					info.ParentSessionID = "claude:" + sid + ":agent:" + parentAgentID
+				} else if parentSID != "" && parentSID != sid {
 					info.ParentSessionID = "claude:" + parentSID
 				} else if parentCandidate != "" && parentCandidate != sid {
 					info.ParentSessionID = "claude:" + parentCandidate
@@ -361,6 +379,12 @@ func ExtractSessionInfo(headers http.Header, payload []byte, metadata map[string
 		agentID := normalizedSessionCandidate(root.Get("metadata.agent_id").String())
 		if agentID == "" {
 			agentID = normalizedSessionCandidate(root.Get("metadata.subagent_id").String())
+		}
+		if agentID == "" {
+			agentID = sessionHeaderValue(headers, "X-Claude-Code-Agent-Id")
+		}
+		if agentID == "" {
+			agentID = sessionHeaderValue(headers, "x-agent-id")
 		}
 		if agentID == "" && hasNestedReq {
 			agentID = normalizedSessionCandidate(reqRoot.Get("metadata.agent_id").String())

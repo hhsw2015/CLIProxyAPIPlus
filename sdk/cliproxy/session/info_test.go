@@ -432,3 +432,32 @@ func TestExtractSessionInfoNestedRequestAgent(t *testing.T) {
 		t.Fatalf("AgentName = %q, want worker-sub", info.AgentName)
 	}
 }
+
+func TestExtractSessionInfoClaudeMetadataUserIDWithAgentHeader(t *testing.T) {
+	t.Parallel()
+
+	headers := http.Header{
+		"X-Claude-Code-Agent-Id": []string{"subagent-uuid-123"},
+	}
+	payload := []byte(`{
+		"metadata": {
+			"user_id": "{\"device_id\":\"dev-1\",\"session_id\":\"main-sess-456\"}"
+		}
+	}`)
+	info, ok := ExtractSessionInfo(headers, payload, nil)
+	if !ok {
+		t.Fatal("ExtractSessionInfo failed on Claude metadata user_id with agent header")
+	}
+	if info.ClientType != "claude" {
+		t.Fatalf("ClientType = %q, want claude", info.ClientType)
+	}
+	if info.SessionID != "claude:main-sess-456:agent:subagent-uuid-123" {
+		t.Fatalf("SessionID = %q, want claude:main-sess-456:agent:subagent-uuid-123", info.SessionID)
+	}
+	if info.ParentSessionID != "claude:main-sess-456" {
+		t.Fatalf("ParentSessionID = %q, want claude:main-sess-456", info.ParentSessionID)
+	}
+	if info.AgentName != "subagent-uuid-123" {
+		t.Fatalf("AgentName = %q, want subagent-uuid-123", info.AgentName)
+	}
+}
