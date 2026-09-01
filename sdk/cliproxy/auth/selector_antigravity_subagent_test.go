@@ -494,3 +494,160 @@ func TestSessionAffinityOtherGoogleProvidersSubagentIsolation(t *testing.T) {
 		})
 	}
 }
+
+func TestSessionAffinityNestedAntigravitySubagentIsolation(t *testing.T) {
+	t.Parallel()
+
+	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
+		Fallback: &RoundRobinSelector{},
+		TTL:      time.Minute,
+	})
+	defer selector.Stop()
+
+	auths := []*Auth{
+		{ID: "auth-ag-1", Provider: "antigravity"},
+		{ID: "auth-ag-2", Provider: "antigravity"},
+	}
+
+	// 1. Parent request with nested request payload binds to auth-ag-1
+	parentOpts := cliproxyexecutor.Options{
+		OriginalRequest: []byte(`{
+			"request": {
+				"sessionId": "root-task"
+			}
+		}`),
+		Metadata: map[string]any{},
+	}
+	parentAuth, errParent := selector.Pick(context.Background(), "antigravity", "gemini-3.7-flash-high", parentOpts, auths)
+	if errParent != nil {
+		t.Fatalf("parent Pick() error = %v", errParent)
+	}
+	if parentAuth.ID != "auth-ag-1" {
+		t.Fatalf("parent auth = %q, want auth-ag-1", parentAuth.ID)
+	}
+	if got := parentOpts.Metadata[cliproxyexecutor.CanonicalSessionIDMetadataKey]; got != "session:root-task" {
+		t.Fatalf("parent canonical session ID = %v, want session:root-task", got)
+	}
+
+	// 2. Subagent 1 request with nested metadata.agent_id must NOT inherit parent's auth-ag-1
+	subagent1Opts := cliproxyexecutor.Options{
+		OriginalRequest: []byte(`{
+			"request": {
+				"sessionId": "root-task",
+				"metadata": {
+					"agent_id": "worker-1"
+				}
+			}
+		}`),
+		Metadata: map[string]any{},
+	}
+	subagent1Auth, errSub1 := selector.Pick(context.Background(), "antigravity", "gemini-3.7-flash-high", subagent1Opts, auths)
+	if errSub1 != nil {
+		t.Fatalf("subagent 1 Pick() error = %v", errSub1)
+	}
+	if subagent1Auth.ID == parentAuth.ID {
+		t.Fatalf("subagent 1 incorrectly inherited parent auth %q; should be isolated to prevent 429 rate limit", parentAuth.ID)
+	}
+	if subagent1Auth.ID != "auth-ag-2" {
+		t.Fatalf("subagent 1 auth = %q, want auth-ag-2", subagent1Auth.ID)
+	}
+	if got := subagent1Opts.Metadata[cliproxyexecutor.CanonicalSessionIDMetadataKey]; got != "session:root-task:agent:worker-1" {
+		t.Fatalf("subagent 1 canonical session ID = %v, want session:root-task:agent:worker-1", got)
+	}
+
+	// 3. Subagent 1 turn 2 must stay sticky to auth-ag-2
+	subagent1Turn2Opts := cliproxyexecutor.Options{
+		OriginalRequest: []byte(`{
+			"request": {
+				"sessionId": "root-task",
+				"metadata": {
+					"agent_id": "worker-1"
+				}
+			}
+		}`),
+		Metadata: map[string]any{},
+	}
+	subagent1Turn2Auth, errSub1Turn2 := selector.Pick(context.Background(), "antigravity", "gemini-3.7-flash-high", subagent1Turn2Opts, auths)
+	if errSub1Turn2 != nil {
+		t.Fatalf("subagent 1 turn 2 Pick() error = %v", errSub1Turn2)
+	}
+	if subagent1Turn2Auth.ID != "auth-ag-2" {
+		t.Fatalf("subagent 1 turn 2 did not stay sticky: got %q, want auth-ag-2", subagent1Turn2Auth.ID)
+	}
+
+	// 4. Subagent 2 request with metadata.subagent_id must select next available credential (auth-ag-1)
+	subagent2Opts := cliproxyexecutor.Options{
+		OriginalRequest: []byte(`{
+			"request": {
+				"sessionId": "root-task",
+				"metadata": {
+					"subagent_id": "worker-2"
+				}
+			}
+		}`),
+		Metadata: map[string]any{},
+	}
+	subagent2Auth, errSub2 := selector.Pick(context.Background(), "antigravity", "gemini-3.7-flash-high", subagent2Opts, auths)
+	if errSub2 != nil {
+		t.Fatalf("subagent 2 Pick() error = %v", errSub2)
+	}
+	if subagent2Auth.ID != "auth-ag-1" {
+		t.Fatalf("subagent 2 auth = %q, want auth-ag-1", subagent2Auth.ID)
+	}
+
+	// 5. Parent second turn must stay sticky to auth-ag-1
+	parentTurn2Opts := cliproxyexecutor.Options{
+		OriginalRequest: []byte(`{
+			"request": {
+				"sessionId": "root-task"
+			}
+		}`),
+		Metadata: map[string]any{},
+	}
+	parentTurn2Auth, errParent2 := selector.Pick(context.Background(), "antigravity", "gemini-3.7-flash-high", parentTurn2Opts, auths)
+	if errParent2 != nil {
+		t.Fatalf("parent turn 2 Pick() error = %v", errParent2)
+	}
+	if parentTurn2Auth.ID != "auth-ag-1" {
+		t.Fatalf("parent turn 2 auth = %q, want auth-ag-1", parentTurn2Auth.ID)
+	}
+}
+
+func TestSessionAffinityNestedGeminiProviderSubagentIsolation(t *testing.T) {
+	t.Parallel()
+
+	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
+		Fallback: &RoundRobinSelector{},
+		TTL:      time.Minute,
+	})
+	defer selector.Stop()
+
+	auths := []*Auth{
+		{ID: "gemini-auth-1", Provider: "gemini"},
+		{ID: "gemini-auth-2", Provider: "gemini"},
+	}
+
+	parentOpts := cliproxyexecutor.Options{
+		OriginalRequest: []byte(`{"request":{"sessionId":"gemini-root"}}`),
+		Metadata:        map[string]any{},
+	}
+	parentAuth, errParent := selector.Pick(context.Background(), "gemini", "gemini-2.5-pro", parentOpts, auths)
+	if errParent != nil {
+		t.Fatalf("parent Pick() error = %v", errParent)
+	}
+	if parentAuth.ID != "gemini-auth-1" {
+		t.Fatalf("parent auth = %q, want gemini-auth-1", parentAuth.ID)
+	}
+
+	subOpts := cliproxyexecutor.Options{
+		OriginalRequest: []byte(`{"request":{"sessionId":"gemini-root","metadata":{"agent_id":"gemini-worker"}}}`),
+		Metadata:        map[string]any{},
+	}
+	subAuth, errSub := selector.Pick(context.Background(), "gemini", "gemini-2.5-pro", subOpts, auths)
+	if errSub != nil {
+		t.Fatalf("subagent Pick() error = %v", errSub)
+	}
+	if subAuth.ID != "gemini-auth-2" {
+		t.Fatalf("subagent incorrectly picked parent gemini auth: got %q, want gemini-auth-2", subAuth.ID)
+	}
+}

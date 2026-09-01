@@ -1359,12 +1359,14 @@ func extractExplicitSessionIDs(headers http.Header, payload []byte, metadata map
 
 	// Extract parent candidate from payload once if payload is non-empty
 	var root gjson.Result
+	var reqRoot gjson.Result
+	var hasNestedReq bool
 	var parentIDCandidate string
 	if len(payload) > 0 {
 		root = util.ParseGJSONBytesNoCopy(payload)
-		reqRoot := root
+		reqRoot = root
 		req := root.Get("request")
-		hasNestedReq := req.Exists() && !root.Get("contents").Exists()
+		hasNestedReq = req.Exists() && !root.Get("contents").Exists()
 		if hasNestedReq {
 			reqRoot = req
 		}
@@ -1400,6 +1402,12 @@ func extractExplicitSessionIDs(headers http.Header, payload []byte, metadata map
 			if agentID == "" {
 				agentID = normalizedSessionCandidate(root.Get("metadata.subagent_id").String())
 			}
+			if agentID == "" && hasNestedReq {
+				agentID = normalizedSessionCandidate(reqRoot.Get("metadata.agent_id").String())
+				if agentID == "" {
+					agentID = normalizedSessionCandidate(reqRoot.Get("metadata.subagent_id").String())
+				}
+			}
 		}
 		if agentID == "" {
 			_, _, agentID = cliproxysession.ClaudeMetadataIdentities(payload)
@@ -1429,6 +1437,12 @@ func extractExplicitSessionIDs(headers http.Header, payload []byte, metadata map
 			agentID = normalizedSessionCandidate(root.Get("metadata.agent_id").String())
 			if agentID == "" {
 				agentID = normalizedSessionCandidate(root.Get("metadata.subagent_id").String())
+			}
+			if agentID == "" && hasNestedReq {
+				agentID = normalizedSessionCandidate(reqRoot.Get("metadata.agent_id").String())
+				if agentID == "" {
+					agentID = normalizedSessionCandidate(reqRoot.Get("metadata.subagent_id").String())
+				}
 			}
 		}
 		parentAgentID := sessionHeaderValue(headers, "X-Claude-Code-Parent-Agent-Id")
@@ -1618,6 +1632,12 @@ func extractExplicitSessionIDs(headers http.Header, payload []byte, metadata map
 		if agentID == "" {
 			agentID = sessionHeaderValue(headers, "x-agent-id")
 		}
+		if agentID == "" && hasNestedReq {
+			agentID = normalizedSessionCandidate(reqRoot.Get("metadata.agent_id").String())
+			if agentID == "" {
+				agentID = normalizedSessionCandidate(reqRoot.Get("metadata.subagent_id").String())
+			}
+		}
 		for _, path := range []string{"session_id", "sessionId", "sessionID", "metadata.session_id", "extra_body.session_id"} {
 			sid := normalizedSessionCandidate(root.Get(path).String())
 			if sid == "" && hasNestedReq {
@@ -1651,12 +1671,18 @@ func extractExplicitSessionIDs(headers http.Header, payload []byte, metadata map
 				conversationID = "conv:" + sid
 			}
 		}
-		pck := root.Get("prompt_cache_key")
-		if !pck.Exists() {
-			pck = root.Get("promptCacheKey")
+		pck := normalizedSessionCandidate(root.Get("prompt_cache_key").String())
+		if pck == "" {
+			pck = normalizedSessionCandidate(root.Get("promptCacheKey").String())
 		}
-		if sid := normalizedSessionCandidate(pck.String()); sid != "" {
-			return "pck:" + sid, conversationID
+		if pck == "" && hasNestedReq {
+			pck = normalizedSessionCandidate(reqRoot.Get("prompt_cache_key").String())
+			if pck == "" {
+				pck = normalizedSessionCandidate(reqRoot.Get("promptCacheKey").String())
+			}
+		}
+		if pck != "" {
+			return "pck:" + pck, conversationID
 		}
 		if conversationID != "" {
 			if parentIDCandidate != "" && ("conv:"+parentIDCandidate) != conversationID {
@@ -1664,7 +1690,11 @@ func extractExplicitSessionIDs(headers http.Header, payload []byte, metadata map
 			}
 			return conversationID, ""
 		}
-		if userID := normalizedSessionCandidate(root.Get("metadata.user_id").String()); userID != "" {
+		userID := normalizedSessionCandidate(root.Get("metadata.user_id").String())
+		if userID == "" && hasNestedReq {
+			userID = normalizedSessionCandidate(reqRoot.Get("metadata.user_id").String())
+		}
+		if userID != "" {
 			return "user:" + userID, ""
 		}
 		for _, convPath := range []string{"conversation_id", "conversationId", "chat_id", "chatId", "metadata.conversation_id", "extra_body.conversation_id"} {

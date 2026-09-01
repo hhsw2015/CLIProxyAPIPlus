@@ -94,6 +94,12 @@ func ExtractSessionInfo(headers http.Header, payload []byte, metadata map[string
 			if agentID == "" {
 				agentID = normalizedSessionCandidate(root.Get("metadata.subagent_id").String())
 			}
+			if agentID == "" && hasNestedReq {
+				agentID = normalizedSessionCandidate(reqRoot.Get("metadata.agent_id").String())
+				if agentID == "" {
+					agentID = normalizedSessionCandidate(reqRoot.Get("metadata.subagent_id").String())
+				}
+			}
 		}
 		if agentID == "" {
 			_, _, agentID = ClaudeMetadataIdentities(payload)
@@ -130,6 +136,12 @@ func ExtractSessionInfo(headers http.Header, payload []byte, metadata map[string
 				agentID = normalizedSessionCandidate(root.Get("metadata.agent_id").String())
 				if agentID == "" {
 					agentID = normalizedSessionCandidate(root.Get("metadata.subagent_id").String())
+				}
+				if agentID == "" && hasNestedReq {
+					agentID = normalizedSessionCandidate(reqRoot.Get("metadata.agent_id").String())
+					if agentID == "" {
+						agentID = normalizedSessionCandidate(reqRoot.Get("metadata.subagent_id").String())
+					}
 				}
 			}
 			parentAgentID := sessionHeaderValue(headers, "X-Claude-Code-Parent-Agent-Id")
@@ -433,13 +445,19 @@ func ExtractSessionInfo(headers http.Header, payload []byte, metadata map[string
 				conversationID = "conv:" + sid
 			}
 		}
-		pck := root.Get("prompt_cache_key")
-		if !pck.Exists() {
-			pck = root.Get("promptCacheKey")
+		pck := normalizedSessionCandidate(root.Get("prompt_cache_key").String())
+		if pck == "" {
+			pck = normalizedSessionCandidate(root.Get("promptCacheKey").String())
 		}
-		if sid := normalizedSessionCandidate(pck.String()); sid != "" {
+		if pck == "" && hasNestedReq {
+			pck = normalizedSessionCandidate(reqRoot.Get("prompt_cache_key").String())
+			if pck == "" {
+				pck = normalizedSessionCandidate(reqRoot.Get("promptCacheKey").String())
+			}
+		}
+		if pck != "" {
 			info.ClientType = "generic"
-			info.SessionID = "pck:" + sid
+			info.SessionID = "pck:" + pck
 			if conversationID != "" {
 				info.ParentSessionID = conversationID
 				info.AgentName = "subagent"
@@ -461,7 +479,11 @@ func ExtractSessionInfo(headers http.Header, payload []byte, metadata map[string
 		}
 
 		// Plain metadata.user_id
-		if userID := normalizedSessionCandidate(root.Get("metadata.user_id").String()); userID != "" {
+		userID := normalizedSessionCandidate(root.Get("metadata.user_id").String())
+		if userID == "" && hasNestedReq {
+			userID = normalizedSessionCandidate(reqRoot.Get("metadata.user_id").String())
+		}
+		if userID != "" {
 			info.ClientType = "generic"
 			info.SessionID = "user:" + userID
 			info.AgentName = "main"
