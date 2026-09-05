@@ -639,8 +639,14 @@ func isAuthBlockedForModel(auth *Auth, model string, now time.Time) (bool, block
 	// for observability — the selector must not treat it as blocking or the
 	// caller sees auth_unavailable until process restart. StatusDisabled is
 	// still respected above; everything else here is a soft signal we drop.
+	// (mirage/pool auths carry no JWT access token, so the expiry check below
+	// is a no-op for them anyway.)
 	if v, ok := auth.DisableCoolingOverride(); ok && v {
 		return false, blockReasonNone, time.Time{}
+	}
+	// An expired access token blocks the auth until a refresh succeeds.
+	if exp, ok := auth.AccessTokenExpirationTime(); ok && !exp.IsZero() && !exp.After(now) {
+		return true, blockReasonOther, time.Time{}
 	}
 	// Credential-scoped quota (e.g. Anthropic unified 5h/7d limit) blocks the
 	// whole credential across models until it recovers.
@@ -682,7 +688,15 @@ func isAuthBlockedForModel(auth *Auth, model string, now time.Time) (bool, block
 		}
 		return availabilityBlock(auth.Unavailable, auth.Quota.Exceeded, auth.NextRetryAfter, auth.Quota.NextRecoverAt, now)
 	}
-	return availabilityBlock(auth.Unavailable, auth.Quota.Exceeded, auth.NextRetryAfter, auth.Quota.NextRecoverAt, now)
+	quotaExceeded := auth.Quota.Exceeded
+	// When model is empty and the credential has individual model states, auth.Quota.Exceeded
+	// is an aggregate of single-model quota cooldowns (reason "quota"). As long as the credential
+	// itself is not unavailable (not all models failed) and not under a credential-wide quota,
+	// do not treat individual model cooldowns as blocking the entire credential.
+	if len(auth.ModelStates) > 0 && auth.Quota.Reason != "credential_quota" && !auth.Unavailable {
+		quotaExceeded = false
+	}
+	return availabilityBlock(auth.Unavailable, quotaExceeded, auth.NextRetryAfter, auth.Quota.NextRecoverAt, now)
 }
 
 func availabilityBlock(unavailable, quotaExceeded bool, nextRetryAfter, nextRecoverAt, now time.Time) (bool, blockReason, time.Time) {
