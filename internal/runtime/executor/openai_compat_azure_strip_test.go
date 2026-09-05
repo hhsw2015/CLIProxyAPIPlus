@@ -31,7 +31,7 @@ func TestIsAzureOpenAIBaseURL(t *testing.T) {
 func TestStripReasoningEffortIfToolsPresent(t *testing.T) {
 	t.Run("no tools = no-op", func(t *testing.T) {
 		in := []byte(`{"model":"gpt-5.6-sol","reasoning_effort":"xhigh","messages":[]}`)
-		out := stripReasoningEffortIfToolsPresent(in)
+		out := stripReasoningEffortIfToolsPresent(in, "")
 		if !gjson.GetBytes(out, "reasoning_effort").Exists() {
 			t.Fatal("reasoning_effort was stripped despite no tools present")
 		}
@@ -39,7 +39,7 @@ func TestStripReasoningEffortIfToolsPresent(t *testing.T) {
 
 	t.Run("tools + reasoning_effort strips reasoning_effort", func(t *testing.T) {
 		in := []byte(`{"model":"gpt-5.6-sol","reasoning_effort":"xhigh","tools":[{"type":"function","function":{"name":"f"}}],"messages":[]}`)
-		out := stripReasoningEffortIfToolsPresent(in)
+		out := stripReasoningEffortIfToolsPresent(in, "")
 		if gjson.GetBytes(out, "reasoning_effort").Exists() {
 			t.Errorf("reasoning_effort should have been removed, got: %s", out)
 		}
@@ -50,7 +50,7 @@ func TestStripReasoningEffortIfToolsPresent(t *testing.T) {
 
 	t.Run("tools + reasoning.effort object with only effort strips whole reasoning", func(t *testing.T) {
 		in := []byte(`{"model":"gpt-5.6-sol","reasoning":{"effort":"high"},"tools":[{"type":"function"}]}`)
-		out := stripReasoningEffortIfToolsPresent(in)
+		out := stripReasoningEffortIfToolsPresent(in, "")
 		if gjson.GetBytes(out, "reasoning").Exists() {
 			t.Errorf("reasoning should be removed when it only contained effort, got: %s", out)
 		}
@@ -58,7 +58,7 @@ func TestStripReasoningEffortIfToolsPresent(t *testing.T) {
 
 	t.Run("tools + reasoning object with other fields keeps siblings", func(t *testing.T) {
 		in := []byte(`{"tools":[{"type":"function"}],"reasoning":{"effort":"high","summary":"auto"}}`)
-		out := stripReasoningEffortIfToolsPresent(in)
+		out := stripReasoningEffortIfToolsPresent(in, "")
 		if gjson.GetBytes(out, "reasoning.effort").Exists() {
 			t.Error("reasoning.effort should have been removed")
 		}
@@ -70,17 +70,43 @@ func TestStripReasoningEffortIfToolsPresent(t *testing.T) {
 	t.Run("tools without any reasoning field = no-op", func(t *testing.T) {
 		in := []byte(`{"model":"gpt-5.6-sol","tools":[{"type":"function"}],"messages":[]}`)
 		before := string(in)
-		out := stripReasoningEffortIfToolsPresent(in)
+		out := stripReasoningEffortIfToolsPresent(in, "")
 		if string(out) != before {
 			t.Errorf("unexpected mutation: %s -> %s", before, out)
 		}
 	})
 
+	// gpt-6 must force reasoning_effort to "none" (deleting it is not enough:
+	// gpt-6 defaults to a non-none effort upstream and rejects tools then).
+	t.Run("gpt-6 via base URL forces reasoning_effort=none (had explicit effort)", func(t *testing.T) {
+		in := []byte(`{"reasoning_effort":"high","tools":[{"type":"function"}]}`)
+		out := stripReasoningEffortIfToolsPresent(in, "https://x.openai.azure.com/openai/deployments/gpt-6-astra/chat/completions")
+		if v := gjson.GetBytes(out, "reasoning_effort"); v.String() != "none" {
+			t.Errorf("reasoning_effort = %q, want \"none\"; body: %s", v.String(), out)
+		}
+	})
+
+	t.Run("gpt-6 forces reasoning_effort=none when field absent", func(t *testing.T) {
+		in := []byte(`{"model":"gpt-6-astra","tools":[{"type":"function"}],"messages":[]}`)
+		out := stripReasoningEffortIfToolsPresent(in, "")
+		if v := gjson.GetBytes(out, "reasoning_effort"); v.String() != "none" {
+			t.Errorf("reasoning_effort = %q, want \"none\"; body: %s", v.String(), out)
+		}
+	})
+
+	t.Run("gpt-6 no tools = no-op even with effort", func(t *testing.T) {
+		in := []byte(`{"model":"gpt-6-astra","reasoning_effort":"high","messages":[]}`)
+		out := stripReasoningEffortIfToolsPresent(in, "https://x.openai.azure.com/openai/deployments/gpt-6-astra/chat/completions")
+		if v := gjson.GetBytes(out, "reasoning_effort"); v.String() != "high" {
+			t.Errorf("reasoning_effort should be untouched without tools, got %q", v.String())
+		}
+	})
+
 	t.Run("empty payload", func(t *testing.T) {
-		if got := stripReasoningEffortIfToolsPresent(nil); got != nil {
+		if got := stripReasoningEffortIfToolsPresent(nil, ""); got != nil {
 			t.Errorf("nil input should stay nil, got %v", got)
 		}
-		if got := stripReasoningEffortIfToolsPresent([]byte{}); len(got) != 0 {
+		if got := stripReasoningEffortIfToolsPresent([]byte{}, ""); len(got) != 0 {
 			t.Errorf("empty input should stay empty, got %v", got)
 		}
 	})

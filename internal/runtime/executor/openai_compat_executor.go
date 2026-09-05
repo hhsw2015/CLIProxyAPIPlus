@@ -165,13 +165,13 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	}
 
 	// Azure chat/completions rejects `reasoning_effort` when `tools` is also
-	// present (any gpt-5.x variant). The model still uses its built-in reasoning
-	// at default level, so silently dropping the field keeps the request valid.
-	// We detect by base URL + endpoint shape rather than model name so future
-	// gpt-5.x/6.x tiers work without a code change. Azure `/responses` (once GA)
-	// accepts both fields together, so we only strip on the chat/completions path.
+	// present. gpt-5.x tolerates the field being dropped; gpt-6 needs it forced
+	// to "none" (see stripReasoningEffortIfToolsPresent). We detect by base URL
+	// + endpoint shape; the gpt-6 tier is further keyed off the deployment name.
+	// Azure `/responses` (once GA) accepts both fields together, so we only
+	// reconcile on the chat/completions path.
 	if isAzureOpenAIBaseURL(baseURL) && strings.Contains(endpoint, "/chat/completions") {
-		translated = stripReasoningEffortIfToolsPresent(translated)
+		translated = stripReasoningEffortIfToolsPresent(translated, baseURL)
 		translated = renameMaxTokensForReasoningModels(translated)
 	}
 
@@ -426,7 +426,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	// Azure chat/completions rejects `reasoning_effort` + `tools` combo. Same
 	// guard as the non-stream Execute path — see stripReasoningEffortIfToolsPresent.
 	if isAzureOpenAIBaseURL(baseURL) && strings.Contains(streamEndpoint, "/chat/completions") {
-		translated = stripReasoningEffortIfToolsPresent(translated)
+		translated = stripReasoningEffortIfToolsPresent(translated, baseURL)
 		translated = renameMaxTokensForReasoningModels(translated)
 	}
 
@@ -1107,48 +1107,69 @@ func isAzureOpenAIBaseURL(baseURL string) bool {
 	return false
 }
 
-// stripReasoningEffortIfToolsPresent removes `reasoning_effort` and the
-// structured `reasoning.effort` field when the payload declares any tools.
-// Azure chat/completions returns HTTP 400 "Function tools with reasoning_effort
-// are not supported" for that combination on every gpt-5.x reasoning model.
-// The model still applies its built-in reasoning at the default level, so
-// silently dropping the field preserves correctness for callers (Codex, chat
-// clients) that always attach a default reasoning effort.
-func stripReasoningEffortIfToolsPresent(body []byte) []byte {
+// stripReasoningEffortIfToolsPresent reconciles `reasoning_effort` with tool
+// use on Azure chat/completions, where the two are rejected together:
+//
+//   - gpt-5.x reasoning models: dropping the field entirely is accepted; the
+//     model still applies its built-in reasoning at the default level.
+//   - gpt-6 reasoning models: dropping is NOT enough. A gpt-6 request with
+//     tools and no reasoning_effort still defaults to a non-"none" effort
+//     upstream and is rejected with HTTP 400. It only succeeds when
+//     reasoning_effort is EXPLICITLY "none", so for gpt-6 we force that value
+//     instead of deleting the field.
+//
+// The gpt-6 tier is detected from the Azure deployment name in the base URL
+// (reliable — Azure carries the deployment in the path) with the body `model`
+// as a fallback. Callers (Codex, chat clients) that always attach a default
+// reasoning effort thus keep working across tiers without client changes.
+func stripReasoningEffortIfToolsPresent(body []byte, baseURL string) []byte {
 	if len(body) == 0 {
 		return body
 	}
 	if !gjson.GetBytes(body, "tools").Exists() {
 		return body
 	}
+	hint := strings.ToLower(baseURL + " " + gjson.GetBytes(body, "model").String())
+	if strings.Contains(hint, "gpt-6") {
+		// gpt-6: must be explicitly "none" (absent -> non-none default -> 400).
+		out, _ := sjson.SetBytes(body, "reasoning_effort", "none")
+		return deleteStructuredReasoningEffort(out)
+	}
+	// gpt-5.x and earlier: dropping the field entirely is accepted.
 	stripped := body
 	if gjson.GetBytes(stripped, "reasoning_effort").Exists() {
 		stripped, _ = sjson.DeleteBytes(stripped, "reasoning_effort")
 	}
-	if gjson.GetBytes(stripped, "reasoning.effort").Exists() {
-		// Delete the whole `reasoning` object if that is its only field, else
-		// only the .effort child. This mirrors what the OpenAI SDK does when
-		// callers omit the field entirely.
-		reasoningNode := gjson.GetBytes(stripped, "reasoning")
-		if reasoningNode.IsObject() {
-			keepOthers := false
-			reasoningNode.ForEach(func(k, _ gjson.Result) bool {
-				if k.String() != "effort" {
-					keepOthers = true
-					return false
-				}
-				return true
-			})
-			if keepOthers {
-				stripped, _ = sjson.DeleteBytes(stripped, "reasoning.effort")
-			} else {
-				stripped, _ = sjson.DeleteBytes(stripped, "reasoning")
-			}
-		} else {
-			stripped, _ = sjson.DeleteBytes(stripped, "reasoning.effort")
-		}
+	return deleteStructuredReasoningEffort(stripped)
+}
+
+// deleteStructuredReasoningEffort removes the OpenAI Responses-style
+// `reasoning.effort` field, dropping the whole `reasoning` object when that is
+// its only child. Mirrors what the OpenAI SDK emits when callers omit the
+// field entirely.
+func deleteStructuredReasoningEffort(body []byte) []byte {
+	if !gjson.GetBytes(body, "reasoning.effort").Exists() {
+		return body
 	}
-	return stripped
+	reasoningNode := gjson.GetBytes(body, "reasoning")
+	if reasoningNode.IsObject() {
+		keepOthers := false
+		reasoningNode.ForEach(func(k, _ gjson.Result) bool {
+			if k.String() != "effort" {
+				keepOthers = true
+				return false
+			}
+			return true
+		})
+		if keepOthers {
+			body, _ = sjson.DeleteBytes(body, "reasoning.effort")
+		} else {
+			body, _ = sjson.DeleteBytes(body, "reasoning")
+		}
+	} else {
+		body, _ = sjson.DeleteBytes(body, "reasoning.effort")
+	}
+	return body
 }
 
 // renameMaxTokensForReasoningModels rewrites the legacy `max_tokens` field to
