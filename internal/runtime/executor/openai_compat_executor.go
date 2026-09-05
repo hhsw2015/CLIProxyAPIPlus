@@ -109,6 +109,21 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 		to = sdktranslator.FromString("openai-response")
 		endpoint = "/responses/compact"
 	}
+	// responses-format channels translate to the OpenAI Responses API. Read it
+	// from the resolved compat config (reliable) with the auth attribute as a
+	// fallback; see the ExecuteStream path for why the attribute alone is not
+	// sufficient. Without this the body stayed in chat form and `messages` was
+	// posted to a /responses endpoint (Azure 400).
+	responsesFormat := auth != nil && auth.Attributes != nil && auth.Attributes["responses_format"] == "true"
+	if !responsesFormat {
+		if compat := e.resolveCompatConfig(auth); compat != nil && compat.ResponsesFormat {
+			responsesFormat = true
+		}
+	}
+	if responsesFormat && opts.Alt != "responses/compact" {
+		to = sdktranslator.FromString("openai-response")
+		endpoint = "/responses"
+	}
 	// Honor provider's endpoint-path override (e.g. relays that mount the
 	// OpenAI API under /v1/chat/completions instead of /chat/completions).
 	if compat := e.resolveCompatConfig(auth); compat != nil && strings.TrimSpace(compat.EndpointPath) != "" {
@@ -362,7 +377,18 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	from := opts.SourceFormat
 	responseFormat := cliproxyexecutor.ResponseFormatOrSource(opts)
 	to := sdktranslator.FromString("openai")
+	// Detect responses-format from the resolved compat config (same source as
+	// the endpoint-path override below) with the auth attribute as a fallback.
+	// The attribute alone is unreliable: a scheduled/cached auth can carry
+	// config_index (so resolveCompatConfig still matches and picks /responses)
+	// while dropping responses_format, which left the body in chat form and
+	// sent `messages` to a /responses endpoint (Azure 400).
 	responsesFormat := auth != nil && auth.Attributes != nil && auth.Attributes["responses_format"] == "true"
+	if !responsesFormat {
+		if compat := e.resolveCompatConfig(auth); compat != nil && compat.ResponsesFormat {
+			responsesFormat = true
+		}
+	}
 	if responsesFormat {
 		to = sdktranslator.FromString("openai-response")
 	}
