@@ -430,7 +430,15 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 
 	// Request usage data in the final streaming chunk so that token statistics
 	// are captured even when the upstream is an OpenAI-compatible provider.
-	translated = helps.SetBoolIfDifferent(translated, "stream_options.include_usage", true)
+	// stream_options is a chat/completions parameter; the Responses API reports
+	// usage in its own response.completed event and rejects stream_options as an
+	// unknown parameter (Azure 400), so only set it off the responses path and
+	// drop any that a client (e.g. Codex) attached to a responses request.
+	if responsesFormat {
+		translated, _ = sjson.DeleteBytes(translated, "stream_options")
+	} else {
+		translated = helps.SetBoolIfDifferent(translated, "stream_options.include_usage", true)
+	}
 	reporter.SetTranslatedReasoningEffort(translated, to.String())
 
 	// context_management drop (see Execute path for full comment).
