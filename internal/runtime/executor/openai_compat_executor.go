@@ -174,6 +174,10 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 		translated = stripReasoningEffortIfToolsPresent(translated, baseURL)
 		translated = renameMaxTokensForReasoningModels(translated)
 	}
+	// Azure /responses rejects Codex-only passthrough fields with HTTP 400.
+	if isAzureOpenAIBaseURL(baseURL) && strings.Contains(endpoint, "/responses") {
+		translated = stripCodexInternalResponsesFields(translated)
+	}
 
 	url := strings.TrimSuffix(baseURL, "/") + endpoint
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(translated))
@@ -428,6 +432,10 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	if isAzureOpenAIBaseURL(baseURL) && strings.Contains(streamEndpoint, "/chat/completions") {
 		translated = stripReasoningEffortIfToolsPresent(translated, baseURL)
 		translated = renameMaxTokensForReasoningModels(translated)
+	}
+	// Azure /responses rejects Codex-only passthrough fields with HTTP 400.
+	if isAzureOpenAIBaseURL(baseURL) && strings.Contains(streamEndpoint, "/responses") {
+		translated = stripCodexInternalResponsesFields(translated)
 	}
 
 	url := strings.TrimSuffix(baseURL, "/") + streamEndpoint
@@ -1170,6 +1178,36 @@ func deleteStructuredReasoningEffort(body []byte) []byte {
 		body, _ = sjson.DeleteBytes(body, "reasoning.effort")
 	}
 	return body
+}
+
+// stripCodexInternalResponsesFields removes Codex-only passthrough fields from
+// Responses API `input[]` items that Azure's /responses endpoint rejects with
+// HTTP 400 "Unknown parameter". Codex attaches
+// `internal_chat_message_metadata_passthrough` (and its nested
+// `content_item_kinds`) to every input item for its own bookkeeping against
+// OpenAI; Azure does not accept it. Real OpenAI does, so callers should only
+// invoke this when the upstream is Azure. The field is codex-internal
+// metadata, not conversation content, so dropping it upstream is safe.
+func stripCodexInternalResponsesFields(body []byte) []byte {
+	if len(body) == 0 {
+		return body
+	}
+	input := gjson.GetBytes(body, "input")
+	if !input.IsArray() {
+		return body
+	}
+	out := body
+	idx := 0
+	input.ForEach(func(_, item gjson.Result) bool {
+		if item.Get("internal_chat_message_metadata_passthrough").Exists() {
+			// Array length is unchanged (deleting a field within an item), so
+			// indices stay stable across iterations.
+			out, _ = sjson.DeleteBytes(out, "input."+strconv.Itoa(idx)+".internal_chat_message_metadata_passthrough")
+		}
+		idx++
+		return true
+	})
+	return out
 }
 
 // renameMaxTokensForReasoningModels rewrites the legacy `max_tokens` field to

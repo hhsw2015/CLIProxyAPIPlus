@@ -102,6 +102,25 @@ func TestStripReasoningEffortIfToolsPresent(t *testing.T) {
 		}
 	})
 
+	t.Run("codex internal passthrough stripped from responses input", func(t *testing.T) {
+		in := []byte(`{"model":"gpt-6-astra","input":[{"role":"user","content":"hi"},{"role":"assistant","content":"ok","internal_chat_message_metadata_passthrough":{"content_item_kinds":["text"]}}]}`)
+		out := stripCodexInternalResponsesFields(in)
+		if gjson.GetBytes(out, "input.1.internal_chat_message_metadata_passthrough").Exists() {
+			t.Errorf("passthrough field should be stripped, got: %s", out)
+		}
+		if gjson.GetBytes(out, "input.0.content").String() != "hi" || gjson.GetBytes(out, "input.1.content").String() != "ok" {
+			t.Errorf("conversation content must be preserved, got: %s", out)
+		}
+	})
+
+	t.Run("no input array = no-op for codex strip", func(t *testing.T) {
+		in := []byte(`{"model":"x","messages":[{"role":"user","content":"hi"}]}`)
+		before := string(in)
+		if got := string(stripCodexInternalResponsesFields(in)); got != before {
+			t.Errorf("unexpected mutation: %s", got)
+		}
+	})
+
 	t.Run("empty payload", func(t *testing.T) {
 		if got := stripReasoningEffortIfToolsPresent(nil, ""); got != nil {
 			t.Errorf("nil input should stay nil, got %v", got)
