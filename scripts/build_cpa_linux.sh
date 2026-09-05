@@ -24,20 +24,36 @@ TARGETS="${TARGETS:-linux mac}"
 HEADROOM_FFI="${HEADROOM_FFI:-0}"
 
 if [[ ! -d "${CPA_DIR}" ]]; then echo "missing ${CPA_DIR}" >&2; exit 1; fi
-if [[ ! -d "${SUB2API_DIR}" ]]; then echo "missing ${SUB2API_DIR}" >&2; exit 1; fi
-if [[ ! -f "${SUB2API_DIR}/internal/web/dist/index.html" ]]; then
-  echo "missing ${SUB2API_DIR}/internal/web/dist/ — frontend not built" >&2
-  exit 1
+
+# sub2api is OPTIONAL. It is only imported under the `commercial` build tag
+# (internal/commercial/*: billing, data-sync, middleware). If the local
+# sub2api checkout is present (with its built frontend), we build WITH the
+# commercial features; otherwise we drop the `commercial` tag and build a
+# lean binary. Go ignores the unused go.mod replace when nothing under the
+# active tags imports sub2api, so the missing directory is not an error.
+COMMERCIAL_TAG=""
+if [[ -d "${SUB2API_DIR}" && -f "${SUB2API_DIR}/internal/web/dist/index.html" ]]; then
+  COMMERCIAL_TAG="commercial,"
+  echo "sub2api found at ${SUB2API_DIR} — building WITH commercial features"
+else
+  echo "WARNING: sub2api not found at ${SUB2API_DIR}" >&2
+  echo "         -> building WITHOUT commercial features (billing/data-sync/middleware disabled)." >&2
+  echo "         Set SUB2API_DIR to a checkout with internal/web/dist/ to re-enable." >&2
 fi
 
 mkdir -p "${OUT_DIR}"
 VERSION="$(cd "${CPA_DIR}" && git rev-parse --short HEAD 2>/dev/null || echo unknown)"
 
 if [[ "${HEADROOM_FFI}" == "1" ]]; then
-  BUILD_TAGS="commercial,embed,headroom_ffi"
+  if [[ -z "${COMMERCIAL_TAG}" ]]; then
+    echo "HEADROOM_FFI=1 needs the sub2api checkout (Docker mount + go.mod rewrite)." >&2
+    echo "Provide SUB2API_DIR or unset HEADROOM_FFI." >&2
+    exit 1
+  fi
+  BUILD_TAGS="${COMMERCIAL_TAG}embed,headroom_ffi"
   echo "=== Building WITH headroom FFI (tags: ${BUILD_TAGS}, Docker required for Linux) ==="
 else
-  BUILD_TAGS="commercial,embed"
+  BUILD_TAGS="${COMMERCIAL_TAG}embed"
   echo "=== Building WITHOUT headroom FFI (tags: ${BUILD_TAGS}, pure Go) ==="
   echo "    Python headroom-proxy is expected to sit in front of CPA."
   echo "    Set HEADROOM_FFI=1 to re-enable the legacy in-process FFI path."
