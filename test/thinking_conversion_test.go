@@ -2882,7 +2882,7 @@ func TestThinkingE2EProviderTargets(t *testing.T) {
 			inputJSON:       `{"model":"antigravity-budget-model","input":"hi","reasoning":{"effort":"medium"}}`,
 			expectField:     "request.generationConfig.thinkingConfig.thinkingBudget",
 			expectValue:     "8192",
-			includeThoughts: "",
+			includeThoughts: "true",
 		},
 	}
 
