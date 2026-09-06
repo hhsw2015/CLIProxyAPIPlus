@@ -730,15 +730,32 @@ var sessionPattern = regexp.MustCompile(`_session_([a-f0-9-]+)$`)
 // SessionAffinitySelector wraps another selector with session-sticky behavior.
 // It extracts session ID from multiple sources and maintains session-to-auth
 // mappings with automatic failover when the bound auth becomes unavailable.
+// defaultAffinityRebindThreshold is the number of consecutive skip-cooldown
+// failures (connection-lifecycle / request-scoped, which do NOT cool the
+// deployment) tolerated on a single session before its affinity binding is
+// dropped so the next request rebinds to a different deployment. Isolated blips
+// (< threshold) keep the binding — and thus the upstream prompt cache — warm;
+// a persistently-flaky binding (e.g. an Azure deployment repeatedly dropping
+// the stream mid-flight) is abandoned for resilience.
+const defaultAffinityRebindThreshold = 3
+
 type SessionAffinitySelector struct {
 	fallback Selector
 	cache    *SessionCache
+
+	rebindThreshold int
+	failMu          sync.Mutex
+	failCounts      map[string]int // session cacheKey -> consecutive skip-cooldown failures
 }
 
 // SessionAffinityConfig configures the session affinity selector.
 type SessionAffinityConfig struct {
 	Fallback Selector
 	TTL      time.Duration
+	// RebindFailureThreshold sets how many consecutive skip-cooldown failures on
+	// one session drop its binding so it rebinds to another deployment. <=0 uses
+	// defaultAffinityRebindThreshold.
+	RebindFailureThreshold int
 }
 
 // NewSessionAffinitySelector creates a new session-aware selector.
@@ -757,9 +774,36 @@ func NewSessionAffinitySelectorWithConfig(cfg SessionAffinityConfig) *SessionAff
 	if cfg.TTL <= 0 {
 		cfg.TTL = time.Hour
 	}
+	threshold := cfg.RebindFailureThreshold
+	if threshold <= 0 {
+		threshold = defaultAffinityRebindThreshold
+	}
 	return &SessionAffinitySelector{
-		fallback: cfg.Fallback,
-		cache:    NewSessionCache(cfg.TTL),
+		fallback:        cfg.Fallback,
+		cache:           NewSessionCache(cfg.TTL),
+		rebindThreshold: threshold,
+		failCounts:      make(map[string]int),
+	}
+}
+
+// bumpSessionFailure increments and returns the consecutive skip-cooldown
+// failure count for a session cache key.
+func (s *SessionAffinitySelector) bumpSessionFailure(key string) int {
+	s.failMu.Lock()
+	defer s.failMu.Unlock()
+	if s.failCounts == nil {
+		s.failCounts = make(map[string]int)
+	}
+	s.failCounts[key]++
+	return s.failCounts[key]
+}
+
+// resetSessionFailure clears the consecutive failure count for a session.
+func (s *SessionAffinitySelector) resetSessionFailure(key string) {
+	s.failMu.Lock()
+	defer s.failMu.Unlock()
+	if s.failCounts != nil {
+		delete(s.failCounts, key)
 	}
 }
 
@@ -976,6 +1020,7 @@ func (s *SessionAffinitySelector) OnResult(res Result) {
 		fallbackKey = ns + "::" + fallbackID + "::" + nsModel
 	}
 	if res.Success {
+		s.resetSessionFailure(cacheKey)
 		s.cache.Touch(cacheKey, res.AuthID)
 		if fallbackKey != "" {
 			s.cache.Touch(fallbackKey, res.AuthID)
@@ -984,9 +1029,28 @@ func (s *SessionAffinitySelector) OnResult(res Result) {
 	}
 
 	if res.Error != nil && shouldSkipCredentialCooldown(res.Error) {
+		// Connection-lifecycle / request-scoped errors do not cool the
+		// deployment, so a single one keeps the binding (and its warm upstream
+		// prompt cache) intact. But a session that keeps hitting them on the
+		// same deployment is stuck on a flaky binding — e.g. an Azure
+		// deployment repeatedly dropping the stream mid-flight under peak load.
+		// Count consecutive occurrences and only drop the binding once they
+		// cross the threshold, so isolated blips stay cache-warm while a
+		// persistently-bad binding is abandoned for a fresh deployment.
+		if s.bumpSessionFailure(cacheKey) < s.rebindThreshold {
+			return
+		}
+		s.resetSessionFailure(cacheKey)
+		s.cache.CompareAndDelete(cacheKey, res.AuthID)
+		if fallbackKey != "" {
+			s.cache.CompareAndDelete(fallbackKey, res.AuthID)
+		}
 		return
 	}
 
+	// Cooldown-worthy failure: drop the binding immediately and clear any
+	// accumulated blip count.
+	s.resetSessionFailure(cacheKey)
 	s.cache.CompareAndDelete(cacheKey, res.AuthID)
 	if fallbackKey != "" {
 		s.cache.CompareAndDelete(fallbackKey, res.AuthID)

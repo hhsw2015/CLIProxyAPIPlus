@@ -834,6 +834,76 @@ func TestSessionAffinitySelector_SameSessionSameAuth(t *testing.T) {
 	}
 }
 
+func TestSessionAffinitySelector_RebindsAfterRepeatedSkipCooldownFailures(t *testing.T) {
+	t.Parallel()
+
+	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
+		Fallback:               &RoundRobinSelector{},
+		TTL:                    time.Hour,
+		RebindFailureThreshold: 3,
+	})
+
+	payload := []byte(`{"metadata":{"user_id":"user_xxx_account__session_ac980658-63bd-4fb3-97ba-8da64cb1e344"}}`)
+	opts := cliproxyexecutor.Options{OriginalRequest: payload}
+	auths := []*Auth{{ID: "auth-a"}, {ID: "auth-b"}}
+
+	bound, err := selector.Pick(context.Background(), "claude", "claude-3", opts, auths)
+	if err != nil {
+		t.Fatalf("Pick() error = %v", err)
+	}
+	cacheKey := "claude::" + ExtractSessionID(nil, payload, nil) + "::" + canonicalModelKey("claude-3")
+	if _, ok := selector.cache.Get(cacheKey); !ok {
+		t.Fatalf("expected a binding after Pick")
+	}
+
+	// Skip-cooldown failures (connection-lifecycle) do not cool the deployment.
+	// Below the threshold the binding must survive (prompt cache stays warm).
+	connErr := &Error{Code: ErrorCodeConnectionLifecycle, Message: "stream disconnected before completion"}
+	for i := 1; i < 3; i++ {
+		selector.OnResult(Result{AuthID: bound.ID, Provider: "claude", Model: "claude-3", Success: false, Error: connErr, Options: opts})
+		if _, ok := selector.cache.Get(cacheKey); !ok {
+			t.Fatalf("binding dropped after only %d skip-cooldown failures, want it to survive < threshold", i)
+		}
+	}
+
+	// The threshold-th consecutive failure drops the binding so the next request
+	// rebinds to a different deployment.
+	selector.OnResult(Result{AuthID: bound.ID, Provider: "claude", Model: "claude-3", Success: false, Error: connErr, Options: opts})
+	if _, ok := selector.cache.Get(cacheKey); ok {
+		t.Fatalf("binding should be dropped once the rebind threshold is reached")
+	}
+}
+
+func TestSessionAffinitySelector_SuccessResetsSkipCooldownFailureCount(t *testing.T) {
+	t.Parallel()
+
+	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
+		Fallback:               &RoundRobinSelector{},
+		TTL:                    time.Hour,
+		RebindFailureThreshold: 3,
+	})
+	payload := []byte(`{"metadata":{"user_id":"user_xxx_account__session_ac980658-63bd-4fb3-97ba-8da64cb1e344"}}`)
+	opts := cliproxyexecutor.Options{OriginalRequest: payload}
+	auths := []*Auth{{ID: "auth-a"}, {ID: "auth-b"}}
+
+	bound, err := selector.Pick(context.Background(), "claude", "claude-3", opts, auths)
+	if err != nil {
+		t.Fatalf("Pick() error = %v", err)
+	}
+	cacheKey := "claude::" + ExtractSessionID(nil, payload, nil) + "::" + canonicalModelKey("claude-3")
+	connErr := &Error{Code: ErrorCodeConnectionLifecycle, Message: "stream disconnected before completion"}
+
+	// Two failures, then a success — the counter must reset so subsequent
+	// isolated blips never accumulate to the threshold.
+	for i := 0; i < 5; i++ {
+		selector.OnResult(Result{AuthID: bound.ID, Provider: "claude", Model: "claude-3", Success: false, Error: connErr, Options: opts})
+		selector.OnResult(Result{AuthID: bound.ID, Provider: "claude", Model: "claude-3", Success: true, Options: opts})
+	}
+	if _, ok := selector.cache.Get(cacheKey); !ok {
+		t.Fatalf("binding should survive blips interspersed with successes")
+	}
+}
+
 func TestSessionAffinitySelector_WeightedBindingRebindsAfterWeightBecomesZero(t *testing.T) {
 	t.Parallel()
 
