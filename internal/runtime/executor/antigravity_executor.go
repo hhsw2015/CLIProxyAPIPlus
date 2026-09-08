@@ -123,10 +123,15 @@ const (
 // antigravityTransportKey identifies one connection pool. At most one of proxy and
 // base is set: proxy for a credential-scoped proxy pool, base for a transport handed
 // in through the request context, and neither for a direct pool.
+// Resolved pool settings (shortMode, idleConnTimeout, maxIdleConnsPerHost) are included
+// in the key to prevent stale transport reuse across configuration hot-reloads under load.
 type antigravityTransportKey struct {
-	credential string
-	proxy      string
-	base       *http.Transport
+	credential          string
+	proxy               string
+	base                *http.Transport
+	shortMode           bool
+	idleConnTimeout     time.Duration
+	maxIdleConnsPerHost int
 }
 
 func defaultAntigravityBaseTransport() *http.Transport {
@@ -189,9 +194,17 @@ func antigravityHTTP11Transport(auth *cliproxyauth.Auth, base *http.Transport) *
 	if base == nil {
 		return nil
 	}
+	var cfg *config.Config
+	if len(cfgs) > 0 {
+		cfg = cfgs[0]
+	}
+	settings := resolveAntigravityPoolSettings(cfg)
 	key := antigravityTransportKey{
-		credential: antigravityTransportScope(auth),
-		base:       base,
+		credential:          antigravityTransportScope(auth),
+		base:                base,
+		shortMode:           settings.shortMode,
+		idleConnTimeout:     settings.idleConnTimeout,
+		maxIdleConnsPerHost: settings.maxIdleConnsPerHost,
 	}
 	transport, errGet := antigravityTransports.Get(key, func() (*http.Transport, error) {
 		return cloneTransportWithHTTP11(base), nil
@@ -215,9 +228,17 @@ func antigravityProxiedHTTP11Transport(auth *cliproxyauth.Auth, proxyURL string)
 	if proxyURL == "" {
 		return nil
 	}
+	var cfg *config.Config
+	if len(cfgs) > 0 {
+		cfg = cfgs[0]
+	}
+	settings := resolveAntigravityPoolSettings(cfg)
 	key := antigravityTransportKey{
-		credential: antigravityTransportScope(auth),
-		proxy:      proxyURL,
+		credential:          antigravityTransportScope(auth),
+		proxy:               proxyURL,
+		shortMode:           settings.shortMode,
+		idleConnTimeout:     settings.idleConnTimeout,
+		maxIdleConnsPerHost: settings.maxIdleConnsPerHost,
 	}
 	transport, errGet := antigravityTransports.Get(key, func() (*http.Transport, error) {
 		base, _, errBuild := proxyutil.BuildHTTPTransport(proxyURL)
