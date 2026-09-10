@@ -14,8 +14,12 @@
 
 set -euo pipefail
 
-CPA_DIR="${CPA_DIR:-/Users/wowdd1/Dev/CLIProxyAPIPlus}"
-SUB2API_DIR="${SUB2API_DIR:-/Users/wowdd1/Dev/sub2api/backend}"
+# CPA_DIR defaults to this repo (script lives in <repo>/scripts/), so the build
+# works on any machine/OS without a hardcoded path. Override with CPA_DIR=... .
+CPA_DIR="${CPA_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+# sub2api is optional (commercial layer). Default to a sibling checkout next to
+# CPA_DIR; if absent, the build falls back to embed-only (see below).
+SUB2API_DIR="${SUB2API_DIR:-$(cd "${CPA_DIR}/.." && pwd)/sub2api/backend}"
 OUT_DIR="${OUT_DIR:-/tmp/cpa-release}"
 HEADROOM_RELEASE="${HEADROOM_RELEASE:-headroom-ffi-v0.1.0}"
 HEADROOM_REPO="${HEADROOM_REPO:-hhsw2015/headroom}"

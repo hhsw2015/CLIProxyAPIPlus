@@ -14,7 +14,8 @@
 set -euo pipefail
 
 VPS_HOST=${VPS_HOST:-azureuser@4.151.241.30}
-VPS_KEY=${VPS_KEY:-$HOME/Downloads/pikapk3219_vps_key.pem}
+# Prefer ~/.ssh (current), fall back to ~/Downloads (legacy Mac location).
+VPS_KEY=${VPS_KEY:-$([ -f "$HOME/.ssh/pikapk3219_vps_key.pem" ] && echo "$HOME/.ssh/pikapk3219_vps_key.pem" || echo "$HOME/Downloads/pikapk3219_vps_key.pem")}
 PROBE_PORT=${PROBE_PORT:-8319}
 LIVE_PORT=${LIVE_PORT:-8318}
 CPA_DATE=${CPA_DATE:-$(date +%Y-%m-%d)}
@@ -29,7 +30,9 @@ log "=== 1. build linux binary ==="
 if [ "${SKIP_BUILD:-}" = "1" ] && [ -f /tmp/cpa-release/cpa-new-server ]; then
     log "skipping build (SKIP_BUILD=1)"
 else
-    ( cd "$REPO_ROOT" && bash scripts/build_cpa_linux.sh )
+    # VPS is linux — only build the linux target (skips the mac cross-build,
+    # which needs a mac toolchain/GOPROXY and is irrelevant to deploy).
+    ( cd "$REPO_ROOT" && TARGETS="${TARGETS:-linux}" bash scripts/build_cpa_linux.sh )
 fi
 [ -f /tmp/cpa-release/cpa-new-server ] || { log "linux binary missing"; exit 1; }
 LOCAL_BIN_SHA=$(shasum -a 256 /tmp/cpa-release/cpa-new-server | head -c 16)
@@ -39,7 +42,14 @@ log "=== 2. regenerate config (date=$CPA_DATE) ==="
 if [ "${SKIP_GEN:-}" = "1" ]; then
     log "skipping config gen (SKIP_GEN=1)"
 else
-    ( cd "$REPO_ROOT" && python3 scripts/gen_llm_config_v2.py --date "$CPA_DATE" ) | tail -3
+    # Run via uv with the vertex-probe deps (pyjwt+cryptography to mint the SA
+    # token, requests to probe). Falls back to bare python3 if uv is absent; the
+    # generator degrades to cache-only probing when the token can't be minted.
+    if command -v uv >/dev/null 2>&1; then
+        ( cd "$REPO_ROOT" && uv run --with pyjwt --with cryptography --with requests --python 3.12 python3 scripts/gen_llm_config_v2.py --date "$CPA_DATE" ) | tail -3
+    else
+        ( cd "$REPO_ROOT" && python3 scripts/gen_llm_config_v2.py --date "$CPA_DATE" ) | tail -3
+    fi
 fi
 CFG=$REPO_ROOT/scripts/generated_v2/cpa-new-config.yaml
 [ -f "$CFG" ] || { log "config file missing: $CFG"; exit 1; }
