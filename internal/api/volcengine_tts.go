@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
@@ -238,9 +239,23 @@ func (s *Server) volcengineTTSStream(c *gin.Context, speaker string) {
 	// upstream -> client: audio frames become {"audio":"<b64>"}; end -> {"isFinal":true}.
 	go func() {
 		defer stop()
+		sawAudio := false
+		final := func() { clientConn.WriteMessage(websocket.TextMessage, []byte(`{"isFinal":true}`)) }
 		for {
 			_, data, err := upstream.ReadMessage()
 			if err != nil {
+				// Upstream closed. If audio already flowed, treat as a clean end
+				// so the client sees isFinal instead of a bare disconnect.
+				if sawAudio {
+					final()
+				}
+				return
+			}
+			// "the stream is done" is Volcengine's normal end-of-stream, delivered
+			// as an error-typed frame — not a failure. Match the raw bytes because
+			// the error-frame layout differs from audio frames.
+			if bytes.Contains(data, []byte("the stream is done")) {
+				final()
 				return
 			}
 			m, ok := volcParse(data)
@@ -252,15 +267,19 @@ func (s *Server) volcengineTTSStream(c *gin.Context, speaker string) {
 				if len(m.payload) == 0 {
 					continue
 				}
+				sawAudio = true
 				out, _ := json.Marshal(map[string]string{"audio": base64.StdEncoding.EncodeToString(m.payload)})
 				if err := clientConn.WriteMessage(websocket.TextMessage, out); err != nil {
 					return
 				}
 			case m.event == volcEventSessionFinished:
-				clientConn.WriteMessage(websocket.TextMessage, []byte(`{"isFinal":true}`))
+				final()
 				return
 			case m.msgType == volcMsgError || m.event == volcEventSessionFailed || m.event == volcEventConnectionFailed:
 				log.Errorf("volc-tts: upstream error: %s", string(m.payload))
+				if sawAudio {
+					final()
+				}
 				return
 			}
 		}
