@@ -24,6 +24,11 @@ func (s *Server) setupRealtimeRoutes(v1 *gin.RouterGroup) {
 	// out with ~300ms TTFB. voice_id is in the path; model_id (default
 	// eleven_flash_v2_5) and other options ride the query.
 	v1.GET("/text-to-speech/:voice_id/stream-input", s.elevenTTSStreamHandler())
+	// Gemini Live (Vertex BidiGenerateContent) — stateful audio + video-frame
+	// streaming. Native-protocol pass-through; CPA injects the Vertex SA bearer
+	// and rewrites setup.model. (/v1/live is taken by codex live, so use a
+	// distinct path.)
+	v1.GET("/gemini-live", s.geminiLiveHandler())
 }
 
 // elevenTTSStreamHandler bridges a client WebSocket to ElevenLabs' realtime TTS
