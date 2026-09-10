@@ -2,6 +2,8 @@ package api
 
 import (
 	"bytes"
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"io"
 	"mime"
@@ -118,6 +120,69 @@ func (s *Server) mediaProxyHandler(ep mediaEndpoint) gin.HandlerFunc {
 		// Build upstream URL.
 		upstreamURL := provider.baseURL
 
+		// ElevenLabs Scribe STT expects the model in a "model_id" multipart field,
+		// while OpenAI clients send "model". Rename it in the captured body so the
+		// same client request works unchanged. Only the field-name in the
+		// Content-Disposition header changes; the boundary is untouched.
+		if ep.isMultipart && isElevenLabsProvider(upstreamURL) {
+			body = bytes.Replace(body, []byte(`name="model"`), []byte(`name="model_id"`), 1)
+		}
+
+		// ElevenLabs TTS: translate OpenAI's {model,input,voice} into ElevenLabs
+		// {text,model_id} with the voice_id in the URL path. The caller passes the
+		// ElevenLabs voice_id in "voice" and a real ElevenLabs model id (e.g.
+		// eleven_multilingual_v2) in "model".
+		if ep.pathSuffix == "audio/speech" && isElevenLabsProvider(upstreamURL) {
+			voiceID := strings.TrimSpace(gjson.GetBytes(body, "voice").String())
+			if voiceID == "" {
+				c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{
+					"message": "voice (ElevenLabs voice_id) is required for ElevenLabs TTS",
+					"type":    "invalid_request_error",
+				}})
+				return
+			}
+			elBody, errMarshal := json.Marshal(map[string]string{
+				"text":     gjson.GetBytes(body, "input").String(),
+				"model_id": gjson.GetBytes(body, "model").String(),
+			})
+			if errMarshal != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": gin.H{
+					"message": fmt.Sprintf("failed to build ElevenLabs TTS body: %v", errMarshal),
+					"type":    "server_error",
+				}})
+				return
+			}
+			body = elBody
+			upstreamURL = strings.TrimRight(upstreamURL, "/") + "/" + url.PathEscape(voiceID)
+		}
+
+		// Volcengine (Doubao) BigTTS: translate OpenAI {input,voice} into the
+		// req_params body; "voice" is the speaker and drives the resource id.
+		volcResource := ""
+		if ep.pathSuffix == "audio/speech" && isVolcengineProvider(upstreamURL) {
+			speaker := strings.TrimSpace(gjson.GetBytes(body, "voice").String())
+			if speaker == "" {
+				speaker = "zh_female_xiaohe_uranus_bigtts"
+			}
+			volcResource = volcResourceID(speaker)
+			volcBody, errMarshal := json.Marshal(map[string]any{
+				"user": map[string]any{"uid": "cpa"},
+				"req_params": map[string]any{
+					"text":         gjson.GetBytes(body, "input").String(),
+					"speaker":      speaker,
+					"audio_params": map[string]any{"format": "mp3", "sample_rate": 24000},
+				},
+			})
+			if errMarshal != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": gin.H{
+					"message": fmt.Sprintf("failed to build Volcengine TTS body: %v", errMarshal),
+					"type":    "server_error",
+				}})
+				return
+			}
+			body = volcBody
+		}
+
 		// Create upstream request.
 		upstreamReq, err := http.NewRequestWithContext(c.Request.Context(), http.MethodPost, upstreamURL, bytes.NewReader(body))
 		if err != nil {
@@ -135,9 +200,18 @@ func (s *Server) mediaProxyHandler(ep mediaEndpoint) gin.HandlerFunc {
 			upstreamReq.Header.Set("Content-Type", ep.contentType)
 		}
 
-		// Set provider auth header.
+		// Set provider auth header. ElevenLabs uses "xi-api-key"; Volcengine uses
+		// "X-Api-Key" + "X-Api-Resource-Id"; everything else the Azure "api-key".
 		if provider.apiKey != "" {
-			upstreamReq.Header.Set("api-key", provider.apiKey)
+			switch {
+			case isElevenLabsProvider(upstreamURL):
+				upstreamReq.Header.Set("xi-api-key", provider.apiKey)
+			case isVolcengineProvider(upstreamURL):
+				upstreamReq.Header.Set("X-Api-Key", provider.apiKey)
+				upstreamReq.Header.Set("X-Api-Resource-Id", volcResource)
+			default:
+				upstreamReq.Header.Set("api-key", provider.apiKey)
+			}
 		}
 
 		// Send request.
@@ -152,6 +226,19 @@ func (s *Server) mediaProxyHandler(ep mediaEndpoint) gin.HandlerFunc {
 			return
 		}
 		defer resp.Body.Close()
+
+		// Volcengine streams a chunked concatenated-JSON response with base64 audio.
+		// Decode it incrementally and flush each audio chunk so the client gets
+		// realtime mp3 (TTFB = time to the first synth chunk, not the whole clip).
+		if ep.pathSuffix == "audio/speech" && isVolcengineProvider(upstreamURL) {
+			if resp.StatusCode != http.StatusOK {
+				raw, _ := io.ReadAll(resp.Body)
+				c.Data(resp.StatusCode, "application/json", raw)
+				return
+			}
+			streamVolcAudio(c, resp.Body, modelName)
+			return
+		}
 
 		// Forward response headers.
 		for k, vals := range resp.Header {
@@ -201,6 +288,13 @@ func (s *Server) resolveMediaProvider(modelName string, ep mediaEndpoint) *media
 				if v, ok := compat.Headers["api-key"]; ok {
 					apiKey = v
 				}
+			}
+
+			// ElevenLabs Scribe STT / Volcengine TTS: base-url is the full API URL
+			// with non-Azure path + auth. Use it verbatim (the handler applies the
+			// provider-specific header/body transforms).
+			if isElevenLabsProvider(baseURL) || isVolcengineProvider(baseURL) {
+				return &mediaProviderConfig{baseURL: baseURL, apiKey: apiKey}
 			}
 
 			// If the base URL already contains the media path, use as-is.
@@ -317,6 +411,89 @@ func (s *Server) gptProxyPassthrough() gin.HandlerFunc {
 		}
 		c.Writer.WriteHeader(resp.StatusCode)
 		io.Copy(c.Writer, resp.Body)
+	}
+}
+
+// isElevenLabsProvider reports whether a resolved upstream URL points at the
+// ElevenLabs API, which uses xi-api-key auth and a "model_id" form field.
+func isElevenLabsProvider(baseURL string) bool {
+	return strings.Contains(baseURL, "elevenlabs.io")
+}
+
+// isVolcengineProvider reports whether a resolved upstream URL points at the
+// Volcengine (ByteDance/Doubao) OpenSpeech TTS API, which uses X-Api-Key +
+// X-Api-Resource-Id auth, a bespoke request body, and a chunked concatenated-JSON
+// response carrying base64 audio.
+func isVolcengineProvider(baseURL string) bool {
+	return strings.Contains(baseURL, "openspeech.bytedance.com")
+}
+
+// volcResourceID picks the X-Api-Resource-Id required by a Volcengine speaker.
+// Wrong id -> "55000000: resource ID is mismatched".
+func volcResourceID(speaker string) string {
+	switch {
+	case strings.HasPrefix(speaker, "S_"):
+		return "seed-icl-2.0" // cloned voices
+	case strings.Contains(speaker, "_uranus_") || strings.HasPrefix(speaker, "saturn_"):
+		return "seed-tts-2.0" // 2.0 voices
+	default:
+		return "seed-tts-1.0"
+	}
+}
+
+// streamVolcAudio decodes Volcengine's chunked response — concatenated JSON
+// objects (no delimiters), each optionally carrying a base64 "data" audio chunk —
+// and flushes each decoded chunk to the client as it arrives, so playback can
+// start on the first synth chunk. Volcengine codes: 0 = ok chunk,
+// 20000000 = session finished; anything else is an error.
+func streamVolcAudio(c *gin.Context, body io.Reader, modelName string) {
+	dec := json.NewDecoder(body)
+	flusher, _ := c.Writer.(http.Flusher)
+	wrote := false
+	for {
+		var obj struct {
+			Code    int    `json:"code"`
+			Message string `json:"message"`
+			Data    string `json:"data"`
+		}
+		if err := dec.Decode(&obj); err != nil {
+			break // EOF or trailing garbage — stop with whatever we streamed
+		}
+		if obj.Code != 0 && obj.Code != 20000000 {
+			if !wrote {
+				c.JSON(http.StatusBadGateway, gin.H{"error": gin.H{
+					"message": fmt.Sprintf("volcengine tts error %d: %s", obj.Code, obj.Message),
+					"type":    "server_error",
+				}})
+				return
+			}
+			log.Errorf("media proxy: volcengine tts for %s: mid-stream error %d: %s", modelName, obj.Code, obj.Message)
+			break
+		}
+		if obj.Data == "" {
+			continue
+		}
+		chunk, errDec := base64.StdEncoding.DecodeString(obj.Data)
+		if errDec != nil {
+			continue
+		}
+		if !wrote {
+			c.Header("Content-Type", "audio/mpeg")
+			c.Status(http.StatusOK)
+			wrote = true
+		}
+		if _, errWrite := c.Writer.Write(chunk); errWrite != nil {
+			return // client gone
+		}
+		if flusher != nil {
+			flusher.Flush()
+		}
+	}
+	if !wrote {
+		c.JSON(http.StatusBadGateway, gin.H{"error": gin.H{
+			"message": "volcengine tts returned no audio",
+			"type":    "server_error",
+		}})
 	}
 }
 

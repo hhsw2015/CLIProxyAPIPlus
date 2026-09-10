@@ -20,6 +20,105 @@ var realtimeUpgrader = websocket.Upgrader{
 
 func (s *Server) setupRealtimeRoutes(v1 *gin.RouterGroup) {
 	v1.GET("/realtime", s.realtimeProxyHandler())
+	// ElevenLabs realtime TTS (WebSocket stream-input): stream text in, audio
+	// out with ~300ms TTFB. voice_id is in the path; model_id (default
+	// eleven_flash_v2_5) and other options ride the query.
+	v1.GET("/text-to-speech/:voice_id/stream-input", s.elevenTTSStreamHandler())
+}
+
+// elevenTTSStreamHandler bridges a client WebSocket to ElevenLabs' realtime TTS
+// stream-input socket. Frames are relayed verbatim; the client speaks the
+// ElevenLabs stream-input protocol (send {"text":...} messages, receive
+// {"audio":"<b64>"} messages).
+func (s *Server) elevenTTSStreamHandler() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		voiceID := strings.TrimSpace(c.Param("voice_id"))
+		if voiceID == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "voice_id path parameter required"})
+			return
+		}
+		// Volcengine BigTTS (doubao-tts) uses a separate binary-protocol bridge;
+		// the path voice_id is its speaker. Everything else is ElevenLabs.
+		if isVolcengineTTSModel(c.Query("model_id")) {
+			s.volcengineTTSStream(c, voiceID)
+			return
+		}
+		apiKey := s.resolveElevenLabsAPIKey()
+		if apiKey == "" {
+			c.JSON(http.StatusBadGateway, gin.H{"error": "no ElevenLabs provider configured"})
+			return
+		}
+
+		u, errParse := url.Parse("wss://api.elevenlabs.io/v1/text-to-speech/" + url.PathEscape(voiceID) + "/stream-input")
+		if errParse != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to build upstream url"})
+			return
+		}
+		q := u.Query()
+		for k, vs := range c.Request.URL.Query() {
+			for _, v := range vs {
+				q.Set(k, v)
+			}
+		}
+		if q.Get("model_id") == "" {
+			q.Set("model_id", "eleven_flash_v2_5")
+		}
+		u.RawQuery = q.Encode()
+		upstreamURL := u.String()
+
+		clientConn, err := realtimeUpgrader.Upgrade(c.Writer, c.Request, nil)
+		if err != nil {
+			log.Errorf("eleven-tts: client upgrade failed: %v", err)
+			return
+		}
+
+		header := http.Header{}
+		header.Set("xi-api-key", apiKey)
+		dialer := websocket.Dialer{HandshakeTimeout: 15 * time.Second}
+		upstreamConn, resp, err := dialer.Dial(upstreamURL, header)
+		if err != nil {
+			log.Errorf("eleven-tts: upstream dial failed: %v", err)
+			msg := "upstream connection failed"
+			if resp != nil {
+				msg += " (status " + resp.Status + ")"
+			}
+			clientConn.WriteMessage(websocket.CloseMessage,
+				websocket.FormatCloseMessage(websocket.CloseInternalServerErr, msg))
+			clientConn.Close()
+			return
+		}
+
+		log.Infof("eleven-tts: session started voice=%s", voiceID)
+		relay := &wsRelay{
+			client:   clientConn,
+			upstream: upstreamConn,
+			done:     make(chan struct{}),
+		}
+		relay.run()
+	}
+}
+
+// resolveElevenLabsAPIKey returns the xi-api-key from any configured ElevenLabs
+// openai-compatibility channel (scribe or TTS), so the realtime TTS bridge does
+// not need its own config entry.
+func (s *Server) resolveElevenLabsAPIKey() string {
+	if s.cfg == nil {
+		return ""
+	}
+	for _, compat := range s.cfg.OpenAICompatibility {
+		if !isElevenLabsProvider(strings.TrimSpace(compat.BaseURL)) {
+			continue
+		}
+		if len(compat.APIKeyEntries) > 0 {
+			if k := strings.TrimSpace(compat.APIKeyEntries[0].APIKey); k != "" {
+				return k
+			}
+		}
+		if v, ok := compat.Headers["api-key"]; ok && strings.TrimSpace(v) != "" {
+			return strings.TrimSpace(v)
+		}
+	}
+	return ""
 }
 
 func (s *Server) realtimeProxyHandler() gin.HandlerFunc {
@@ -43,9 +142,33 @@ func (s *Server) realtimeProxyHandler() gin.HandlerFunc {
 		}
 
 		upstreamURL := provider.baseURL
+		// Forward the client's query params (except "model") onto the upstream
+		// socket so callers can tune realtime options — e.g. ElevenLabs Scribe
+		// wants audio_format / commit_strategy / language_code as query params.
+		// Params baked into the configured base-url (Azure api-version/deployment)
+		// are preserved unless the client overrides them.
+		if u, e := url.Parse(upstreamURL); e == nil {
+			q := u.Query()
+			for k, vs := range c.Request.URL.Query() {
+				if k == "model" {
+					continue
+				}
+				for _, v := range vs {
+					q.Set(k, v)
+				}
+			}
+			u.RawQuery = q.Encode()
+			upstreamURL = u.String()
+		}
 		header := http.Header{}
 		if provider.apiKey != "" {
-			header.Set("api-key", provider.apiKey)
+			// ElevenLabs realtime STT authenticates with xi-api-key, not the
+			// Azure-style api-key header.
+			if isElevenLabsProvider(upstreamURL) {
+				header.Set("xi-api-key", provider.apiKey)
+			} else {
+				header.Set("api-key", provider.apiKey)
+			}
 		}
 
 		dialer := websocket.Dialer{
