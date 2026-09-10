@@ -709,6 +709,19 @@ def probe_azure(combo: Combo, timeout: int) -> ProbeResult:
     body = {"messages": [{"role": "user", "content": "hi"}], "max_tokens": 1}
     try:
         r = requests.post(url, headers=headers, json=body, timeout=timeout)
+        # gpt-5.x / gpt-6 reasoning deployments reject `max_tokens` with a 400
+        # ("Use 'max_completion_tokens' instead"). That 400 proves the
+        # deployment exists and the key is valid — retry with the right param
+        # so the verdict reflects the real (model, key) health, not our body
+        # shape. No model list: keyed off the error text, so any future
+        # reasoning model is covered.
+        if r.status_code == 400 and "max_completion_tokens" in r.text:
+            # Budget must cover the reasoning tokens too — 1 token yields a 400
+            # "Could not finish ... max_tokens reached" on these models. 16 is
+            # enough to complete a "hi" turn and return 200.
+            body = {"messages": [{"role": "user", "content": "hi"}],
+                    "max_completion_tokens": 16}
+            r = requests.post(url, headers=headers, json=body, timeout=timeout)
         cls = _classify_http_error(r.status_code, r.text)
         return ProbeResult(status=cls, http_status=r.status_code, detail=r.text[:200])
     except requests.RequestException as exc:
