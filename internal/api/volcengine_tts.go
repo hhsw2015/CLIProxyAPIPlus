@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -177,6 +178,19 @@ func (s *Server) volcengineTTSStream(c *gin.Context, speaker string) {
 	}
 	defer upstream.Close()
 
+	// Output format is caller-driven: pcm (raw, no decode — best for realtime
+	// playback) or mp3/ogg_opus/wav. Defaults keep mp3/24000 for generic clients.
+	format := strings.TrimSpace(c.Query("format"))
+	if format == "" {
+		format = "mp3"
+	}
+	sampleRate := 24000
+	if sr := strings.TrimSpace(c.Query("sample_rate")); sr != "" {
+		if v, errConv := strconv.Atoi(sr); errConv == nil && v > 0 {
+			sampleRate = v
+		}
+	}
+
 	sessionID := uuid.NewString()
 	// Pipeline the handshake: StartConnection + StartSession are written
 	// back-to-back without waiting for their acks, so the client's first
@@ -190,7 +204,7 @@ func (s *Server) volcengineTTSStream(c *gin.Context, speaker string) {
 		"namespace": "BidirectionalTTS",
 		"req_params": map[string]any{
 			"speaker":      speaker,
-			"audio_params": map[string]any{"format": "mp3", "sample_rate": 24000},
+			"audio_params": map[string]any{"format": format, "sample_rate": sampleRate},
 		},
 	})
 	if err := upstream.WriteMessage(websocket.BinaryMessage, volcFrame(volcEventStartConnection, "", []byte("{}"), false)); err != nil {
