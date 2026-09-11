@@ -76,6 +76,15 @@ func (a *runninghubAdaptor) BuildRequestBody(c *gin.Context, body []byte, model 
 			out[k] = v.Value()
 		}
 	}
+	// Some RunningHub video endpoints (e.g. the runninghub.cn backup) require a
+	// duration; default it for video when the client omitted it.
+	if _, ok := out["duration"]; !ok {
+		lm := strings.ToLower(model)
+		if strings.Contains(lm, "video") || strings.Contains(lm, "t2v") ||
+			strings.Contains(lm, "i2v") || strings.Contains(lm, "seedance") {
+			out["duration"] = 5
+		}
+	}
 	data, err := json.Marshal(out)
 	if err != nil {
 		return nil, "", err
