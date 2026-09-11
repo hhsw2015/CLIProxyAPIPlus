@@ -117,6 +117,15 @@ func (s *Server) mediaProxyHandler(ep mediaEndpoint) gin.HandlerFunc {
 			return
 		}
 
+		// Client called an alias; send the upstream provider's model name in the
+		// body (JSON media endpoints only — multipart model fields are handled
+		// per-provider elsewhere).
+		if !ep.isMultipart {
+			if up := s.resolveUpstreamModel(modelName); up != "" {
+				body = rewriteBodyModel(body, up)
+			}
+		}
+
 		// Build upstream URL.
 		upstreamURL := provider.baseURL
 
@@ -209,6 +218,8 @@ func (s *Server) mediaProxyHandler(ep mediaEndpoint) gin.HandlerFunc {
 			case isVolcengineProvider(upstreamURL):
 				upstreamReq.Header.Set("X-Api-Key", provider.apiKey)
 				upstreamReq.Header.Set("X-Api-Resource-Id", volcResource)
+			case s.mediaAuthStyle(modelName) == "bearer":
+				upstreamReq.Header.Set("Authorization", "Bearer "+provider.apiKey)
 			default:
 				upstreamReq.Header.Set("api-key", provider.apiKey)
 			}
@@ -418,6 +429,71 @@ func (s *Server) gptProxyPassthrough() gin.HandlerFunc {
 // ElevenLabs API, which uses xi-api-key auth and a "model_id" form field.
 func isElevenLabsProvider(baseURL string) bool {
 	return strings.Contains(baseURL, "elevenlabs.io")
+}
+
+// resolveUpstreamModel returns the upstream provider model name for a client-
+// facing model id. openai-compatibility entries follow the convention Name =
+// upstream provider id, Alias = client-facing id. When a request arrives under
+// the Alias (client name), media/task proxies must send the upstream Name to
+// the provider. Returns "" when no remap is needed (matched by Name, or not
+// found).
+func (s *Server) resolveUpstreamModel(clientModel string) string {
+	if s.cfg == nil {
+		return ""
+	}
+	// Prefer an alias→name remap over a plain name match: a stale entry may list
+	// the public id as its Name, but the routes-driven entry carries
+	// Name=upstream + Alias=public. Scan all before giving up.
+	for _, compat := range s.cfg.OpenAICompatibility {
+		for _, m := range compat.Models {
+			name := strings.TrimSpace(m.Name)
+			alias := strings.TrimSpace(m.Alias)
+			if alias != "" && strings.EqualFold(alias, clientModel) && name != "" && !strings.EqualFold(name, clientModel) {
+				return name
+			}
+		}
+	}
+	return ""
+}
+
+// mediaAuthStyle returns the lower-cased auth-style of the openai-compatibility
+// entry that serves modelName (matched by name or alias). Used so generic
+// OpenAI-format image hosts (auth-style: bearer) get an Authorization header
+// instead of the Azure api-key default.
+func (s *Server) mediaAuthStyle(modelName string) string {
+	if s.cfg == nil {
+		return ""
+	}
+	for _, compat := range s.cfg.OpenAICompatibility {
+		for _, m := range compat.Models {
+			if strings.EqualFold(strings.TrimSpace(m.Name), modelName) ||
+				strings.EqualFold(strings.TrimSpace(m.Alias), modelName) {
+				return strings.ToLower(strings.TrimSpace(compat.AuthStyle))
+			}
+		}
+	}
+	return ""
+}
+
+// rewriteBodyModel replaces the top-level "model" field of a JSON request body.
+// Returns the original body unchanged on parse failure or empty model.
+func rewriteBodyModel(body []byte, model string) []byte {
+	if model == "" || len(body) == 0 {
+		return body
+	}
+	var m map[string]any
+	if err := json.Unmarshal(body, &m); err != nil {
+		return body
+	}
+	if _, ok := m["model"]; !ok {
+		return body
+	}
+	m["model"] = model
+	out, err := json.Marshal(m)
+	if err != nil {
+		return body
+	}
+	return out
 }
 
 // isVolcengineProvider reports whether a resolved upstream URL points at the

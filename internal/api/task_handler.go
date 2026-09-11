@@ -123,6 +123,12 @@ func (s *Server) taskSubmitHandler(platform string) gin.HandlerFunc {
 		}
 
 		// Find provider from openai-compatibility config.
+		// Client called an alias; send the upstream provider's model name in the
+		// task body (SKYROUTER model_ids remap: public -> upstream).
+		if up := s.resolveUpstreamModel(modelName); up != "" {
+			body = rewriteBodyModel(body, up)
+		}
+
 		provider := s.resolveTaskProvider(modelName, platform)
 		if provider == nil {
 			c.JSON(http.StatusBadGateway, gin.H{"error": gin.H{
