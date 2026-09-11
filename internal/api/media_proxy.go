@@ -168,18 +168,27 @@ func (s *Server) mediaProxyHandler(ep mediaEndpoint) gin.HandlerFunc {
 		// Volcengine (Doubao) BigTTS: translate OpenAI {input,voice} into the
 		// req_params body; "voice" is the speaker and drives the resource id.
 		volcResource := ""
+		volcContentType := "audio/mpeg"
 		if ep.pathSuffix == "audio/speech" && isVolcengineProvider(upstreamURL) {
 			speaker := strings.TrimSpace(gjson.GetBytes(body, "voice").String())
 			if speaker == "" {
 				speaker = "zh_female_xiaohe_uranus_bigtts"
 			}
 			volcResource = volcResourceID(speaker)
+			// Honor OpenAI response_format (pcm/wav/opus/mp3) + optional
+			// sample_rate so realtime callers can request raw PCM (no decode).
+			volcFmt, volcCType := volcAudioFormat(gjson.GetBytes(body, "response_format").String())
+			volcContentType = volcCType
+			sr := int(gjson.GetBytes(body, "sample_rate").Int())
+			if sr <= 0 {
+				sr = 24000
+			}
 			volcBody, errMarshal := json.Marshal(map[string]any{
 				"user": map[string]any{"uid": "cpa"},
 				"req_params": map[string]any{
 					"text":         gjson.GetBytes(body, "input").String(),
 					"speaker":      speaker,
-					"audio_params": map[string]any{"format": "mp3", "sample_rate": 24000},
+					"audio_params": map[string]any{"format": volcFmt, "sample_rate": sr},
 				},
 			})
 			if errMarshal != nil {
@@ -247,7 +256,7 @@ func (s *Server) mediaProxyHandler(ep mediaEndpoint) gin.HandlerFunc {
 				c.Data(resp.StatusCode, "application/json", raw)
 				return
 			}
-			streamVolcAudio(c, resp.Body, modelName)
+			streamVolcAudio(c, resp.Body, modelName, volcContentType)
 			return
 		}
 
@@ -517,12 +526,31 @@ func volcResourceID(speaker string) string {
 	}
 }
 
+// volcAudioFormat maps an OpenAI response_format to a Volcengine audio format +
+// the HTTP Content-Type to return. pcm gives raw 16-bit PCM (no client decode),
+// best for realtime playback. Defaults to mp3.
+func volcAudioFormat(respFmt string) (string, string) {
+	switch strings.ToLower(strings.TrimSpace(respFmt)) {
+	case "pcm":
+		return "pcm", "audio/pcm"
+	case "wav":
+		return "wav", "audio/wav"
+	case "opus", "ogg", "ogg_opus":
+		return "ogg_opus", "audio/ogg"
+	default:
+		return "mp3", "audio/mpeg"
+	}
+}
+
 // streamVolcAudio decodes Volcengine's chunked response — concatenated JSON
 // objects (no delimiters), each optionally carrying a base64 "data" audio chunk —
 // and flushes each decoded chunk to the client as it arrives, so playback can
 // start on the first synth chunk. Volcengine codes: 0 = ok chunk,
 // 20000000 = session finished; anything else is an error.
-func streamVolcAudio(c *gin.Context, body io.Reader, modelName string) {
+func streamVolcAudio(c *gin.Context, body io.Reader, modelName, contentType string) {
+	if contentType == "" {
+		contentType = "audio/mpeg"
+	}
 	dec := json.NewDecoder(body)
 	flusher, _ := c.Writer.(http.Flusher)
 	wrote := false
@@ -554,7 +582,7 @@ func streamVolcAudio(c *gin.Context, body io.Reader, modelName string) {
 			continue
 		}
 		if !wrote {
-			c.Header("Content-Type", "audio/mpeg")
+			c.Header("Content-Type", contentType)
 			c.Status(http.StatusOK)
 			wrote = true
 		}

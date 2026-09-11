@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 	log "github.com/sirupsen/logrus"
 )
@@ -29,6 +30,9 @@ func (s *Server) setupRealtimeRoutes(v1 *gin.RouterGroup) {
 	// and rewrites setup.model. (/v1/live is taken by codex live, so use a
 	// distinct path.)
 	v1.GET("/gemini-live", s.geminiLiveHandler())
+	// Volcengine (Doubao) RealtimeDialog — native-Chinese full-duplex speech-to-
+	// speech. Binary-frame pass-through; CPA injects the X-Api-* auth headers.
+	v1.GET("/realtime/dialogue", s.volcDialogueHandler())
 }
 
 // elevenTTSStreamHandler bridges a client WebSocket to ElevenLabs' realtime TTS
@@ -277,6 +281,60 @@ func (r *wsRelay) keepAlive() {
 type realtimeProviderConfig struct {
 	baseURL string
 	apiKey  string
+}
+
+// volcDialogueHandler bridges a client WebSocket to Volcengine's RealtimeDialog
+// (full-duplex native-Chinese speech-to-speech, wss .../api/v3/realtime/dialogue).
+// Binary-frame pass-through: the client speaks the RealtimeDialog protocol; CPA
+// only injects the X-Api-* auth headers from the configured channel and relays.
+func (s *Server) volcDialogueHandler() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		var baseURL string
+		var headers map[string]string
+		if s.cfg != nil {
+			for _, compat := range s.cfg.OpenAICompatibility {
+				b := strings.TrimSpace(compat.BaseURL)
+				if strings.Contains(b, "realtime/dialogue") {
+					baseURL = b
+					headers = compat.Headers
+					break
+				}
+			}
+		}
+		if baseURL == "" {
+			c.JSON(http.StatusBadGateway, gin.H{"error": "no volcengine dialogue provider configured"})
+			return
+		}
+
+		clientConn, err := realtimeUpgrader.Upgrade(c.Writer, c.Request, nil)
+		if err != nil {
+			log.Errorf("volc-dialogue: client upgrade failed: %v", err)
+			return
+		}
+
+		header := http.Header{}
+		for k, v := range headers {
+			header.Set(k, v)
+		}
+		if header.Get("X-Api-Connect-Id") == "" {
+			header.Set("X-Api-Connect-Id", uuid.NewString())
+		}
+		dialer := websocket.Dialer{HandshakeTimeout: 15 * time.Second}
+		upstream, resp, err := dialer.Dial(httpToWS(baseURL), header)
+		if err != nil {
+			msg := "upstream connection failed"
+			if resp != nil {
+				msg += " (status " + resp.Status + ")"
+			}
+			log.Errorf("volc-dialogue: upstream dial failed: %v", err)
+			clientConn.WriteMessage(websocket.CloseMessage,
+				websocket.FormatCloseMessage(websocket.CloseInternalServerErr, msg))
+			clientConn.Close()
+			return
+		}
+		log.Infof("volc-dialogue: session started")
+		(&wsRelay{client: clientConn, upstream: upstream, done: make(chan struct{})}).run()
+	}
 }
 
 func (s *Server) resolveRealtimeProvider(modelName string) *realtimeProviderConfig {
