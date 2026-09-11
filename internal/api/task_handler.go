@@ -36,6 +36,7 @@ func init() {
 	registerTaskAdaptor(&topazAdaptor{})
 	registerTaskAdaptor(&dashscopeAdaptor{})
 	registerTaskAdaptor(&minimaxH3Adaptor{})
+	registerTaskAdaptor(&skyreelsAdaptor{})
 	registerTaskAdaptor(&whisperBatchAdaptor{})
 	registerTaskAdaptor(&taijiaSoraAdaptor{})
 }
@@ -144,6 +145,10 @@ func (s *Server) taskSubmitHandler(platform string) gin.HandlerFunc {
 			}})
 			return
 		}
+
+		// Expose the resolved provider key to BuildRequestBody for adaptors that
+		// must carry it in the request body (e.g. skyreels needs api_key inline).
+		c.Set("task_provider_api_key", provider.apiKey)
 
 		// Build upstream request.
 		// If the provider base-url is a gpt-proxy URL (contains /gpt-proxy/),
@@ -355,6 +360,8 @@ func (s *Server) detectPlatformForModel(modelName string) string {
 					return "dashscope"
 				case strings.HasPrefix(entryName, "minimaxh3"):
 					return "minimax-h3"
+				case strings.HasPrefix(entryName, "skyreels") || strings.HasPrefix(entryName, "skywork"):
+					return "skyreels"
 				case strings.HasPrefix(entryName, "kling"):
 					return "kling"
 				case strings.HasPrefix(entryName, "hailuo") || strings.HasPrefix(entryName, "minimax"):
