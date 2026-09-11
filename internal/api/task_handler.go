@@ -31,6 +31,7 @@ func init() {
 	registerTaskAdaptor(&hailuoAdaptor{})
 	registerTaskAdaptor(&viduAdaptor{})
 	registerTaskAdaptor(&falAdaptor{})
+	registerTaskAdaptor(&runninghubAdaptor{})
 	registerTaskAdaptor(&whisperBatchAdaptor{})
 	registerTaskAdaptor(&taijiaSoraAdaptor{})
 }
@@ -112,6 +113,14 @@ func (s *Server) taskSubmitHandler(platform string) gin.HandlerFunc {
 			return
 		}
 
+		// Client called an alias; rewrite the task body's model to the upstream
+		// provider id (SKYROUTER model_ids remap: public -> upstream) BEFORE
+		// ValidateAndSetAction so adaptors that derive the endpoint from the
+		// model (e.g. runninghub) see the upstream id.
+		if up := s.resolveUpstreamModel(modelName); up != "" {
+			body = rewriteBodyModel(body, up)
+		}
+
 		// Validate and determine action.
 		action, err := adaptor.ValidateAndSetAction(c, body)
 		if err != nil {
@@ -123,12 +132,6 @@ func (s *Server) taskSubmitHandler(platform string) gin.HandlerFunc {
 		}
 
 		// Find provider from openai-compatibility config.
-		// Client called an alias; send the upstream provider's model name in the
-		// task body (SKYROUTER model_ids remap: public -> upstream).
-		if up := s.resolveUpstreamModel(modelName); up != "" {
-			body = rewriteBodyModel(body, up)
-		}
-
 		provider := s.resolveTaskProvider(modelName, platform)
 		if provider == nil {
 			c.JSON(http.StatusBadGateway, gin.H{"error": gin.H{
@@ -356,6 +359,8 @@ func (s *Server) detectPlatformForModel(modelName string) string {
 					return "sora"
 				case strings.HasPrefix(entryName, "fal"):
 					return "fal"
+				case strings.HasPrefix(entryName, "runninghub") || strings.HasPrefix(entryName, "skymedia-rh"):
+					return "runninghub"
 				}
 			}
 		}
