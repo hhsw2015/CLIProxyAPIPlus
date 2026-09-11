@@ -32,6 +32,8 @@ func init() {
 	registerTaskAdaptor(&viduAdaptor{})
 	registerTaskAdaptor(&falAdaptor{})
 	registerTaskAdaptor(&runninghubAdaptor{})
+	registerTaskAdaptor(&foxtokenAdaptor{})
+	registerTaskAdaptor(&topazAdaptor{})
 	registerTaskAdaptor(&whisperBatchAdaptor{})
 	registerTaskAdaptor(&taijiaSoraAdaptor{})
 }
@@ -343,6 +345,10 @@ func (s *Server) detectPlatformForModel(modelName string) string {
 				// Detect by config entry name prefix
 				entryName := strings.ToLower(compat.Name)
 				switch {
+				case strings.HasPrefix(entryName, "foxtoken") || strings.HasPrefix(entryName, "huawi"):
+					return "foxtoken"
+				case strings.HasPrefix(entryName, "topaz"):
+					return "topaz"
 				case strings.HasPrefix(entryName, "kling"):
 					return "kling"
 				case strings.HasPrefix(entryName, "hailuo") || strings.HasPrefix(entryName, "minimax"):

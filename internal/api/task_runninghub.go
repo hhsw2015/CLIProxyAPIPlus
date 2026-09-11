@@ -56,9 +56,18 @@ func (a *runninghubAdaptor) BuildRequestBody(c *gin.Context, body []byte, model 
 	if prompt == "" {
 		prompt = gjson.GetBytes(body, "input").String()
 	}
+	// RunningHub video endpoints reject the image "1K" resolution — they want
+	// 480p/720p/1080p/2k/4k. Default per endpoint kind (model carries the
+	// remapped upstream path, e.g. .../text-to-video).
 	res := gjson.GetBytes(body, "resolution").String()
 	if res == "" {
-		res = "1K"
+		lm := strings.ToLower(model)
+		if strings.Contains(lm, "video") || strings.Contains(lm, "t2v") ||
+			strings.Contains(lm, "i2v") || strings.Contains(lm, "seedance") {
+			res = "1080p"
+		} else {
+			res = "1K"
+		}
 	}
 	out := map[string]any{"prompt": prompt, "resolution": res}
 	// Pass through image/duration/ratio when present (i2v / video tuning).
