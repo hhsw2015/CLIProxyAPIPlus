@@ -34,6 +34,8 @@ func init() {
 	registerTaskAdaptor(&runninghubAdaptor{})
 	registerTaskAdaptor(&foxtokenAdaptor{})
 	registerTaskAdaptor(&topazAdaptor{})
+	registerTaskAdaptor(&dashscopeAdaptor{})
+	registerTaskAdaptor(&minimaxH3Adaptor{})
 	registerTaskAdaptor(&whisperBatchAdaptor{})
 	registerTaskAdaptor(&taijiaSoraAdaptor{})
 }
@@ -349,6 +351,10 @@ func (s *Server) detectPlatformForModel(modelName string) string {
 					return "foxtoken"
 				case strings.HasPrefix(entryName, "topaz"):
 					return "topaz"
+				case strings.HasPrefix(entryName, "dashscope") || strings.HasPrefix(entryName, "aliyun"):
+					return "dashscope"
+				case strings.HasPrefix(entryName, "minimaxh3"):
+					return "minimax-h3"
 				case strings.HasPrefix(entryName, "kling"):
 					return "kling"
 				case strings.HasPrefix(entryName, "hailuo") || strings.HasPrefix(entryName, "minimax"):
