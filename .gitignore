@@ -17,6 +17,8 @@ bin/*
 logs/*
 /logs
 scripts/gen_llm_config*.py
+scripts/config_diff.py
+scripts/gen_model_docs.py
 scripts/generated*/
 scripts/generated_v2/
 scripts/extract_*.py
