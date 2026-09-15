@@ -212,10 +212,22 @@ func shouldUpgradeClaudeDeviceProfile(candidate, current ClaudeDeviceProfile) bo
 	return candidate.version.Compare(current.version) > 0
 }
 
+// plausibleClaudeCLIVersion reports whether an incoming Claude Code CLI version
+// is safe to impersonate given the measured baseline. Same-or-newer is accepted:
+// the wire-critical fingerprint (TLS ClientHello + CCH) is anchored by the OS/arch
+// (pinned) and the Node runtime (checked separately by the profile-acceptance callers),
+// none of which change across CLI patch releases, so forwarding the client's real
+// (newer) CLI version auto-tracks upstream version gates without a config bump.
+// Older-than-baseline is rejected (never claim a version below the measured one).
 func plausibleClaudeCLIVersion(candidate, baseline claudeCLIVersion) bool {
-	return candidate.Compare(baseline) == 0
+	return candidate.Compare(baseline) >= 0
 }
 
+// meetsClaudeDeviceProfileBaseline is the STRICT anti-spoofing check used for
+// client DETECTION: an incoming software tuple is a genuine Claude Code tuple
+// only when its CLI version is same-or-newer AND its package + runtime exactly
+// match the measured baseline. A foreign/mismatched package or runtime is
+// rejected so a third-party client cannot masquerade as the Claude Code helper.
 func meetsClaudeDeviceProfileBaseline(candidate, baseline ClaudeDeviceProfile) bool {
 	if candidate.UserAgent == "" || !candidate.hasVersion {
 		return false
@@ -225,6 +237,27 @@ func meetsClaudeDeviceProfileBaseline(candidate, baseline ClaudeDeviceProfile) b
 	}
 	return plausibleClaudeCLIVersion(candidate.version, baseline.version) &&
 		candidate.PackageVersion == baseline.PackageVersion &&
+		candidate.RuntimeVersion == baseline.RuntimeVersion
+}
+
+// acceptsClaudeDeviceProfileCandidate is the LOOSER check used when choosing the
+// device profile to EMIT for a genuine client. The CLI version may be same-or-
+// newer and the client's real PackageVersion is trusted as-is (it is only the
+// @anthropic-ai/sdk header string, not a wire-behavior input). The runtime
+// (Node) must still match the baseline because it determines the hardcoded TLS
+// ClientHello we reproduce; a runtime mismatch means we cannot faithfully send
+// that client's wire fingerprint, so we fall back to the measured baseline.
+// This lets the forwarded profile auto-track the client's real CLI version
+// (e.g. new upstream model gates) without a config bump, while never claiming a
+// wire fingerprint we cannot produce.
+func acceptsClaudeDeviceProfileCandidate(candidate, baseline ClaudeDeviceProfile) bool {
+	if candidate.UserAgent == "" || !candidate.hasVersion {
+		return false
+	}
+	if baseline.UserAgent == "" || !baseline.hasVersion {
+		return false
+	}
+	return plausibleClaudeCLIVersion(candidate.version, baseline.version) &&
 		candidate.RuntimeVersion == baseline.RuntimeVersion
 }
 
@@ -238,7 +271,7 @@ func pinClaudeDeviceProfilePlatform(profile, baseline ClaudeDeviceProfile) Claud
 // and replaces any software tuple that does not exactly match the measured baseline.
 func normalizeClaudeDeviceProfile(profile, baseline ClaudeDeviceProfile) ClaudeDeviceProfile {
 	profile = pinClaudeDeviceProfilePlatform(profile, baseline)
-	if !meetsClaudeDeviceProfileBaseline(profile, baseline) {
+	if !acceptsClaudeDeviceProfileCandidate(profile, baseline) {
 		profile.UserAgent = baseline.UserAgent
 		profile.PackageVersion = baseline.PackageVersion
 		profile.RuntimeVersion = baseline.RuntimeVersion
@@ -386,7 +419,7 @@ func resolveClaudeDeviceProfileLocal(auth *cliproxyauth.Auth, apiKey string, hea
 	if hasCandidate {
 		candidate = pinClaudeDeviceProfilePlatform(candidate, baseline)
 	}
-	if hasCandidate && !meetsClaudeDeviceProfileBaseline(candidate, baseline) {
+	if hasCandidate && !acceptsClaudeDeviceProfileCandidate(candidate, baseline) {
 		hasCandidate = false
 	}
 	cacheProfile := ClaudeDeviceProfile{}
@@ -448,7 +481,7 @@ func resolveClaudeDeviceProfileHome(ctx context.Context, client claudeDeviceProf
 	if hasCandidate {
 		candidate = pinClaudeDeviceProfilePlatform(candidate, baseline)
 	}
-	if hasCandidate && !meetsClaudeDeviceProfileBaseline(candidate, baseline) {
+	if hasCandidate && !acceptsClaudeDeviceProfileCandidate(candidate, baseline) {
 		hasCandidate = false
 	}
 
@@ -591,6 +624,20 @@ func DefaultClaudeVersion(cfg *config.Config) string {
 		return strconv.Itoa(version.major) + "." + strconv.Itoa(version.minor) + "." + strconv.Itoa(version.patch)
 	}
 	return "2.1.220"
+}
+
+// ClaudeBillingVersion returns the cc_version to advertise in the x-anthropic
+// billing header. When the incoming client sends a plausible, same-or-newer
+// Claude Code User-Agent, its real CLI version is used so cc_version stays
+// consistent with the forwarded User-Agent and auto-tracks upstream version
+// gates without a config bump. Otherwise the measured baseline version is used.
+func ClaudeBillingVersion(clientUserAgent string, cfg *config.Config) string {
+	if plausibleClaudeCodeUserAgent(clientUserAgent, cfg) {
+		if version, ok := parseClaudeCLIVersion(clientUserAgent); ok {
+			return strconv.Itoa(version.major) + "." + strconv.Itoa(version.minor) + "." + strconv.Itoa(version.patch)
+		}
+	}
+	return DefaultClaudeVersion(cfg)
 }
 
 func ApplyClaudeDefaultDeviceProfileHeaders(r *http.Request, cfg *config.Config) {

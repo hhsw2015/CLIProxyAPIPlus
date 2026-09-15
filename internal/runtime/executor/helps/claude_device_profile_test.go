@@ -132,7 +132,7 @@ func TestApplyClaudeLegacyDeviceHeadersReplacesInvalidNativeSoftwareSignals(t *t
 	if errRequest != nil {
 		t.Fatal(errRequest)
 	}
-	incoming := claudeDeviceHeaders("claude-cli/999.0.0 (external, cli)")
+	incoming := claudeDeviceHeaders("claude-cli/2.0.0 (external, cli)")
 	incoming.Set("X-Stainless-Package-Version", "999.0.0")
 	incoming.Set("X-Stainless-Runtime-Version", "v999.0.0")
 
@@ -280,7 +280,7 @@ func TestResolveClaudeDeviceProfileRequiredHomeNormalizesUnmeasuredCachedProfile
 	})
 	useFakeClaudeDeviceProfileKVClient(t, client, true, nil)
 
-	profile, errProfile := ResolveClaudeDeviceProfileRequired(context.Background(), auth, "api-key", claudeDeviceHeaders("claude-cli/2.3.0 (external, cli)"), nil)
+	profile, errProfile := ResolveClaudeDeviceProfileRequired(context.Background(), auth, "api-key", claudeDeviceHeaders("claude-cli/2.0.0 (external, cli)"), nil)
 	if errProfile != nil {
 		t.Fatalf("ResolveClaudeDeviceProfileRequired() error = %v", errProfile)
 	}
