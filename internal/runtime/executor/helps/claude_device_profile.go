@@ -677,5 +677,16 @@ func ApplyClaudeLegacyDeviceHeaders(r *http.Request, ginHeaders http.Header, cfg
 	r.Header.Set("X-Stainless-Package-Version", profile.PackageVersion)
 	r.Header.Set("X-Stainless-Os", profile.OS)
 	r.Header.Set("X-Stainless-Arch", profile.Arch)
-	r.Header.Set("User-Agent", profile.UserAgent)
+	// The upstream model gate reads the User-Agent CLI version (not the billing
+	// header): pinning it to the measured baseline makes Anthropic reject models
+	// that require a newer client (e.g. Fable 5.1 needs >= 2.1.251) with
+	// "Claude Code <baseline> does not support this model". Forward the client's
+	// real version when it is a plausible same-or-newer native Claude Code UA so
+	// the version gate tracks the incoming CLI; the software tuple set above
+	// stays pinned to the measured baseline to avoid leaking a foreign profile.
+	if clientUA := strings.TrimSpace(ginHeaders.Get("User-Agent")); plausibleClaudeCodeUserAgent(clientUA, cfg) {
+		r.Header.Set("User-Agent", clientUA)
+	} else {
+		r.Header.Set("User-Agent", profile.UserAgent)
+	}
 }
