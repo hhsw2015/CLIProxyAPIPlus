@@ -171,6 +171,28 @@ extra 中保留 name/endpoint-path/responses-format 等
   OpenAICompat "Cookie Pool" priority=8 → "CPA-openai-compat-P8"
 ```
 
+### 4.1.1 优先级分配策略 (priority-assignment policy, 2026-09-14 重定)
+
+> 上面是「已定 priority → group 名」的映射；priority 本身**如何分配**的权威策略见
+> `CLIProxyAPIPlus/docs/flagship-coverage.md` 的 **"Reseller priority policy"** 一节。
+> 核心规则（priority 数字越大越先用；CPA `fill-first`：高 P 先试，失败 cooldown 跳过；
+> `latency-aware` 仅对 `round-robin` 生效，故 fill-first 下由静态优先级 + cooldown 决定可用性）：
+
+| 层级 | 内容 | Priority |
+|---|---|---:|
+| **模型源头 (源头)** | 研发厂商自有 API：US big-3(Bedrock/Vertex/自有 Azure~1315/OpenAI-official/Anthropic 直连) + 国产大厂(DeepSeek/Moonshot-Kimi/Zhipu-GLM/MiniMax/阿里 Qwen+Wan)。**per-model**：仅当 entry 全是自家模型才 P10；同厂转卖别家的 entry 留中转级 | **P10** |
+| 顶级聚合器 | OpenRouter(P9) / Fal.ai(P8) / DashScope 转卖非 Qwen(P9) / Kuanbang(P8, 第三方 Azure 转卖) | P8–P9 |
+| 中型中转 | novita / atlascloud / poloai | P6–P7 |
+| 小型中转 | shubiaobiao / silvamux / SiliconFlow | P3–P5 |
+| latent 欠费中转 | taijiai-cc / funcloud-cc（有效但账号欠费，充值即恢复） | P2 |
+| 免费池 | mirage（第三方免费 Claude，~20/UUID/日） | P1 |
+
+判据：**额度归属**决定"源头 vs 中转"（自有 Azure=P10，Kuanbang 用它自己 Azure 订阅转卖=P8），
+不是看跑在谁家机房。实现：`gen_llm_config_v2.py` 写盘前 `SOURCE_VENDORS` 归一化 pass
+（host 匹配 + entry 全自家模型 → `priority: 10`）+ latent 中转在 `generate_skyrouter_claude_direct`
+的 `LATENT_RESELLERS` 降到 P2。可视化（`coverage_audit.py` 军火库）渠道表按优先级降序，
+tier 着色 + 最高标"主用"。
+
 ### 4.2 Group 字段映射
 
 ```

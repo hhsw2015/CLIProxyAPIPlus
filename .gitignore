@@ -19,6 +19,7 @@ logs/*
 scripts/gen_llm_config*.py
 scripts/config_diff.py
 scripts/gen_model_docs.py
+scripts/coverage_audit.py
 scripts/generated*/
 scripts/generated_v2/
 scripts/extract_*.py
@@ -115,3 +116,4 @@ docker-compose.override.yml
 # Local LLM Wiki vault
 .llm-wiki
 scripts/vertex_watch_state.json
+scripts/cpa-refresh.sh

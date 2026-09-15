@@ -26,6 +26,16 @@ type mediaEndpoint struct {
 	contentType string
 	// isMultipart indicates if the request uses multipart/form-data (e.g., whisper).
 	isMultipart bool
+	// nestedModelPath, when set, is the gjson path where the model id lives in the
+	// body when it is NOT a top-level "model" field (e.g. OpenAI Live sessions carry
+	// it at "session.model"). Used for channel resolution only.
+	nestedModelPath string
+	// defaultModel, when set, is the model used to resolve the channel if none was
+	// found in the body. Setting either nestedModelPath or defaultModel also marks
+	// this endpoint as a verbatim passthrough: the body is forwarded unmodified (no
+	// top-level "model" rewrite), because endpoints like /v1/live/sessions reject an
+	// unknown top-level "model" field.
+	defaultModel string
 }
 
 var (
@@ -35,6 +45,27 @@ var (
 	mediaAudioSTT   = mediaEndpoint{pathSuffix: "audio/transcriptions", contentType: "", isMultipart: true}
 	mediaAudioTrans = mediaEndpoint{pathSuffix: "audio/translations", contentType: "", isMultipart: true}
 	mediaEmbeddings = mediaEndpoint{pathSuffix: "embeddings", contentType: "application/json"}
+	// mediaRerank proxies OpenAI-style /v1/rerank ({model, query, documents}) to
+	// the provider's /rerank endpoint (e.g. novita /v3/openai/rerank). Standard
+	// Cohere/Jina-style rerank body — pure passthrough, no translation.
+	mediaRerank = mediaEndpoint{pathSuffix: "rerank", contentType: "application/json"}
+	// mediaMusic proxies music generation. Client sends {model, prompt} (or
+	// input); providers with their own schema (ElevenLabs /v1/music) get a body
+	// translation in the handler.
+	mediaMusic = mediaEndpoint{pathSuffix: "music", contentType: "application/json"}
+	// OpenAI Live API (gpt-live-1): full-duplex voice. /v1/live/sessions swaps the
+	// client's WebRTC SDP offer for OpenAI's answer; audio then flows peer-to-peer
+	// (never through CPA), so this is a pure session-broker POST. Model is nested at
+	// session.model; the body must be forwarded verbatim (a top-level "model" field
+	// makes OpenAI 400 with unknown field "model").
+	mediaLiveSession = mediaEndpoint{pathSuffix: "live/sessions", contentType: "application/json", nestedModelPath: "session.model", defaultModel: "gpt-live-1"}
+	// OpenAI realtime ephemeral session broker (POST /v1/realtime/client_secrets):
+	// the GA endpoint that mints an ek_ client secret for realtime AND transcription
+	// sessions (gpt-live-transcribe lives here at session.audio.input.transcription.
+	// model; the older /v1/realtime/transcription_sessions path 404s). Body forwarded
+	// verbatim; defaultModel only resolves the openai-official channel/key (every
+	// client_secrets call uses the same OpenAI key regardless of the session model).
+	mediaRealtimeSecrets = mediaEndpoint{pathSuffix: "realtime/client_secrets", contentType: "application/json", defaultModel: "gpt-live-transcribe"}
 )
 
 // mediaProviderConfig holds the resolved upstream provider details.
@@ -51,6 +82,13 @@ func (s *Server) setupMediaRoutes(v1 *gin.RouterGroup) {
 	v1.POST("/audio/transcriptions", s.mediaProxyHandler(mediaAudioSTT))
 	v1.POST("/audio/translations", s.mediaProxyHandler(mediaAudioTrans))
 	v1.POST("/embeddings", s.mediaProxyHandler(mediaEmbeddings))
+	v1.POST("/rerank", s.mediaProxyHandler(mediaRerank))
+	v1.POST("/music", s.mediaProxyHandler(mediaMusic))
+	// OpenAI Live API session brokers (WebRTC/realtime session create, verbatim
+	// passthrough to api.openai.com). Per-method radix trees keep these clear of the
+	// codex POST /v1/live and GET /v1/live/:call_id routes.
+	v1.POST("/live/sessions", s.mediaProxyHandler(mediaLiveSession))
+	v1.POST("/realtime/client_secrets", s.mediaProxyHandler(mediaRealtimeSecrets))
 }
 
 // mediaProxyHandler returns a gin handler that transparently proxies media requests
@@ -86,6 +124,19 @@ func (s *Server) mediaProxyHandler(ep mediaEndpoint) gin.HandlerFunc {
 			if modelName == "" {
 				modelName = "whisper"
 			}
+		} else if ep.nestedModelPath != "" || ep.defaultModel != "" {
+			// Verbatim-passthrough endpoints (OpenAI Live): the model may be nested
+			// (e.g. session.model) or absent; fall back to the endpoint default so we
+			// can still resolve the channel. The body is NOT rewritten below.
+			if ep.nestedModelPath != "" {
+				modelName = gjson.GetBytes(body, ep.nestedModelPath).String()
+			}
+			if modelName == "" {
+				modelName = gjson.GetBytes(body, "model").String()
+			}
+			if modelName == "" {
+				modelName = ep.defaultModel
+			}
 		} else {
 			modelName = gjson.GetBytes(body, "model").String()
 		}
@@ -119,8 +170,11 @@ func (s *Server) mediaProxyHandler(ep mediaEndpoint) gin.HandlerFunc {
 
 		// Client called an alias; send the upstream provider's model name in the
 		// body (JSON media endpoints only — multipart model fields are handled
-		// per-provider elsewhere).
-		if !ep.isMultipart {
+		// per-provider elsewhere). Skipped for verbatim-passthrough endpoints
+		// (OpenAI Live), where the model is nested/absent and injecting a top-level
+		// "model" field makes OpenAI reject the request (unknown field "model").
+		verbatim := ep.nestedModelPath != "" || ep.defaultModel != ""
+		if !ep.isMultipart && !verbatim {
 			if up := s.resolveUpstreamModel(modelName); up != "" {
 				body = rewriteBodyModel(body, up)
 			}
@@ -165,6 +219,33 @@ func (s *Server) mediaProxyHandler(ep mediaEndpoint) gin.HandlerFunc {
 			upstreamURL = strings.TrimRight(upstreamURL, "/") + "/" + url.PathEscape(voiceID)
 		}
 
+		// Deepgram STT: translate OpenAI multipart /audio/transcriptions into a raw
+		// audio POST to /v1/listen?model=<up>&smart_format=true. Deepgram takes the
+		// audio bytes as the body (not multipart) with the file's own Content-Type.
+		deepgramSTT := false
+		deepgramCT := ""
+		if ep.pathSuffix == "audio/transcriptions" && isDeepgramProvider(upstreamURL) {
+			audioBytes, audioCT := extractAudioFromMultipart(body, c.GetHeader("Content-Type"))
+			if len(audioBytes) == 0 {
+				c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{
+					"message": "deepgram STT: no audio file part in request",
+					"type":    "invalid_request_error",
+				}})
+				return
+			}
+			up := modelName
+			if u := s.resolveUpstreamModel(modelName); u != "" {
+				up = u
+			}
+			q := url.Values{}
+			q.Set("model", up)
+			q.Set("smart_format", "true")
+			upstreamURL = strings.TrimRight(upstreamURL, "/") + "?" + q.Encode()
+			body = audioBytes
+			deepgramSTT = true
+			deepgramCT = audioCT
+		}
+
 		// Volcengine (Doubao) BigTTS: translate OpenAI {input,voice} into the
 		// req_params body; "voice" is the speaker and drives the resource id.
 		volcResource := ""
@@ -201,6 +282,29 @@ func (s *Server) mediaProxyHandler(ep mediaEndpoint) gin.HandlerFunc {
 			body = volcBody
 		}
 
+		// ElevenLabs music: translate {model, prompt|input, music_length_ms} into
+		// ElevenLabs /v1/music {prompt, music_length_ms}. Auth = xi-api-key (set
+		// below via isElevenLabsProvider). Returns audio bytes.
+		if ep.pathSuffix == "music" && isElevenLabsProvider(upstreamURL) {
+			prompt := strings.TrimSpace(gjson.GetBytes(body, "prompt").String())
+			if prompt == "" {
+				prompt = strings.TrimSpace(gjson.GetBytes(body, "input").String())
+			}
+			mus := map[string]any{"prompt": prompt}
+			if ln := gjson.GetBytes(body, "music_length_ms").Int(); ln > 0 {
+				mus["music_length_ms"] = ln
+			}
+			musBody, errMarshal := json.Marshal(mus)
+			if errMarshal != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": gin.H{
+					"message": fmt.Sprintf("failed to build ElevenLabs music body: %v", errMarshal),
+					"type":    "server_error",
+				}})
+				return
+			}
+			body = musBody
+		}
+
 		// Create upstream request.
 		upstreamReq, err := http.NewRequestWithContext(c.Request.Context(), http.MethodPost, upstreamURL, bytes.NewReader(body))
 		if err != nil {
@@ -212,7 +316,11 @@ func (s *Server) mediaProxyHandler(ep mediaEndpoint) gin.HandlerFunc {
 		}
 
 		// Copy Content-Type from the original request (preserves multipart boundary).
-		if ct := c.GetHeader("Content-Type"); ct != "" {
+		// Deepgram is the exception: the body is now raw audio, so use the audio
+		// file's own Content-Type instead of the multipart one.
+		if deepgramSTT {
+			upstreamReq.Header.Set("Content-Type", deepgramCT)
+		} else if ct := c.GetHeader("Content-Type"); ct != "" {
 			upstreamReq.Header.Set("Content-Type", ct)
 		} else if ep.contentType != "" {
 			upstreamReq.Header.Set("Content-Type", ep.contentType)
@@ -227,6 +335,8 @@ func (s *Server) mediaProxyHandler(ep mediaEndpoint) gin.HandlerFunc {
 			case isVolcengineProvider(upstreamURL):
 				upstreamReq.Header.Set("X-Api-Key", provider.apiKey)
 				upstreamReq.Header.Set("X-Api-Resource-Id", volcResource)
+			case isDeepgramProvider(upstreamURL):
+				upstreamReq.Header.Set("Authorization", "Token "+provider.apiKey)
 			case s.mediaAuthStyle(modelName) == "bearer":
 				upstreamReq.Header.Set("Authorization", "Bearer "+provider.apiKey)
 			default:
@@ -257,6 +367,19 @@ func (s *Server) mediaProxyHandler(ep mediaEndpoint) gin.HandlerFunc {
 				return
 			}
 			streamVolcAudio(c, resp.Body, modelName, volcContentType)
+			return
+		}
+
+		// Deepgram returns its own JSON shape; translate to OpenAI {text:...} so
+		// standard /audio/transcriptions clients get the expected response.
+		if deepgramSTT {
+			raw, _ := io.ReadAll(resp.Body)
+			if resp.StatusCode != http.StatusOK {
+				c.Data(resp.StatusCode, "application/json", raw)
+				return
+			}
+			tx := gjson.GetBytes(raw, "results.channels.0.alternatives.0.transcript").String()
+			c.JSON(http.StatusOK, gin.H{"text": tx})
 			return
 		}
 
@@ -313,7 +436,7 @@ func (s *Server) resolveMediaProvider(modelName string, ep mediaEndpoint) *media
 			// ElevenLabs Scribe STT / Volcengine TTS: base-url is the full API URL
 			// with non-Azure path + auth. Use it verbatim (the handler applies the
 			// provider-specific header/body transforms).
-			if isElevenLabsProvider(baseURL) || isVolcengineProvider(baseURL) {
+			if isElevenLabsProvider(baseURL) || isVolcengineProvider(baseURL) || isDeepgramProvider(baseURL) {
 				return &mediaProviderConfig{baseURL: baseURL, apiKey: apiKey}
 			}
 
@@ -511,6 +634,54 @@ func rewriteBodyModel(body []byte, model string) []byte {
 // response carrying base64 audio.
 func isVolcengineProvider(baseURL string) bool {
 	return strings.Contains(baseURL, "openspeech.bytedance.com")
+}
+
+// isDeepgramProvider reports whether the base URL targets Deepgram's STT API,
+// which uses "Authorization: Token <key>" auth and a /v1/listen endpoint that
+// takes raw audio bytes (not multipart) and returns its own JSON shape.
+func isDeepgramProvider(baseURL string) bool {
+	return strings.Contains(baseURL, "deepgram.com")
+}
+
+// isOpenAIRealtimeProvider reports whether the base URL targets OpenAI's native
+// realtime WS endpoint (api.openai.com), which authenticates with
+// "Authorization: Bearer <key>" + "OpenAI-Beta: realtime=v1" and takes the model
+// as a ?model= query param — unlike Azure, which bakes the deployment into the URL
+// and uses the api-key header.
+func isOpenAIRealtimeProvider(baseURL string) bool {
+	return strings.Contains(baseURL, "api.openai.com")
+}
+
+// extractAudioFromMultipart pulls the "file" part (OpenAI audio upload) out of a
+// multipart body, returning its raw bytes and Content-Type. Used to translate an
+// OpenAI /audio/transcriptions multipart request into a Deepgram raw-audio POST.
+func extractAudioFromMultipart(body []byte, contentType string) ([]byte, string) {
+	_, params, err := mime.ParseMediaType(contentType)
+	if err != nil {
+		return nil, ""
+	}
+	boundary := params["boundary"]
+	if boundary == "" {
+		return nil, ""
+	}
+	reader := multipart.NewReader(bytes.NewReader(body), boundary)
+	for {
+		part, err := reader.NextPart()
+		if err != nil {
+			return nil, ""
+		}
+		if part.FormName() == "file" {
+			data, errRead := io.ReadAll(part)
+			if errRead != nil {
+				return nil, ""
+			}
+			ct := part.Header.Get("Content-Type")
+			if ct == "" {
+				ct = "application/octet-stream"
+			}
+			return data, ct
+		}
+	}
 }
 
 // volcResourceID picks the X-Api-Resource-Id required by a Volcengine speaker.

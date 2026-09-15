@@ -169,12 +169,29 @@ func (s *Server) realtimeProxyHandler() gin.HandlerFunc {
 			u.RawQuery = q.Encode()
 			upstreamURL = u.String()
 		}
+		// Direct OpenAI realtime (api.openai.com) needs the model in the query
+		// string and the realtime beta header; Azure bakes the deployment+model
+		// into the base-url instead. Add ?model= for the OpenAI case (the client's
+		// model param was skipped above to avoid clobbering Azure deployments).
+		if isOpenAIRealtimeProvider(upstreamURL) {
+			if u, e := url.Parse(upstreamURL); e == nil {
+				q := u.Query()
+				if q.Get("model") == "" {
+					q.Set("model", model)
+					u.RawQuery = q.Encode()
+					upstreamURL = u.String()
+				}
+			}
+		}
 		header := http.Header{}
 		if provider.apiKey != "" {
-			// ElevenLabs realtime STT authenticates with xi-api-key, not the
-			// Azure-style api-key header.
+			// ElevenLabs realtime STT authenticates with xi-api-key; direct OpenAI
+			// uses Authorization: Bearer + OpenAI-Beta; Azure uses the api-key header.
 			if isElevenLabsProvider(upstreamURL) {
 				header.Set("xi-api-key", provider.apiKey)
+			} else if isOpenAIRealtimeProvider(upstreamURL) {
+				header.Set("Authorization", "Bearer "+provider.apiKey)
+				header.Set("OpenAI-Beta", "realtime=v1")
 			} else {
 				header.Set("api-key", provider.apiKey)
 			}
