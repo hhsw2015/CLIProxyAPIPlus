@@ -662,6 +662,7 @@ func (s *Server) setupRoutes() {
 	}
 	// Media API proxy routes (images, audio)
 	s.setupMediaRoutes(v1)
+	s.setupSystemOneRoutes(v1)
 	// WebSocket Realtime proxy (gpt-4o-realtime-preview)
 	s.setupRealtimeRoutes(v1)
 	// Async task routes (video generation, music, etc.)
