@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -39,6 +40,7 @@ func init() {
 	registerTaskAdaptor(&skyreelsAdaptor{})
 	registerTaskAdaptor(&whisperBatchAdaptor{})
 	registerTaskAdaptor(&taijiaSoraAdaptor{})
+	registerTaskAdaptor(&atlasAdaptor{})
 }
 
 // setupTaskRoutes registers async task API routes.
@@ -84,6 +86,13 @@ func (s *Server) setupTaskRoutes(v1 *gin.RouterGroup) {
 }
 
 // taskSubmitHandler returns a handler for submitting async tasks.
+//
+// Every openai-compatibility entry serving the model is a candidate channel,
+// tried highest priority first (config order breaks ties). A channel-side
+// failure (transport error, 401/402/403/404/408/429, 5xx) falls over to the next
+// candidate; a 400 is the client's own body and is returned as-is. Before this,
+// the first config-order match was the only channel ever used, so a dead
+// backend hid every other entry for that model.
 func (s *Server) taskSubmitHandler(platform string) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		body, err := c.GetRawData()
@@ -95,7 +104,6 @@ func (s *Server) taskSubmitHandler(platform string) gin.HandlerFunc {
 			return
 		}
 
-		// Extract model name early for auto-detection.
 		modelName := ""
 		var bodyMap map[string]any
 		if json.Unmarshal(body, &bodyMap) == nil {
@@ -104,41 +112,8 @@ func (s *Server) taskSubmitHandler(platform string) gin.HandlerFunc {
 			}
 		}
 
-		// Auto-detect platform from model name if platform is "auto".
-		if platform == "auto" && modelName != "" {
-			platform = s.detectPlatformForModel(modelName)
-		}
-
-		adaptor, ok := taskRegistry[platform]
-		if !ok {
-			c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{
-				"message": fmt.Sprintf("unsupported platform: %s for model %s", platform, modelName),
-				"type":    "invalid_request_error",
-			}})
-			return
-		}
-
-		// Client called an alias; rewrite the task body's model to the upstream
-		// provider id (SKYROUTER model_ids remap: public -> upstream) BEFORE
-		// ValidateAndSetAction so adaptors that derive the endpoint from the
-		// model (e.g. runninghub) see the upstream id.
-		if up := s.resolveUpstreamModel(modelName); up != "" {
-			body = rewriteBodyModel(body, up)
-		}
-
-		// Validate and determine action.
-		action, err := adaptor.ValidateAndSetAction(c, body)
-		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{
-				"message": err.Error(),
-				"type":    "invalid_request_error",
-			}})
-			return
-		}
-
-		// Find provider from openai-compatibility config.
-		provider := s.resolveTaskProvider(modelName, platform)
-		if provider == nil {
+		candidates := s.resolveTaskCandidates(modelName, platform)
+		if len(candidates) == 0 {
 			c.JSON(http.StatusBadGateway, gin.H{"error": gin.H{
 				"message": fmt.Sprintf("no provider configured for model %s on platform %s", modelName, platform),
 				"type":    "server_error",
@@ -146,159 +121,179 @@ func (s *Server) taskSubmitHandler(platform string) gin.HandlerFunc {
 			return
 		}
 
-		// Expose the resolved provider key to BuildRequestBody for adaptors that
-		// must carry it in the request body (e.g. skyreels needs api_key inline).
-		c.Set("task_provider_api_key", provider.apiKey)
-
-		// Build upstream request.
-		// If the provider base-url is a gpt-proxy URL (contains /gpt-proxy/),
-		// use gpt-proxy-specific URL construction.
-		upstreamURL := provider.baseURL
-		isPassthrough := strings.Contains(provider.baseURL, "/gpt-proxy/")
-		if isPassthrough {
-			upstreamURL = (&gptProxyAdaptor{}).buildSubmitURL(provider.baseURL)
-		} else {
-			upstreamURL = adaptor.BuildRequestURL(provider.baseURL, action)
-		}
-
-		var reqBody io.Reader
-		var contentType string
-		if isPassthrough {
-			// gpt-proxy: transform body and use correct submit URL.
-			c.Set("gpt_proxy_base_url", provider.baseURL)
-			var err error
-			gptAdaptor := &gptProxyAdaptor{}
-			reqBody, contentType, err = gptAdaptor.BuildRequestBody(c, body, modelName)
-			if err != nil {
-				reqBody = bytes.NewReader(body)
-				contentType = "application/json"
-			}
-		} else {
-			var err error
-			reqBody, contentType, err = adaptor.BuildRequestBody(c, body, modelName)
-			if err != nil {
-				c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{
-					"message": fmt.Sprintf("failed to build request: %v", err),
-					"type":    "invalid_request_error",
-				}})
+		// ponytail: per-request fill-first failover, no cooldown. Add a cooldown map
+		// if a dead top-priority channel keeps eating the first attempt of every request.
+		var lastStatus int
+		var lastBody []byte
+		var lastErr error
+		for i, cand := range candidates {
+			done, status, errBody, errSubmit := s.submitTaskTo(c, cand, body, modelName)
+			if done {
 				return
 			}
+			lastStatus, lastBody, lastErr = status, errBody, errSubmit
+			log.Warnf("task submit: channel %s (%s) failed for %s [%d/%d] status=%d err=%v; failing over",
+				cand.name, cand.platform, modelName, i+1, len(candidates), status, errSubmit)
 		}
-
-		upstreamReq, err := http.NewRequestWithContext(c.Request.Context(), http.MethodPost, upstreamURL, reqBody)
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": gin.H{
-				"message": fmt.Sprintf("failed to create upstream request: %v", err),
-				"type":    "server_error",
-			}})
+		if lastBody != nil && lastStatus != 0 {
+			c.Data(lastStatus, "application/json", lastBody)
 			return
 		}
-		if contentType != "" {
-			upstreamReq.Header.Set("Content-Type", contentType)
-		}
-		adaptor.BuildRequestHeader(upstreamReq, provider.apiKey)
-
-		// Send request.
-		resp, err := (&http.Client{Timeout: 60 * time.Second}).Do(upstreamReq)
-		if err != nil {
-			log.Errorf("task submit: upstream request failed for %s/%s: %v", platform, modelName, err)
-			c.JSON(http.StatusBadGateway, gin.H{"error": gin.H{
-				"message": fmt.Sprintf("upstream request failed: %v", err),
-				"type":    "server_error",
-			}})
-			return
-		}
-		defer resp.Body.Close()
-
-		// Handle non-success responses.
-		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			errBody, _ := io.ReadAll(resp.Body)
-			log.Errorf("task submit: upstream returned %d for %s/%s: %s", resp.StatusCode, platform, modelName, string(errBody))
-			c.Data(resp.StatusCode, resp.Header.Get("Content-Type"), errBody)
-			return
-		}
-
-		// For gpt-proxy passthrough, parse response to extract task ID
-		// and store it in CPA's task store for unified polling.
-		if isPassthrough {
-			respBody, _ := io.ReadAll(resp.Body)
-			// Try to extract task ID from gpt-proxy response.
-			var gptProxyResp map[string]any
-			upstreamTaskID := ""
-			if json.Unmarshal(respBody, &gptProxyResp) == nil {
-				// Try common task ID field names.
-				for _, field := range []string{"id", "task_id", "taskId", "data.task_id"} {
-					if v, ok := gptProxyResp[field]; ok {
-						if s, ok := v.(string); ok && s != "" {
-							upstreamTaskID = s
-							break
-						}
-					}
-				}
-				// Check nested data.task_id
-				if upstreamTaskID == "" {
-					if data, ok := gptProxyResp["data"].(map[string]any); ok {
-						if tid, ok := data["task_id"].(string); ok {
-							upstreamTaskID = tid
-						}
-					}
-				}
-			}
-
-			task := &Task{
-				ID:              generateTaskID(),
-				Model:           modelName,
-				Platform:        "gpt-proxy",
-				Action:          action,
-				Status:          TaskStatusSubmitted,
-				Progress:        "10%",
-				Data:            respBody,
-				CreatedAt:       time.Now(),
-				UpstreamTaskID:  upstreamTaskID,
-				ProviderBaseURL: provider.baseURL,
-				ProviderAPIKey:  provider.apiKey,
-			}
-			globalTaskStore.Insert(task)
-			go s.pollTaskUntilDone(task.ID)
-			log.Infof("task created (gpt-proxy): %s model=%s upstream=%s", task.ID, modelName, upstreamTaskID)
-
-			c.JSON(http.StatusOK, (&soraAdaptor{}).BuildClientResponse(task))
-			return
-		}
-
-		// Parse upstream response.
-		upstreamTaskID, data, err := adaptor.ParseSubmitResponse(resp)
-		if err != nil {
-			log.Errorf("task submit: failed to parse response for %s/%s: %v", platform, modelName, err)
-			c.JSON(http.StatusBadGateway, gin.H{"error": gin.H{
-				"message": fmt.Sprintf("failed to parse upstream response: %v", err),
-				"type":    "server_error",
-			}})
-			return
-		}
-
-		// Create and store task.
-		task := &Task{
-			ID:              generateTaskID(),
-			Model:           modelName,
-			Platform:        platform,
-			Action:          action,
-			Status:          TaskStatusSubmitted,
-			Progress:        "10%",
-			Data:            data,
-			CreatedAt:       time.Now(),
-			UpstreamTaskID:  upstreamTaskID,
-			ProviderBaseURL: provider.baseURL,
-			ProviderAPIKey:  provider.apiKey,
-		}
-		globalTaskStore.Insert(task)
-		go s.pollTaskUntilDone(task.ID)
-
-		log.Infof("task created: %s platform=%s model=%s upstream=%s", task.ID, platform, modelName, upstreamTaskID)
-
-		// Return response.
-		c.JSON(http.StatusOK, adaptor.BuildClientResponse(task))
+		c.JSON(http.StatusBadGateway, gin.H{"error": gin.H{
+			"message": fmt.Sprintf("upstream request failed on all %d channels for %s: %v", len(candidates), modelName, lastErr),
+			"type":    "server_error",
+		}})
 	}
+}
+
+// taskSubmitFailsOver reports whether a failed submit should fall through to the
+// next candidate channel: per-channel auth/quota/not-found, throttling and
+// upstream 5xx. A 400 is the client's own body and must not fail over.
+func taskSubmitFailsOver(status int) bool {
+	switch status {
+	case http.StatusUnauthorized, http.StatusPaymentRequired, http.StatusForbidden,
+		http.StatusNotFound, http.StatusRequestTimeout, http.StatusTooManyRequests:
+		return true
+	}
+	return status >= 500
+}
+
+// submitTaskTo tries one candidate channel. done=true means a response has been
+// written (success, or a client error that must not fail over). Otherwise the
+// caller moves on with the returned upstream status/body or transport error.
+func (s *Server) submitTaskTo(c *gin.Context, cand taskCandidate, body []byte, modelName string) (bool, int, []byte, error) {
+	adaptor, ok := taskRegistry[cand.platform]
+	if !ok {
+		return false, 0, nil, fmt.Errorf("unsupported platform %s", cand.platform)
+	}
+	// Client called an alias; rewrite the task body's model to THIS candidate's
+	// upstream id BEFORE ValidateAndSetAction so adaptors that derive the endpoint
+	// from the model (e.g. runninghub) see the upstream id. Per candidate, because
+	// providers sharing a client name each have their own id.
+	if cand.upstream != "" && !strings.EqualFold(cand.upstream, modelName) {
+		body = rewriteBodyModel(body, cand.upstream)
+	}
+	action, err := adaptor.ValidateAndSetAction(c, body)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{
+			"message": err.Error(),
+			"type":    "invalid_request_error",
+		}})
+		return true, 0, nil, nil
+	}
+
+	provider := cand.provider
+	// Expose the resolved provider key to BuildRequestBody for adaptors that
+	// must carry it in the request body (e.g. skyreels needs api_key inline).
+	c.Set("task_provider_api_key", provider.apiKey)
+
+	// A gpt-proxy base-url (contains /gpt-proxy/) uses gpt-proxy URL + body construction.
+	isPassthrough := strings.Contains(provider.baseURL, "/gpt-proxy/")
+	var upstreamURL, contentType string
+	var reqBody io.Reader
+	if isPassthrough {
+		c.Set("gpt_proxy_base_url", provider.baseURL)
+		gptAdaptor := &gptProxyAdaptor{}
+		upstreamURL = gptAdaptor.buildSubmitURL(provider.baseURL)
+		reqBody, contentType, err = gptAdaptor.BuildRequestBody(c, body, modelName)
+		if err != nil {
+			reqBody, contentType = bytes.NewReader(body), "application/json"
+		}
+	} else {
+		upstreamURL = adaptor.BuildRequestURL(provider.baseURL, action)
+		reqBody, contentType, err = adaptor.BuildRequestBody(c, body, modelName)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{
+				"message": fmt.Sprintf("failed to build request: %v", err),
+				"type":    "invalid_request_error",
+			}})
+			return true, 0, nil, nil
+		}
+	}
+
+	upstreamReq, err := http.NewRequestWithContext(c.Request.Context(), http.MethodPost, upstreamURL, reqBody)
+	if err != nil {
+		return false, 0, nil, fmt.Errorf("create upstream request: %w", err)
+	}
+	if contentType != "" {
+		upstreamReq.Header.Set("Content-Type", contentType)
+	}
+	adaptor.BuildRequestHeader(upstreamReq, provider.apiKey)
+
+	resp, err := (&http.Client{Timeout: 60 * time.Second}).Do(upstreamReq)
+	if err != nil {
+		return false, 0, nil, fmt.Errorf("upstream request failed: %w", err)
+	}
+	defer func() {
+		if errClose := resp.Body.Close(); errClose != nil {
+			log.Errorf("task submit: close upstream body: %v", errClose)
+		}
+	}()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		errBody, _ := io.ReadAll(resp.Body)
+		log.Errorf("task submit: upstream %s returned %d for %s/%s: %s", cand.name, resp.StatusCode, cand.platform, modelName, string(errBody))
+		if taskSubmitFailsOver(resp.StatusCode) {
+			return false, resp.StatusCode, errBody, nil
+		}
+		c.Data(resp.StatusCode, resp.Header.Get("Content-Type"), errBody)
+		return true, 0, nil, nil
+	}
+
+	if isPassthrough {
+		respBody, _ := io.ReadAll(resp.Body)
+		task := s.storeTask(&Task{
+			Model: modelName, Platform: "gpt-proxy", Action: action, Data: respBody,
+			UpstreamTaskID: gptProxyTaskID(respBody), ProviderBaseURL: provider.baseURL, ProviderAPIKey: provider.apiKey,
+		})
+		log.Infof("task created (gpt-proxy): %s model=%s channel=%s upstream=%s", task.ID, modelName, cand.name, task.UpstreamTaskID)
+		c.JSON(http.StatusOK, (&soraAdaptor{}).BuildClientResponse(task))
+		return true, 0, nil, nil
+	}
+
+	upstreamTaskID, data, err := adaptor.ParseSubmitResponse(resp)
+	if err != nil {
+		// A 2xx we cannot parse is a broken channel, not a client error: fall over.
+		return false, 0, nil, fmt.Errorf("parse upstream response: %w", err)
+	}
+	task := s.storeTask(&Task{
+		Model: modelName, Platform: cand.platform, Action: action, Data: data,
+		UpstreamTaskID: upstreamTaskID, ProviderBaseURL: provider.baseURL, ProviderAPIKey: provider.apiKey,
+	})
+	log.Infof("task created: %s platform=%s model=%s channel=%s upstream=%s", task.ID, cand.platform, modelName, cand.name, upstreamTaskID)
+	c.JSON(http.StatusOK, adaptor.BuildClientResponse(task))
+	return true, 0, nil, nil
+}
+
+// storeTask assigns id/status/timestamps, stores the task and starts polling it.
+func (s *Server) storeTask(task *Task) *Task {
+	task.ID = generateTaskID()
+	task.Status = TaskStatusSubmitted
+	task.Progress = "10%"
+	task.CreatedAt = time.Now()
+	globalTaskStore.Insert(task)
+	go s.pollTaskUntilDone(task.ID)
+	return task
+}
+
+// gptProxyTaskID extracts the upstream task id from a gpt-proxy submit response
+// (id / task_id / taskId at top level, or nested data.task_id).
+func gptProxyTaskID(respBody []byte) string {
+	var m map[string]any
+	if json.Unmarshal(respBody, &m) != nil {
+		return ""
+	}
+	for _, field := range []string{"id", "task_id", "taskId"} {
+		if v, ok := m[field].(string); ok && v != "" {
+			return v
+		}
+	}
+	if data, ok := m["data"].(map[string]any); ok {
+		if tid, ok := data["task_id"].(string); ok {
+			return tid
+		}
+	}
+	return ""
 }
 
 // taskFetchHandler returns a handler for polling task status.
@@ -335,56 +330,111 @@ func (s *Server) taskFetchHandler() gin.HandlerFunc {
 	}
 }
 
-// detectPlatformForModel determines the task platform based on model name and config.
-func (s *Server) detectPlatformForModel(modelName string) string {
-	if s.cfg != nil {
-		for _, compat := range s.cfg.OpenAICompatibility {
-			for _, m := range compat.Models {
-				name := strings.TrimSpace(m.Name)
-				alias := strings.TrimSpace(m.Alias)
-				if !strings.EqualFold(name, modelName) && !strings.EqualFold(alias, modelName) {
-					continue
-				}
-				// gpt-proxy passthrough
-				if strings.Contains(compat.BaseURL, "/gpt-proxy/") {
-					return "gpt-proxy"
-				}
-				// Detect by config entry name prefix
-				entryName := strings.ToLower(compat.Name)
-				switch {
-				case strings.HasPrefix(entryName, "foxtoken") || strings.HasPrefix(entryName, "huawi"):
-					return "foxtoken"
-				case strings.HasPrefix(entryName, "topaz"):
-					return "topaz"
-				case strings.HasPrefix(entryName, "dashscope") || strings.HasPrefix(entryName, "aliyun"):
-					return "dashscope"
-				case strings.HasPrefix(entryName, "minimaxh3"):
-					return "minimax-h3"
-				case strings.HasPrefix(entryName, "skyreels") || strings.HasPrefix(entryName, "skywork"):
-					return "skyreels"
-				case strings.HasPrefix(entryName, "kling"):
-					return "kling"
-				case strings.HasPrefix(entryName, "hailuo") || strings.HasPrefix(entryName, "minimax"):
-					return "hailuo"
-				case strings.HasPrefix(entryName, "doubao") || strings.HasPrefix(entryName, "seedance"):
-					return "doubao"
-				case strings.HasPrefix(entryName, "vidu"):
-					return "vidu"
-				case strings.HasPrefix(entryName, "suno"):
-					return "suno"
-				case strings.HasPrefix(entryName, "gemini") || strings.HasPrefix(entryName, "vertex"):
-					return "gemini"
-				case strings.HasPrefix(entryName, "azure-sora") || strings.Contains(entryName, "sora"):
-					return "sora"
-				case strings.HasPrefix(entryName, "fal"):
-					return "fal"
-				case strings.HasPrefix(entryName, "runninghub") || strings.HasPrefix(entryName, "skymedia-rh"):
-					return "runninghub"
-				}
+// taskCandidate is one openai-compatibility entry able to serve an async-task model.
+type taskCandidate struct {
+	name     string
+	platform string
+	priority int
+	provider mediaProviderConfig
+	// upstream is this entry's own id for the client model (models[].name when the
+	// client called an alias). Rewritten per candidate so a client name shared by
+	// several providers (e.g. wan3.0-video on dashscope AND fal) sends each one
+	// its own id instead of whatever the first config match happened to use.
+	upstream string
+}
+
+// resolveTaskCandidates returns every openai-compatibility entry serving
+// modelName, highest priority first (config order breaks ties). With platform
+// "auto" the platform is detected per entry, so mixed backends behind one client
+// model name (azure sora / gpt-proxy / a reseller's /v1/videos) fail over to
+// each other.
+func (s *Server) resolveTaskCandidates(modelName, platform string) []taskCandidate {
+	if s.cfg == nil {
+		return nil
+	}
+	var out []taskCandidate
+	for i := range s.cfg.OpenAICompatibility {
+		compat := &s.cfg.OpenAICompatibility[i]
+		upstream := ""
+		for _, m := range compat.Models {
+			if strings.EqualFold(strings.TrimSpace(m.Name), modelName) || strings.EqualFold(strings.TrimSpace(m.Alias), modelName) {
+				upstream = strings.TrimSpace(m.Name)
+				break
 			}
 		}
+		if upstream == "" {
+			continue
+		}
+		p := platform
+		if p == "auto" {
+			p = platformForEntry(compat.Name, compat.BaseURL)
+		}
+		if p == "" {
+			p = platformForModelName(modelName)
+		}
+		apiKey := ""
+		if len(compat.APIKeyEntries) > 0 {
+			apiKey = strings.TrimSpace(compat.APIKeyEntries[0].APIKey)
+		}
+		if apiKey == "" {
+			apiKey = compat.Headers["api-key"]
+		}
+		out = append(out, taskCandidate{
+			name:     compat.Name,
+			platform: p,
+			priority: compat.Priority,
+			provider: mediaProviderConfig{baseURL: strings.TrimSpace(compat.BaseURL), apiKey: apiKey},
+			upstream: upstream,
+		})
 	}
-	// Fallback: detect by model name pattern
+	sort.SliceStable(out, func(a, b int) bool { return out[a].priority > out[b].priority })
+	return out
+}
+
+// platformForEntry maps a config entry to its task adaptor by base-url /
+// entry-name convention. "" means no convention matched.
+func platformForEntry(entryName, baseURL string) string {
+	if strings.Contains(baseURL, "/gpt-proxy/") {
+		return "gpt-proxy"
+	}
+	entryName = strings.ToLower(entryName)
+	switch {
+	case strings.HasPrefix(entryName, "foxtoken") || strings.HasPrefix(entryName, "huawi"):
+		return "foxtoken"
+	case strings.HasPrefix(entryName, "topaz"):
+		return "topaz"
+	case strings.HasPrefix(entryName, "dashscope") || strings.HasPrefix(entryName, "aliyun"):
+		return "dashscope"
+	case strings.HasPrefix(entryName, "minimaxh3"):
+		return "minimax-h3"
+	case strings.HasPrefix(entryName, "skyreels") || strings.HasPrefix(entryName, "skywork"):
+		return "skyreels"
+	case strings.HasPrefix(entryName, "kling"):
+		return "kling"
+	case strings.HasPrefix(entryName, "hailuo") || strings.HasPrefix(entryName, "minimax"):
+		return "hailuo"
+	case strings.HasPrefix(entryName, "doubao") || strings.HasPrefix(entryName, "seedance"):
+		return "doubao"
+	case strings.HasPrefix(entryName, "vidu"):
+		return "vidu"
+	case strings.HasPrefix(entryName, "suno"):
+		return "suno"
+	case strings.HasPrefix(entryName, "gemini") || strings.HasPrefix(entryName, "vertex"):
+		return "gemini"
+	case strings.HasPrefix(entryName, "azure-sora") || strings.Contains(entryName, "sora"):
+		return "sora"
+	case strings.HasPrefix(entryName, "atlas-media"):
+		return "atlas"
+	case strings.HasPrefix(entryName, "fal"):
+		return "fal"
+	case strings.HasPrefix(entryName, "runninghub") || strings.HasPrefix(entryName, "skymedia-rh"):
+		return "runninghub"
+	}
+	return ""
+}
+
+// platformForModelName is the last-resort platform guess from the model name.
+func platformForModelName(modelName string) string {
 	lower := strings.ToLower(modelName)
 	switch {
 	case strings.Contains(lower, "veo"):
