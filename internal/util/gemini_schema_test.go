@@ -2446,3 +2446,28 @@ func TestCleanJSONSchema_RemovesDraft04IdAndSchemaIdentifierKeywords(t *testing.
 		}
 	}
 }
+
+// TestCleanJSONSchemaForGeminiJSONSchemaPreservesConstraints verifies the
+// parametersJsonSchema carrier keeps standard JSON Schema constraints and
+// additionalProperties, unlike the legacy CleanJSONSchemaForGemini which
+// demotes them to description hints. (Ported from upstream #5959.)
+func TestCleanJSONSchemaForGeminiJSONSchemaPreservesConstraints(t *testing.T) {
+	in := `{"type":"object","properties":{"name":{"type":"string","pattern":"^[a-z]+$","minLength":2,"maxLength":8}},"additionalProperties":false,"required":["name"]}`
+	got := CleanJSONSchemaForGeminiJSONSchema(in)
+	for _, kw := range []string{"pattern", "minLength", "maxLength"} {
+		if !gjson.Get(got, "properties.name."+kw).Exists() {
+			t.Fatalf("expected %q preserved, got: %s", kw, got)
+		}
+	}
+	if !strings.Contains(got, `"^[a-z]+$"`) {
+		t.Fatalf("pattern value not preserved: %s", got)
+	}
+	if gjson.Get(got, "additionalProperties").Type != gjson.False {
+		t.Fatalf("additionalProperties:false not preserved: %s", got)
+	}
+	// The legacy carrier, by contrast, strips these standard constraints.
+	legacy := CleanJSONSchemaForGemini(in)
+	if strings.Contains(legacy, `"minLength"`) {
+		t.Fatalf("legacy CleanJSONSchemaForGemini unexpectedly kept minLength: %s", legacy)
+	}
+}
