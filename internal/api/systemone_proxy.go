@@ -27,10 +27,14 @@ import (
 const (
 	typeSafeSystemOneHost = "api.typesafe.ai"
 	openRouterHost        = "openrouter.ai"
+	vercelGatewayHost     = "ai-gateway.vercel.sh"
 	// openRouterDecisionsURL is OpenRouter's decisions endpoint proxying Jev.
 	openRouterDecisionsURL = "https://openrouter.ai/api/alpha/decisions"
 	// openRouterJevModel is the only Jev decisions model OpenRouter exposes.
 	openRouterJevModel = "typesafe/jev-1.13"
+	// vercelJevModel is the Jev id on Vercel's TypeSafe-compatible endpoint
+	// (jev-latest / jev / typesafe-ai/jev all 200; jev-1.13 is 404 there).
+	vercelJevModel = "jev-latest"
 )
 
 // systemOneChannel is one upstream that can serve a Jev decision request.
@@ -60,19 +64,30 @@ func systemOneBasename(model string) string {
 	return m
 }
 
-// systemOneChannels builds the ordered channel list: OpenRouter first (free output
-// on our existing keys), native TypeSafe second (metered $5 credit). Keys are
+// systemOneChannels builds the ordered channel list: Vercel AI Gateway first (Jev is
+// promo-FREE there — usage does not draw down credits — and its TypeSafe-compatible
+// endpoint speaks the native /systemone schema), OpenRouter second (metered input
+// ~$0.042/M, free output), native TypeSafe last ($5-credit accounts). Keys are
 // collected in config order from openai-compatibility entries by base-url host, so
 // multiple accounts pool with fill-first failover.
 func (s *Server) systemOneChannels() []systemOneChannel {
 	if s.cfg == nil {
 		return nil
 	}
-	var orKeys, tsKeys []string
-	var tsBase string
+	var vercelKeys, orKeys, tsKeys []string
+	var vercelBase, tsBase string
 	for _, compat := range s.cfg.OpenAICompatibility {
 		b := strings.TrimSpace(compat.BaseURL)
 		switch {
+		case strings.Contains(b, vercelGatewayHost):
+			if vercelBase == "" {
+				vercelBase = b
+			}
+			for _, e := range compat.APIKeyEntries {
+				if k := strings.TrimSpace(e.APIKey); k != "" {
+					vercelKeys = append(vercelKeys, k)
+				}
+			}
 		case strings.Contains(b, openRouterHost):
 			for _, e := range compat.APIKeyEntries {
 				if k := strings.TrimSpace(e.APIKey); k != "" {
@@ -92,6 +107,24 @@ func (s *Server) systemOneChannels() []systemOneChannel {
 	}
 
 	var channels []systemOneChannel
+	if len(vercelKeys) > 0 && vercelBase != "" {
+		channels = append(channels, systemOneChannel{
+			name:     "vercel",
+			endpoint: strings.TrimRight(vercelBase, "/") + "/systemone",
+			keys:     vercelKeys,
+			rewriteModel: func(incoming string) (string, bool) {
+				// Vercel serves jev-latest / jev / typesafe-ai/jev (jev-1.13 is 404
+				// there); map the 1.13 family to jev-latest. jev-preview is not on
+				// Vercel -> skip so it falls through to native TypeSafe.
+				switch systemOneBasename(incoming) {
+				case "jev-1.13", "jev-latest", "jev":
+					return vercelJevModel, true
+				default:
+					return "", false
+				}
+			},
+		})
+	}
 	if len(orKeys) > 0 {
 		channels = append(channels, systemOneChannel{
 			name:     "openrouter",
