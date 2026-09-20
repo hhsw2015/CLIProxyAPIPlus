@@ -246,6 +246,49 @@ func (s *Server) mediaProxyHandler(ep mediaEndpoint) gin.HandlerFunc {
 			deepgramCT = audioCT
 		}
 
+		// StepFun ASR: StepFun has no OpenAI /audio/transcriptions endpoint. Translate
+		// the OpenAI multipart upload into StepFun's JSON body (base64 audio + format
+		// config) POSTed to /audio/asr/sse, which returns an SSE transcript stream.
+		stepfunASR := false
+		if ep.pathSuffix == "audio/transcriptions" && isStepFunASRProvider(upstreamURL) {
+			audioBytes, filename, fileCT, language := stepFunASRPartsFromMultipart(body, c.GetHeader("Content-Type"))
+			if len(audioBytes) == 0 {
+				c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{
+					"message": "stepfun ASR: no audio file part in request",
+					"type":    "invalid_request_error",
+				}})
+				return
+			}
+			up := modelName
+			if u := s.resolveUpstreamModel(modelName); u != "" {
+				up = u
+			}
+			transcription := map[string]any{"model": up, "enable_itn": true}
+			if language != "" {
+				transcription["language"] = language
+			}
+			asrBody, errMarshal := json.Marshal(map[string]any{
+				"audio": map[string]any{
+					"data": base64.StdEncoding.EncodeToString(audioBytes),
+					"input": map[string]any{
+						"transcription": transcription,
+						"format":        map[string]any{"type": stepFunAudioFormat(filename, fileCT)},
+					},
+				},
+			})
+			if errMarshal != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": gin.H{
+					"message": fmt.Sprintf("failed to build StepFun ASR body: %v", errMarshal),
+					"type":    "server_error",
+				}})
+				return
+			}
+			body = asrBody
+			// resolveMediaProvider built base + /audio/transcriptions; retarget asr/sse.
+			upstreamURL = strings.Replace(upstreamURL, "/audio/transcriptions", "/audio/asr/sse", 1)
+			stepfunASR = true
+		}
+
 		// Volcengine (Doubao) BigTTS: translate OpenAI {input,voice} into the
 		// req_params body; "voice" is the speaker and drives the resource id.
 		volcResource := ""
@@ -320,6 +363,10 @@ func (s *Server) mediaProxyHandler(ep mediaEndpoint) gin.HandlerFunc {
 		// file's own Content-Type instead of the multipart one.
 		if deepgramSTT {
 			upstreamReq.Header.Set("Content-Type", deepgramCT)
+		} else if stepfunASR {
+			// StepFun /audio/asr/sse takes a JSON body and streams SSE back.
+			upstreamReq.Header.Set("Content-Type", "application/json")
+			upstreamReq.Header.Set("Accept", "text/event-stream")
 		} else if ct := c.GetHeader("Content-Type"); ct != "" {
 			upstreamReq.Header.Set("Content-Type", ct)
 		} else if ep.contentType != "" {
@@ -337,6 +384,8 @@ func (s *Server) mediaProxyHandler(ep mediaEndpoint) gin.HandlerFunc {
 				upstreamReq.Header.Set("X-Api-Resource-Id", volcResource)
 			case isDeepgramProvider(upstreamURL):
 				upstreamReq.Header.Set("Authorization", "Token "+provider.apiKey)
+			case isStepFunASRProvider(upstreamURL):
+				upstreamReq.Header.Set("Authorization", "Bearer "+provider.apiKey)
 			case s.mediaAuthStyle(modelName) == "bearer":
 				upstreamReq.Header.Set("Authorization", "Bearer "+provider.apiKey)
 			default:
@@ -380,6 +429,26 @@ func (s *Server) mediaProxyHandler(ep mediaEndpoint) gin.HandlerFunc {
 			}
 			tx := gjson.GetBytes(raw, "results.channels.0.alternatives.0.transcript").String()
 			c.JSON(http.StatusOK, gin.H{"text": tx})
+			return
+		}
+
+		// StepFun ASR returns an SSE stream (transcript.text.delta/done). Collapse it
+		// to the OpenAI {text:...} shape standard /audio/transcriptions clients expect.
+		if stepfunASR {
+			raw, _ := io.ReadAll(resp.Body)
+			if resp.StatusCode != http.StatusOK {
+				c.Data(resp.StatusCode, "application/json", raw)
+				return
+			}
+			text, errMsg := parseStepFunASRText(raw)
+			if errMsg != "" {
+				c.JSON(http.StatusBadGateway, gin.H{"error": gin.H{
+					"message": "stepfun asr: " + errMsg,
+					"type":    "server_error",
+				}})
+				return
+			}
+			c.JSON(http.StatusOK, gin.H{"text": text})
 			return
 		}
 
@@ -641,6 +710,118 @@ func isVolcengineProvider(baseURL string) bool {
 // takes raw audio bytes (not multipart) and returns its own JSON shape.
 func isDeepgramProvider(baseURL string) bool {
 	return strings.Contains(baseURL, "deepgram.com")
+}
+
+// isStepFunASRProvider reports whether the resolved upstream URL targets StepFun.
+// Used only on the /audio/transcriptions path to translate an OpenAI multipart
+// upload into StepFun's JSON body POSTed to /audio/asr/sse, which streams
+// transcript.text.* SSE events instead of returning an OpenAI transcription JSON.
+func isStepFunASRProvider(baseURL string) bool {
+	return strings.Contains(baseURL, "api.stepfun.ai")
+}
+
+// stepFunASRPartsFromMultipart pulls the audio file bytes, its filename and
+// Content-Type, and the optional "language" field out of an OpenAI
+// /audio/transcriptions multipart body.
+func stepFunASRPartsFromMultipart(body []byte, contentType string) (audio []byte, filename, fileCT, language string) {
+	_, params, err := mime.ParseMediaType(contentType)
+	if err != nil {
+		return nil, "", "", ""
+	}
+	boundary := params["boundary"]
+	if boundary == "" {
+		return nil, "", "", ""
+	}
+	reader := multipart.NewReader(bytes.NewReader(body), boundary)
+	for {
+		part, errPart := reader.NextPart()
+		if errPart != nil {
+			break
+		}
+		switch part.FormName() {
+		case "file":
+			if data, errRead := io.ReadAll(part); errRead == nil {
+				audio = data
+				filename = part.FileName()
+				fileCT = part.Header.Get("Content-Type")
+			}
+		case "language":
+			if data, errRead := io.ReadAll(part); errRead == nil {
+				language = strings.TrimSpace(string(data))
+			}
+		}
+	}
+	return audio, filename, fileCT, language
+}
+
+// stepFunAudioFormat maps an upload's filename extension / Content-Type to a
+// StepFun audio container type (ogg/mp3/wav/pcm/m4a). Defaults to wav.
+func stepFunAudioFormat(filename, contentType string) string {
+	ext := ""
+	if i := strings.LastIndex(filename, "."); i >= 0 {
+		ext = strings.ToLower(filename[i+1:])
+	}
+	switch ext {
+	case "mp3", "mpeg", "mpga":
+		return "mp3"
+	case "wav", "wave":
+		return "wav"
+	case "ogg", "oga":
+		return "ogg"
+	case "m4a", "mp4":
+		return "m4a"
+	case "pcm", "raw":
+		return "pcm"
+	}
+	ct := strings.ToLower(contentType)
+	switch {
+	case strings.Contains(ct, "mpeg"), strings.Contains(ct, "mp3"):
+		return "mp3"
+	case strings.Contains(ct, "wav"), strings.Contains(ct, "wave"):
+		return "wav"
+	case strings.Contains(ct, "ogg"):
+		return "ogg"
+	case strings.Contains(ct, "m4a"), strings.Contains(ct, "mp4"):
+		return "m4a"
+	}
+	return "wav"
+}
+
+// parseStepFunASRText extracts the final transcript from a StepFun /audio/asr/sse
+// response. It prefers the transcript.text.done event's full text, falling back to
+// concatenated delta events, and surfaces any error event message.
+func parseStepFunASRText(raw []byte) (text string, errMsg string) {
+	var deltas strings.Builder
+	for _, line := range strings.Split(string(raw), "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "data:") {
+			continue
+		}
+		payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		if payload == "" || payload == "[DONE]" {
+			continue
+		}
+		switch gjson.Get(payload, "type").String() {
+		case "transcript.text.done":
+			if t := gjson.Get(payload, "text").String(); t != "" {
+				text = t
+			}
+		case "transcript.text.delta":
+			deltas.WriteString(gjson.Get(payload, "delta").String())
+		case "error":
+			if m := gjson.Get(payload, "error.message").String(); m != "" {
+				errMsg = m
+			} else if m := gjson.Get(payload, "message").String(); m != "" {
+				errMsg = m
+			} else {
+				errMsg = "recognition failed"
+			}
+		}
+	}
+	if text == "" {
+		text = deltas.String()
+	}
+	return text, errMsg
 }
 
 // isOpenAIRealtimeProvider reports whether the base URL targets OpenAI's native
