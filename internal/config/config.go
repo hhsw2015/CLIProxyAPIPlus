@@ -176,6 +176,9 @@ type Config struct {
 	// Codex defines a list of Codex API key configurations as specified in the YAML configuration file.
 	CodexKey []CodexKey `yaml:"codex-api-key" json:"codex-api-key"`
 
+	// MetaKey defines Meta (Muse Code) API key configurations using the same structure as Codex API keys.
+	MetaKey []MetaKey `yaml:"meta-api-key" json:"meta-api-key"`
+
 	// XAIKey defines xAI API key configurations using the same structure as Codex API keys.
 	XAIKey []XAIKey `yaml:"xai-api-key" json:"xai-api-key"`
 
@@ -872,6 +875,11 @@ func (m ClaudeModel) GetIsCompat() bool                      { return m.IsCompat
 
 // CodexKey represents the configuration for a Codex API key,
 // including the API key itself and an optional base URL for the API endpoint.
+// MetaKey defines a native Meta (Muse Code) API credential. Meta reuses the exact
+// Codex API key structure (config api-key or an OAuth DCA token in attributes), so
+// it is an alias rather than a duplicated struct.
+type MetaKey = CodexKey
+
 type CodexKey struct {
 	// APIKey is the authentication key for accessing Codex API services.
 	APIKey string `yaml:"api-key" json:"api-key"`

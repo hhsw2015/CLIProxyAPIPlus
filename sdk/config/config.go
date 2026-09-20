@@ -23,6 +23,9 @@ type PoolManagerConfig = internalconfig.PoolManagerConfig
 
 type GeminiKey = internalconfig.GeminiKey
 type CodexKey = internalconfig.CodexKey
+
+// MetaKey re-exports the internal native Meta (Muse Code) API credential type.
+type MetaKey = internalconfig.MetaKey
 type XAIKey = internalconfig.XAIKey
 type XAIModel = internalconfig.XAIModel
 type ClaudeKey = internalconfig.ClaudeKey
