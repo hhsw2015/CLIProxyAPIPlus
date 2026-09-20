@@ -14,8 +14,14 @@
 set -euo pipefail
 
 VPS_HOST=${VPS_HOST:-azureuser@4.151.241.30}
-# Prefer ~/.ssh (current), fall back to ~/Downloads (legacy Mac location).
-VPS_KEY=${VPS_KEY:-$([ -f "$HOME/.ssh/pikapk3219_vps_key.pem" ] && echo "$HOME/.ssh/pikapk3219_vps_key.pem" || echo "$HOME/Downloads/pikapk3219_vps_key.pem")}
+# SSH key resolution (portable Mac/Linux): prefer the project-local gitignored copy
+# (.secrets/vps_key.pem) so the dashboard 🚀 Deploy works anywhere; then ~/.ssh, then
+# the legacy ~/Downloads (Mac). Override with VPS_KEY=... env.
+_UP_REPO="$(cd "$(dirname "$0")/.." && pwd)"
+VPS_KEY=${VPS_KEY:-$(
+  for _c in "$_UP_REPO/.secrets/vps_key.pem" "$HOME/.ssh/pikapk3219_vps_key.pem" "$HOME/Downloads/pikapk3219_vps_key.pem"; do
+    [ -f "$_c" ] && { printf '%s' "$_c"; break; }
+  done)}
 PROBE_PORT=${PROBE_PORT:-8319}
 LIVE_PORT=${LIVE_PORT:-8318}
 CPA_DATE=${CPA_DATE:-$(date +%Y-%m-%d)}
@@ -158,7 +164,10 @@ CONFIG_ONLY=$CONFIG_ONLY
 # 1-2 GB in a day and no one reads them after a session ends).
 ls -1t cpa-new-server.bak.* 2>/dev/null | tail -n +3 | xargs -r rm -f
 ls -1t cpa-new-config.bak.yaml.* 2>/dev/null | tail -n +3 | xargs -r rm -f
-rm -rf ~/.cli-proxy-api/logs/
+# The live server keeps writing here, so a plain rm -rf can lose the race and
+# exit "Directory not empty", aborting the whole swap under set -e (2026-09-15).
+# Best-effort: clear the contents, never fail the deploy on leftover logs.
+find ~/.cli-proxy-api/logs -mindepth 1 -delete 2>/dev/null || true
 mkdir -p ~/.cli-proxy-api/logs/
 echo "cleaned old backups + per-request logs"
 
