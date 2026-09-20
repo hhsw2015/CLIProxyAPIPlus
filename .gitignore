@@ -117,3 +117,12 @@ docker-compose.override.yml
 .llm-wiki
 scripts/vertex_watch_state.json
 scripts/cpa-refresh.sh
+
+# local secrets (SSH keys etc.) - NEVER commit
+.secrets/
+scripts/cov-dashboard.sh
+scripts/probe_frontier_ids.py
+scripts/probe_atlas_media.py
+scripts/probe_model.py
+scripts/pulse_radar.py
+scripts/probe_state_vertex.json
