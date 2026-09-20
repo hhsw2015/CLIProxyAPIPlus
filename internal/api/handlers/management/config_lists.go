@@ -535,6 +535,7 @@ func (h *Handler) PutClaudeKeys(c *gin.Context) {
 func (h *Handler) PatchClaudeKey(c *gin.Context) {
 	type claudeKeyPatch struct {
 		APIKey                  *string               `json:"api-key"`
+		Priority                *int                  `json:"priority"`
 		Weight                  json.RawMessage       `json:"weight"`
 		Prefix                  *string               `json:"prefix"`
 		BaseURL                 *string               `json:"base-url"`
@@ -578,6 +579,9 @@ func (h *Handler) PatchClaudeKey(c *gin.Context) {
 	entry := h.cfg.ClaudeKey[targetIndex]
 	if body.Value.APIKey != nil {
 		entry.APIKey = strings.TrimSpace(*body.Value.APIKey)
+	}
+	if body.Value.Priority != nil {
+		entry.Priority = *body.Value.Priority
 	}
 	if len(body.Value.Weight) > 0 {
 		weight, errWeight := parseCredentialWeightPatch(body.Value.Weight)
