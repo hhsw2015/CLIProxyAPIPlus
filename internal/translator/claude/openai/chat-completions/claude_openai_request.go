@@ -327,6 +327,17 @@ func convertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream,
 				if !gjson.GetBytes(anthropicTool, "cache_control").Exists() {
 					anthropicTool = common.AttachCacheControl(anthropicTool, function)
 				}
+				strict := function.Get("strict")
+				if !strict.Exists() {
+					strict = tool.Get("strict")
+				}
+				if strict.Exists() {
+					if strict.Type == gjson.True {
+						anthropicTool, _ = sjson.SetBytes(anthropicTool, "strict", true)
+					} else if strict.Type == gjson.False {
+						anthropicTool, _ = sjson.SetBytes(anthropicTool, "strict", false)
+					}
+				}
 
 				anthropicTools = append(anthropicTools, anthropicTool)
 			}
