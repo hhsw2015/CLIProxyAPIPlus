@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"net/url"
+	"regexp"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -76,6 +78,15 @@ func (s *Server) geminiLiveHandler() gin.HandlerFunc {
 		model := strings.TrimSpace(c.Query("model"))
 		if model == "" {
 			model = "gemini-live-2.5-flash"
+		}
+
+		// Gemini 3.8 Live (launched 2026-09-15) is an AI-Studio Live API model:
+		// our Vertex SAs (project sky-maas) only have the Anthropic publisher
+		// enabled — every publishers/google call 403s — so these must go over the
+		// AI Studio BidiGenerateContent socket keyed by an AIza key, not Vertex.
+		if geminiLiveIsAIStudioModel(model) {
+			s.geminiLiveAIStudioBridge(c, model)
+			return
 		}
 
 		creds := s.collectVertexSACreds()
@@ -162,4 +173,195 @@ func mintVertexToken(ctx context.Context, saJSON []byte) (string, error) {
 		return "", err
 	}
 	return tok.AccessToken, nil
+}
+
+// geminiLiveAIStudioWSURL is the AI Studio (generativelanguage) Live API socket.
+// Auth is the ?key= query param (an AIza key), NOT an OAuth bearer, and the
+// setup.model is a bare "models/<id>" resource (no projects/.../publishers path).
+const geminiLiveAIStudioWSURL = "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent"
+
+// geminiLiveAIStudioRR round-robins the AIza key pool; geminiLiveAIStudioGood
+// remembers the last key that worked (+1; 0 = none) so warm sessions hit a live
+// key on the first try instead of re-walking the mostly-dead pool.
+var geminiLiveAIStudioRR uint64
+var geminiLiveAIStudioGood int64
+
+// geminiLiveIsAIStudioModel routes the Gemini 3.8 Live family (AI-Studio-only) to
+// the AI Studio bridge; older gemini-live-2.5-flash stays on the Vertex path.
+func geminiLiveIsAIStudioModel(model string) bool {
+	m := strings.ToLower(model)
+	return strings.HasPrefix(m, "gemini-3.8-live") || strings.Contains(m, "-live-extended-thinking")
+}
+
+// geminiAIStudioKeys returns the plain AI Studio (AIza) keys from the config —
+// the gemini-api-key entries WITHOUT a Vertex service-account (those carry
+// credentials-b64 / vertex-location and belong to the Vertex path).
+func (s *Server) geminiAIStudioKeys() []string {
+	out := make([]string, 0)
+	if s.cfg == nil {
+		return out
+	}
+	for i := range s.cfg.GeminiKey {
+		e := &s.cfg.GeminiKey[i]
+		if e.Disabled || strings.TrimSpace(e.CredentialsB64) != "" {
+			continue
+		}
+		k := strings.TrimSpace(e.APIKey)
+		if strings.HasPrefix(k, "AIza") {
+			out = append(out, k)
+		}
+	}
+	return out
+}
+
+// geminiLiveAIStudioBridge bridges a client Live socket to AI Studio. Because the
+// AIza pool is mostly dead keys, it reads the client's setup frame ONCE, then
+// tries several keys: for each it dials, sends the setup (model rewritten to
+// "models/<id>"), and reads the first upstream frame with a short deadline —
+// a key that returns a real frame is committed; a dial error / immediate close /
+// auth error frame moves to the next key. The validated first frame is forwarded
+// to the client, then frames relay verbatim both ways.
+func (s *Server) geminiLiveAIStudioBridge(c *gin.Context, model string) {
+	keys := s.geminiAIStudioKeys()
+	if len(keys) == 0 {
+		c.JSON(http.StatusBadGateway, gin.H{"error": "no AI Studio (gemini-api-key) credentials configured"})
+		return
+	}
+
+	clientConn, errUp := realtimeUpgrader.Upgrade(c.Writer, c.Request, nil)
+	if errUp != nil {
+		log.Errorf("gemini-live[aistudio]: client upgrade failed: %v", errUp)
+		return
+	}
+	defer func() { _ = clientConn.Close() }()
+
+	// Read the client's setup frame once, rewrite the model to the AI Studio form.
+	msgType, setupData, errRead := clientConn.ReadMessage()
+	if errRead != nil {
+		return
+	}
+	if setupData, msgType = rewriteAIStudioSetup(setupData, msgType, model); setupData == nil {
+		clientConn.WriteMessage(websocket.CloseMessage,
+			websocket.FormatCloseMessage(websocket.CloseUnsupportedData, "first frame must be a BidiGenerateContent setup"))
+		return
+	}
+
+	// Start from the last-known-good key (warm path = 1 try); else round-robin.
+	// The AIza pool is mostly dead, so cap generously: dead keys fail fast (dial
+	// reject or a quick error frame), a live one commits and is remembered.
+	start := int(atomic.AddUint64(&geminiLiveAIStudioRR, 1) - 1)
+	if g := int(atomic.LoadInt64(&geminiLiveAIStudioGood)); g > 0 {
+		start = g - 1
+	}
+	tries := len(keys)
+	if tries > 24 {
+		tries = 24
+	}
+	dialer := websocket.Dialer{HandshakeTimeout: 15 * time.Second}
+	for i := 0; i < tries; i++ {
+		idx := (start + i) % len(keys)
+		key := keys[idx]
+		upstream, _, errDial := dialer.Dial(geminiLiveAIStudioWSURL+"?key="+url.QueryEscape(key), nil)
+		if errDial != nil {
+			continue
+		}
+		if upstream.WriteMessage(msgType, setupData) != nil {
+			_ = upstream.Close()
+			continue
+		}
+		// Validate by the first upstream frame. Three outcomes:
+		//   - a real frame (setupComplete) -> commit this key.
+		//   - an AUTH/quota failure (bad key) -> try the next key.
+		//   - any other close/error (e.g. 1007 "Thinking level must be specified"
+		//     for the extended-thinking model) -> a client SETUP problem that is
+		//     identical on every key, so surface it and stop, don't burn the pool.
+		_ = upstream.SetReadDeadline(time.Now().Add(6 * time.Second))
+		firstType, firstData, errFirst := upstream.ReadMessage()
+		if errFirst != nil {
+			_ = upstream.Close()
+			if ce, ok := errFirst.(*websocket.CloseError); ok && !geminiLiveCloseIsAuth(ce) {
+				clientConn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(ce.Code, ce.Text))
+				return
+			}
+			continue // dial/auth/broken key -> next
+		}
+		if geminiLiveFrameIsError(firstData) {
+			_ = upstream.Close()
+			if !geminiLiveErrFrameIsAuth(firstData) {
+				clientConn.WriteMessage(firstType, firstData) // client-side error, surface it
+				return
+			}
+			continue // auth error frame -> next key
+		}
+		_ = upstream.SetReadDeadline(time.Time{})
+		atomic.StoreInt64(&geminiLiveAIStudioGood, int64(idx+1)) // remember the live key
+		if clientConn.WriteMessage(firstType, firstData) != nil {
+			_ = upstream.Close()
+			return
+		}
+		log.Infof("gemini-live[aistudio]: session started model=%s key=…%s (attempt %d)", model, tail4(key), i+1)
+		relay := &wsRelay{client: clientConn, upstream: upstream, done: make(chan struct{})}
+		relay.run()
+		return
+	}
+	clientConn.WriteMessage(websocket.CloseMessage,
+		websocket.FormatCloseMessage(websocket.CloseTryAgainLater, "no live AI Studio key for gemini live"))
+}
+
+// rewriteAIStudioSetup forces setup.model to the AI Studio "models/<id>" form.
+// Returns (nil, 0) if the frame is not a valid setup object.
+func rewriteAIStudioSetup(data []byte, msgType int, model string) ([]byte, int) {
+	var msg map[string]any
+	if json.Unmarshal(data, &msg) != nil {
+		return nil, 0
+	}
+	setup, ok := msg["setup"].(map[string]any)
+	if !ok {
+		return nil, 0
+	}
+	setup["model"] = "models/" + model
+	out, err := json.Marshal(msg)
+	if err != nil {
+		return nil, 0
+	}
+	return out, websocket.TextMessage
+}
+
+// geminiLiveFrameIsError reports whether an upstream frame is a JSON error frame
+// (of any kind) rather than a normal setupComplete/serverContent frame.
+func geminiLiveFrameIsError(data []byte) bool {
+	var m map[string]any
+	if json.Unmarshal(data, &m) != nil {
+		return false // non-JSON (e.g. binary audio) is not an error signal
+	}
+	_, hasErr := m["error"]
+	return hasErr
+}
+
+// geminiLiveAuthRx matches the auth/quota/permission wording that means "this KEY
+// is the problem" (so the bridge should try the next key), as opposed to a
+// client setup/content error that would recur identically on every key.
+var geminiLiveAuthRx = regexp.MustCompile(`(?i)api[ _-]?key|unauthor|permission|forbidden|quota|billing|resource_?exhausted|invalid authentication|expired`)
+
+// geminiLiveCloseIsAuth classifies a WebSocket close as a key/auth failure.
+func geminiLiveCloseIsAuth(ce *websocket.CloseError) bool {
+	if ce == nil {
+		return false
+	}
+	if ce.Code == websocket.ClosePolicyViolation { // 1008: AI Studio uses it for auth/quota
+		return true
+	}
+	return geminiLiveAuthRx.MatchString(ce.Text)
+}
+
+// geminiLiveErrFrameIsAuth classifies a JSON error frame as a key/auth failure.
+func geminiLiveErrFrameIsAuth(data []byte) bool {
+	return geminiLiveAuthRx.Match(data)
+}
+
+func tail4(k string) string {
+	if len(k) <= 4 {
+		return k
+	}
+	return k[len(k)-4:]
 }
