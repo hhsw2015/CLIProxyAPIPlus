@@ -12,15 +12,21 @@ import (
 
 // SessionInfo encapsulates incoming request details needed for session affinity and upstream reporting.
 type SessionInfo struct {
-	SessionID       string         `json:"session_id"`
-	ParentSessionID string         `json:"parent_session_id,omitempty"`
-	AgentName       string         `json:"agent_name,omitempty"`
-	ClientType      string         `json:"client_type,omitempty"`
-	CallerScope     string         `json:"caller_scope,omitempty"`
-	AuthID          string         `json:"auth_id,omitempty"`
-	Provider        string         `json:"provider,omitempty"`
-	Model           string         `json:"model,omitempty"`
-	Metadata        map[string]any `json:"metadata,omitempty"`
+	SessionID       string `json:"session_id"`
+	ParentSessionID string `json:"parent_session_id,omitempty"`
+	AgentName       string `json:"agent_name,omitempty"`
+	ClientType      string `json:"client_type,omitempty"`
+	CallerScope     string `json:"caller_scope,omitempty"`
+	AuthID          string `json:"auth_id,omitempty"`
+	Provider        string `json:"provider,omitempty"`
+	Model           string `json:"model,omitempty"`
+	// Session-DAG topology metadata (upstream LCP feature). We do not drive the
+	// LCP scheduler, but keep these additive fields so tree_compat and metadata
+	// propagation compile and round-trip; unset by our path (inert).
+	NodeKind     string         `json:"node_kind,omitempty"`
+	IsFork       bool           `json:"is_fork,omitempty"`
+	IsCompaction bool           `json:"is_compaction,omitempty"`
+	Metadata     map[string]any `json:"metadata,omitempty"`
 }
 
 // SessionTreeInfo is an alias for SessionInfo for backward compatibility.
