@@ -833,6 +833,15 @@ func isOpenAIRealtimeProvider(baseURL string) bool {
 	return strings.Contains(baseURL, "api.openai.com")
 }
 
+// isDashScopeRealtimeProvider reports whether the base URL targets Alibaba
+// DashScope's realtime WS endpoint (…aliyuncs.com/api-ws/…), used by qwen realtime
+// models (e.g. qwen3.8-livetranslate-flash-realtime). Like OpenAI it authenticates
+// with "Authorization: Bearer <key>" and takes the model as a ?model= query param,
+// but it does NOT want the OpenAI-Beta header.
+func isDashScopeRealtimeProvider(baseURL string) bool {
+	return strings.Contains(baseURL, "aliyuncs.com") && strings.Contains(baseURL, "api-ws")
+}
+
 // extractAudioFromMultipart pulls the "file" part (OpenAI audio upload) out of a
 // multipart body, returning its raw bytes and Content-Type. Used to translate an
 // OpenAI /audio/transcriptions multipart request into a Deepgram raw-audio POST.

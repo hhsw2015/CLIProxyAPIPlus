@@ -169,11 +169,11 @@ func (s *Server) realtimeProxyHandler() gin.HandlerFunc {
 			u.RawQuery = q.Encode()
 			upstreamURL = u.String()
 		}
-		// Direct OpenAI realtime (api.openai.com) needs the model in the query
-		// string and the realtime beta header; Azure bakes the deployment+model
-		// into the base-url instead. Add ?model= for the OpenAI case (the client's
-		// model param was skipped above to avoid clobbering Azure deployments).
-		if isOpenAIRealtimeProvider(upstreamURL) {
+		// Direct OpenAI realtime (api.openai.com) and DashScope realtime
+		// (…aliyuncs.com/api-ws) need the model in the query string; Azure bakes the
+		// deployment+model into the base-url instead. Add ?model= for those cases (the
+		// client's model param was skipped above to avoid clobbering Azure deployments).
+		if isOpenAIRealtimeProvider(upstreamURL) || isDashScopeRealtimeProvider(upstreamURL) {
 			if u, e := url.Parse(upstreamURL); e == nil {
 				q := u.Query()
 				if q.Get("model") == "" {
@@ -192,6 +192,9 @@ func (s *Server) realtimeProxyHandler() gin.HandlerFunc {
 			} else if isOpenAIRealtimeProvider(upstreamURL) {
 				header.Set("Authorization", "Bearer "+provider.apiKey)
 				header.Set("OpenAI-Beta", "realtime=v1")
+			} else if isDashScopeRealtimeProvider(upstreamURL) {
+				// DashScope (qwen realtime) uses Bearer, no OpenAI-Beta header.
+				header.Set("Authorization", "Bearer "+provider.apiKey)
 			} else {
 				header.Set("api-key", provider.apiKey)
 			}
