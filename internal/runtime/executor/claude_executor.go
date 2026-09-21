@@ -2169,7 +2169,17 @@ func rebuildMidSystemMessagesToTopLevel(payload []byte) []byte {
 	keptMessages := make([]string, 0, int(messages.Get("#").Int()))
 	messages.ForEach(func(_, message gjson.Result) bool {
 		if strings.EqualFold(strings.TrimSpace(message.Get("role").String()), "system") {
-			movedSystemParts = append(movedSystemParts, claudeSystemTextParts(message.Get("content"))...)
+			parts := claudeSystemTextParts(message.Get("content"))
+			// Directive-only system turns (empty content carrying only output_config,
+			// e.g. adaptive-thinking effort) are legal at ANY position per the fable-5-1
+			// schema, so leave them in place — hoisting them would drop the directive
+			// (empty content yields no text to move) while gaining nothing. Only
+			// text-bearing system turns violate the placement rule and need hoisting.
+			if len(parts) == 0 && message.Get("output_config").Exists() {
+				keptMessages = append(keptMessages, message.Raw)
+				return true
+			}
+			movedSystemParts = append(movedSystemParts, parts...)
 			return true
 		}
 		keptMessages = append(keptMessages, message.Raw)
