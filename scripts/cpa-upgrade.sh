@@ -61,6 +61,32 @@ CFG=$REPO_ROOT/scripts/generated_v2/cpa-new-config.yaml
 [ -f "$CFG" ] || { log "config file missing: $CFG"; exit 1; }
 log "config strategy: $(grep '^  strategy:\| strategy: ' "$CFG" | head -1 | tr -s ' ')"
 
+# === 2b. DROP-GATE: never deploy a regen that silently lost usable models ===
+# The diff is the premise of maintenance; here it becomes a GUARD. If this regen
+# removed client models (cpa-config-diff.json models_removed), abort before upload
+# unless explicitly acknowledged — a dropped model is often a hidden-but-live route
+# the upstream de-listed, not a dead one (verify-before-prune). Only runs when we
+# actually regenerated (SKIP_GEN reuses the existing config, so no new diff).
+if [ "${SKIP_GEN:-}" != "1" ]; then
+    DIFF_JSON=$REPO_ROOT/scripts/generated_v2/cpa-config-diff.json
+    if [ -f "$DIFF_JSON" ]; then
+        DROPPED=$(python3 -c "import json,sys; d=json.load(open('$DIFF_JSON')); m=d.get('models_removed') or []; print(len(m)); print('\n'.join('    - '+x for x in m[:40]), file=sys.stderr)" 2>/tmp/cpa-dropped.txt)
+        if [ "${DROPPED:-0}" -gt 0 ]; then
+            log "⚠️  DROP-GATE: this regen REMOVED $DROPPED client model(s):"
+            cat /tmp/cpa-dropped.txt >&2
+            if [ "${ALLOW_MODEL_DROP:-}" = "1" ]; then
+                log "⚠️  ALLOW_MODEL_DROP=1 set — proceeding despite the drop (acknowledged)."
+            else
+                log "🛑 ABORT: refusing to deploy a config that drops models. Each dropped model may be"
+                log "   a hidden-but-live route the upstream de-listed (verify-before-prune). To proceed:"
+                log "   1) probe each on the VPS — if truly 404/dead, or intentional, re-run with ALLOW_MODEL_DROP=1;"
+                log "   2) if still live, wire it back in the generator, regen, and it won't drop."
+                exit 1
+            fi
+        fi
+    fi
+fi
+
 log "=== 3. upload to VPS (skip binary if unchanged) ==="
 # Config always uploads (fast). Binary only uploads if its sha differs from
 # what's already running on the VPS — a config-only push is ~10x faster and

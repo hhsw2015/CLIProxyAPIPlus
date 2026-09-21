@@ -126,3 +126,5 @@ scripts/probe_atlas_media.py
 scripts/probe_model.py
 scripts/pulse_radar.py
 scripts/probe_state_vertex.json
+scripts/fal_drift.py
+scripts/generated_v2/fal_catalog_snapshot.json
