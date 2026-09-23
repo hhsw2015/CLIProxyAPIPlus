@@ -128,3 +128,9 @@ scripts/pulse_radar.py
 scripts/probe_state_vertex.json
 scripts/fal_drift.py
 scripts/generated_v2/fal_catalog_snapshot.json
+
+# local build/deploy tooling (local paths + VPS-specific; not for the upstream fork)
+scripts/build_cpa_linux.sh
+scripts/cpa-upgrade.sh
+scripts/cpa-upgrade-local.sh
+scripts/deploy-all.sh
