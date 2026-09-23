@@ -41,6 +41,7 @@ func init() {
 	registerTaskAdaptor(&whisperBatchAdaptor{})
 	registerTaskAdaptor(&taijiaSoraAdaptor{})
 	registerTaskAdaptor(&atlasAdaptor{})
+	registerTaskAdaptor(&murekaAdaptor{})
 }
 
 // setupTaskRoutes registers async task API routes.
@@ -76,6 +77,10 @@ func (s *Server) setupTaskRoutes(v1 *gin.RouterGroup) {
 
 	// Vidu video
 	v1.POST("/video/generations/vidu", s.taskSubmitHandler("vidu"))
+
+	// Music generation (Mureka/Suno; auto-detect platform from model name)
+	v1.POST("/music/generations", s.taskSubmitHandler("auto"))
+	v1.POST("/audio/music", s.taskSubmitHandler("auto"))
 
 	// Generic task fetch (works for all platforms)
 	v1.GET("/tasks/:task_id", s.taskFetchHandler())
@@ -411,6 +416,8 @@ func platformForEntry(entryName, baseURL string) string {
 		return "skyreels"
 	case strings.HasPrefix(entryName, "kling"):
 		return "kling"
+	case strings.HasPrefix(entryName, "mureka"):
+		return "mureka"
 	case strings.HasPrefix(entryName, "hailuo") || strings.HasPrefix(entryName, "minimax"):
 		return "hailuo"
 	case strings.HasPrefix(entryName, "doubao") || strings.HasPrefix(entryName, "seedance"):
@@ -445,6 +452,8 @@ func platformForModelName(modelName string) string {
 		return "kling"
 	case strings.Contains(lower, "suno"):
 		return "suno"
+	case strings.Contains(lower, "mureka"):
+		return "mureka"
 	case strings.Contains(lower, "seedance") || strings.Contains(lower, "seedream"):
 		return "doubao"
 	case strings.Contains(lower, "hailuo") || strings.Contains(lower, "minimax"):
