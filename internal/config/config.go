@@ -36,6 +36,10 @@ type Config struct {
 	// Port is the network port on which the API server will listen.
 	Port int `yaml:"port" json:"-"`
 
+	// TrustedProxies lists the IPs or CIDRs allowed to provide forwarded client IP headers.
+	// The server applies this list at startup; changing it requires a restart.
+	TrustedProxies []string `yaml:"trusted-proxies" json:"trusted-proxies"`
+
 	// TLS config controls HTTPS server settings.
 	TLS TLSConfig `yaml:"tls" json:"tls"`
 
@@ -919,6 +923,11 @@ type CodexKey struct {
 
 	// DisableCooling disables auth/model cooldown scheduling for this credential.
 	DisableCooling bool `yaml:"disable-cooling,omitempty" json:"disable-cooling,omitempty"`
+
+	// DisableCodexCloaking disables client_id/user-agent cloaking for this credential's
+	// Codex requests when set. Pointer so an unset value inherits the global default
+	// (matches upstream f351924f per-credential toggle wired through the synthesizer).
+	DisableCodexCloaking *bool `yaml:"disable-codex-cloaking,omitempty" json:"disable-codex-cloaking,omitempty"`
 
 	// RequestRetry optionally overrides the global request-retry for this credential.
 	RequestRetry *int `yaml:"request-retry,omitempty" json:"request-retry,omitempty"`

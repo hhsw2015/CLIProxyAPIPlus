@@ -1,15 +1,23 @@
 # Server host/interface to bind to. Default is empty ("") to bind all interfaces (IPv4 + IPv6).
 # Use "127.0.0.1" or "localhost" to restrict access to local machine only.
-host: ''
+host: ""
 
 # Server port
 port: 8317
 
+# IP addresses or CIDRs of proxies allowed to supply forwarded client IP headers.
+# An empty list (the default) does not trust forwarded headers. Restart after changing this setting.
+trusted-proxies: []
+# Example:
+# trusted-proxies:
+#   - 127.0.0.1
+#   - 192.0.2.0/24
+
 # TLS settings for HTTPS. When enabled, the server listens with the provided certificate and key.
 tls:
   enable: false
-  cert: ''
-  key: ''
+  cert: ""
+  key: ""
 
 # Management API settings
 remote-management:
@@ -20,7 +28,7 @@ remote-management:
   # Management key. If a plaintext value is provided here, it will be hashed on startup.
   # All management requests (even from localhost) require this key.
   # Leave empty to disable the Management API entirely (404 for all /v0/management routes).
-  secret-key: ''
+  secret-key: ""
 
   # Disable the bundled management control panel asset download and HTTP route when true.
   disable-control-panel: false
@@ -30,16 +38,16 @@ remote-management:
   # disable-auto-update-panel: false
 
   # GitHub repository for the management control panel. Accepts a repository URL or releases API URL.
-  panel-github-repository: 'https://github.com/router-for-me/Cli-Proxy-API-Management-Center'
+  panel-github-repository: "https://github.com/router-for-me/Cli-Proxy-API-Management-Center"
 
 # Authentication directory (supports ~ for home directory)
-auth-dir: '~/.cli-proxy-api'
+auth-dir: "~/.cli-proxy-api"
 
 # API keys for authentication
 api-keys:
-  - 'your-api-key-1'
-  - 'your-api-key-2'
-  - 'your-api-key-3'
+  - "your-api-key-1"
+  - "your-api-key-2"
+  - "your-api-key-3"
 
 # Enable debug logging
 debug: false
@@ -47,7 +55,26 @@ debug: false
 # Enable pprof HTTP debug server (host:port). Keep it bound to localhost for safety.
 pprof:
   enable: false
-  addr: '127.0.0.1:8316'
+  addr: "127.0.0.1:8316"
+
+# Enable local network mDNS / DNS-SD service discovery (RFC 6762 / RFC 6763).
+# When enabled, broadcasts _ai-gateway._tcp with API protocol subtypes on the local network.
+# NOTE for Docker users: Link-local multicast (224.0.0.251) cannot cross default NAT bridge networks.
+# To broadcast across the physical LAN, run the container with host networking (--net=host / network_mode: host).
+discovery:
+  enabled: false
+  # service-name: ""                  # Optional name prefix. Advertised as CPA-<ShortID> or <name>-<ShortID> (e.g. office-8F3B)
+  # service-type: "_ai-gateway._tcp"  # Service type (RFC 6335 compliant)
+  # subtypes:                         # DNS-SD API protocol subtypes to advertise
+  #   - "_chat-completions"
+  #   - "_responses"
+  #   - "_messages"
+  #   - "_generate-content"
+  #   - "_interactions"
+  # interfaces:
+  #   include: []                     # White-listed interfaces (empty: auto-detect physical interfaces)
+  #   exclude: []                     # Additional interface patterns to exclude
+  # auth-required: true               # Advertise that credentials are required
 
 # Credential concurrency is configured by Home in Home mode. The synthesized Home config is
 # authoritative and local values, including the values below, are ignored. Do not use local
@@ -111,11 +138,6 @@ plugins:
 # When true, disable high-overhead request logging and HTTP middleware features to reduce per-request memory usage under high concurrency.
 commercial-mode: false
 
-# Open OAuth URLs in incognito/private browser mode.
-# Useful when you want to login with a different account without logging out from your current session.
-# Default: false (but Kiro auth defaults to true for multi-account support)
-incognito-browser: true
-
 # When true, write application logs to rotating files instead of stdout
 logging-to-file: false
 
@@ -169,13 +191,17 @@ max-retry-credentials: 0
 # Retry rounds that need no wait remain controlled by request-retry.
 max-retry-interval: 30
 
-# When true, permanently remove file-based credentials that fail with invalid auth or exhausted quota.
-# Invalid credentials are deleted, and quota-exhausted credentials are moved to auth-dir/limit.
-archive-failed-auth: false
-
 # When true, disable auth/model cooldown scheduling globally (prevents blackout windows after failure states).
 # A credential/provider disable-cooling value, when present, overrides this global value.
 disable-cooling: false
+
+# When true, persist per-auth cooldown status as .cds files next to auth files.
+# Default is false; when false, cooldown status is kept in memory only.
+save-cooldown-status: false
+
+# Cooldown duration in seconds for transient upstream errors (408/500/502/503/504/520-526).
+# Set to 0 to keep the legacy 60-second cooldown; set to -1 to disable transient error cooldowns.
+transient-error-cooldown-seconds: 0
 
 # When true, globally disable Claude request cloaking (the Claude Code CLI disguise and
 # system prompt replacement), so the original system prompt is passed through to Claude as-is.
@@ -183,6 +209,12 @@ disable-cooling: false
 # or a Claude OAuth/token file via a "cloak_mode" value. Default false keeps the per-client
 # "auto" behavior (cloak only non-Claude-Code clients).
 disable-claude-cloak-mode: false
+
+# Provider-wide Claude settings.
+claude:
+  # When true, scope quota cooldowns to the requested model rather than cooling down
+  # the entire credential across all sibling models. Default is false.
+  model-level-cooling: false
 
 # Claude Code compatibility settings.
 claude-code:
@@ -195,7 +227,7 @@ claude-code:
 # - "passthrough": never inject or strip image_generation on non-images endpoints (forward the client payload unchanged); behaves like "chat" on /v1/images/* endpoints.
 disable-image-generation: false
 
-# Base model used when proxying gpt-image-2 via the hosted image_generation tool (Responses API).
+# Base model used by the legacy hosted image_generation tool path when a Codex image request is not proxied directly through the Image API.
 # Must start with "gpt-" (case-insensitive). If unset or invalid, defaults to "gpt-5.4-mini".
 # gpt-image-2-base-model: "gpt-5.4-mini"
 
@@ -203,27 +235,9 @@ disable-image-generation: false
 # to the credential that created them. Default: 3h.
 video-result-auth-cache-ttl: "3h"
 
-# Core auth auto-refresh worker pool size (OAuth/file-based auth token refresh).
+# Core auth auto-refresh and manual refresh-all worker pool size (OAuth/file-based auth token refresh).
 # When > 0, overrides the default worker count (16).
 # auth-auto-refresh-workers: 16
-
-# Pool manager maintains a bounded active auth buffer for routing.
-# Set size > 0 to enable. V1 is intended for codex only.
-# pool-manager:
-#   size: 100
-#   provider: "codex"
-#   active-idle-scan-interval-seconds: 1800
-#   active-quota-refresh-interval-seconds: 60
-#   active-quota-refresh-sample-size: 10
-#   background-probe-budget-window-seconds: 10
-#   background-probe-budget-max: 2
-#   reserve-scan-interval-seconds: 300
-#   limit-scan-interval-seconds: 21600
-#   reserve-sample-size: 20
-#   reserve-refill-low-ratio: 0.25
-#   reserve-refill-high-ratio: 0.50
-#   cold-batch-load-ratio: 0.05
-#   low-quota-threshold-percent: 20
 
 # Quota exceeded behavior
 quota-exceeded:
@@ -248,9 +262,20 @@ routing:
   session-affinity: false # default: false
   # How long session-to-auth bindings are retained. Default: 1h
   session-affinity-ttl: "1h"
+  # When true (default), subagents (child sessions with parent references) inherit and bind
+  # to the parent's upstream credential across all providers (Claude, Codex, Antigravity, Gemini),
+  # maximizing Prompt/KV Cache reuse and minimizing TTFT.
+  # When false, subagents are distributed across the credential pool via the fallback selector
+  # for maximum parallel concurrency.
+  # Ignored when routing.session-affinity is false.
+  session-affinity-subagents: true
 
 # Codex provider behavior.
 codex:
+  # Experimental full-duplex Codex Responses WebSocket steering (default: false).
+  # Keeps one upstream account/model per socket; accepted input is never replayed.
+  # See STEERING.md for limitations.
+  response-steering: false
   # When true, and routing.strategy is fill-first or routing.session-affinity is true,
   # remap Codex prompt_cache_key and installation identity per selected auth.
   # Some superstitious users believe request tracking identifiers can be used
@@ -258,22 +283,84 @@ codex:
   identity-confuse: false
   # Disable forcing the official Codex User-Agent and Originator headers on HTTP/SSE and WebSocket requests.
   disable-codex-cloaking: false
-  # Hold back the initial handshake events (response.created, response.in_progress and the
-  # websocket metadata frames) until the upstream emits its first generated event.
+  # Hold back the frames that carry nothing the client has seen - the handshake (response.created,
+  # response.in_progress, the websocket metadata frames), keepalive heartbeats, and the *.added
+  # announcements of an item or part that is still empty - until the upstream emits its first
+  # generated event. Anything else, including a server-side tool item such as web_search_call and
+  # any frame not on that list, releases the stream immediately. On the SSE transport the lines that
+  # are not `data:` frames - comments, `event:` lines, blank separators - are held alongside them.
+  # The hold is bounded by a frame budget and a 1 MiB byte budget, not by wall-clock time: an
+  # upstream that trickles frames holds the response headers for as long as the client will wait.
   # Why: the upstream smuggles `server_is_overloaded` rejections *inside* an HTTP 200 stream,
   # right after those handshake events, instead of returning 503 on the wire. Buffering them
   # keeps the downstream response headers uncommitted long enough to transparently retry on
-  # another credential. Only overload/rate-limit rejections trigger failover; every other
-  # terminal failure is still delivered in-stream exactly as before.
-  # Trade-off: response headers are delayed until generation starts, which can trip client or
-  # reverse-proxy read timeouts (e.g. nginx proxy_read_timeout) on long reasoning requests.
+  # another credential. Only overload/rate-limit rejections trigger failover; every other terminal
+  # failure is still delivered in-stream exactly as before. One pre-existing behaviour is worth
+  # knowing, because this option makes the window it lives in much longer: if the stream ends while
+  # the bootstrap is still holding, the attempt ends instead of the error reaching the client, and
+  # whether another credential is then tried depends on how it ended. A clean end with no terminal
+  # event is request-scoped on SSE, so nothing else is tried; a websocket close, or a transport error
+  # such as a dropped connection on either transport, is not, so the request may be retried on
+  # another credential. None of that is new, but before this option the hold ended at the first
+  # keepalive, so it was rare; now it can span the whole reasoning phase.
+  # Trade-off: response headers are delayed until generation starts. Because heartbeats are held
+  # too, the delay now ends at the first generated token rather than at the first heartbeat. The
+  # budget bounds how much is held, not how long: 48 SSE lines, which measures out as 15 heartbeats
+  # of the three-line event:/data:/blank shape, 23 of a two-line ": keepalive" comment followed by
+  # its blank separator, or 47 of a bare ": keepalive" with no separator - one short of the obvious
+  # division, because the rejection frame's own event: line comes out of the same budget before its
+  # data: line is parsed. An upstream that sends the rejection as a bare data: line with no event:
+  # line gets the round number instead. At a 10s upstream heartbeat that is 150s, 230s or 470s of
+  # uncommitted response headers depending on the framing the upstream picks, all of it past nginx's
+  # 60s default proxy_read_timeout, so raise the timeouts in front of the proxy before enabling this.
+  # Those seconds bound what the buffer holds, not when the response headers are committed. Headers
+  # are committed on the first chunk the downstream translator actually produces, so for a format
+  # that renders the handshake as nothing - Chat Completions and Gemini do - they stay uncommitted
+  # past the budget, until the first generated token. That is not specific to the budget: any frame
+  # that releases the buffer has always behaved this way.
+  # The websocket transport spends the same 48 differently - one per message read, whether the loop
+  # holds it or skips it, with no framing to divide by - so there it is 48 heartbeats, about 480s.
+  # Two cases no budget covers: a websocket peer that sends only ping frames, which the library
+  # answers inside the read call, leaving only the 5 minute websocket read deadline; and an upstream
+  # that stops mid-line on SSE, where the scanner never returns and only the request context ends the
+  # wait. Neither is made worse by this option - with it off the same stalled line stalls the
+  # conductor instead, which waits on the same context - but a client-side request timeout, not
+  # proxy_read_timeout, is what bounds them.
   # Default: false
   stream-bootstrap-buffering: false
+  # Optional maximum duration to hold back uncommitted response headers during bootstrap buffering.
+  # When set (e.g. "20s"), if the time ceiling is reached before the first generated token,
+  # the stream is released to the client and further in-stream overloads are delivered rather
+  # than failed over. This bounds how long trickled heartbeats or early empty frames can delay
+  # response headers before streaming begins.
+  # Recommendation: If your CPA is deployed behind a reverse proxy with a strict read timeout
+  # (e.g. Nginx default proxy_read_timeout 60s or Cloudflare 100s timeout), setting this to "20s"
+  # is strongly recommended to guarantee headers commit well before proxy timeouts while retaining
+  # a comfortable 20s window to fail over early scheduling overloads.
+  # Note: The timeout check is evaluated as upstream frames arrive; it never aborts the upstream
+  # connection. Downstream headers are committed as soon as the downstream translator emits chunks
+  # (for formats that render handshake/heartbeats, headers commit immediately on release; for
+  # formats like Chat Completions and Gemini that render nothing until the first text token, headers
+  # commit when that first token arrives).
+  # When unset or set to "0", "0s", "none", "unlimited", "disabled", "off", or "never", no time ceiling
+  # is applied, and buffering relies purely on the 48-frame and 1MB byte budget.
+  # Default: "0" (unlimited)
+  stream-bootstrap-timeout: "0"
   # When true, optimize Codex Desktop, codex-tui, and codex_cli_rs requests for multi-agent v2.
   # This refreshes Codex spawn_agent model details, removes message parameter encryption,
   # normalizes encrypted agent_message content for Codex, and converts agent_message input
   # into standard user messages for non-Codex upstream protocols.
   optimize-multi-agent-v2: false
+  # When true, enable opt-in compatibility for orphan Codex delegation outputs.
+  # Converts orphan function_call_output items from codex_app/create_thread and
+  # codex_app/send_message_to_thread (which lack a valid call_id or matching function_call)
+  # into standard user messages across Responses and non-Codex protocols when the request
+  # header contains X-Openai-Subagent: collab_spawn.
+  orphan-delegation-compatibility: false
+  # When true, scope Codex usage_limit_reached quota cooldowns to the requested model rather
+  # than cooling down the entire credential across all sibling models.
+  # Default: false
+  model-level-cooling: false
   # Terminate and relay Codex Live WebRTC audio and DataChannel traffic in this process.
   # This requires inbound UDP reachability. Keep disabled to preserve direct media behavior.
   live-media-relay:
@@ -306,6 +393,16 @@ codex:
 #   sensitive-words:             # optional: words to obfuscate with zero-width characters in system instructions
 #     - "API"
 #     - "proxy"
+#   connection-pool:             # optional: upstream HTTP connection pool settings
+#     enabled: false             # whether to enable connection pooling (default: false; set to true to enable connection pooling)
+#     idle-conn-timeout: "30s"   # idle keep-alive timeout (default: 30s, capped at 210s)
+#     max-idle-conns-per-host: 2 # max idle connections per host per credential (default: 2)
+
+# Devin provider behavior.
+# devin:
+#   sensitive-words:             # optional: words to obfuscate with zero-width characters in system instructions and prompts
+#     - "API"
+#     - "proxy"
 
 # xAI provider behavior.
 xai:
@@ -315,10 +412,6 @@ xai:
 
 # When true, enable authentication for the WebSocket API (/v1/ws).
 ws-auth: true
-
-# When true, enable Gemini CLI internal endpoints (/v1internal:*).
-# Default is false for safety.
-enable-gemini-cli-endpoint: false
 
 # When > 0, emit blank lines every N seconds for non-streaming responses to prevent idle timeouts.
 nonstream-keepalive-interval: 0
@@ -415,6 +508,7 @@ nonstream-keepalive-interval: 0
 #     weight: 5 # optional: weighted-round-robin share; omitted defaults to 1; maximum 1,000,000
 #     prefix: "test" # optional: require calls like "test/gpt-5-codex" to target this credential
 #     disable-cooling: false # optional override: true disables cooling, false enables it; omit to inherit global
+#     disable-codex-cloaking: false # optional override: true disables cloaking, false enables it; omit to inherit global
 #     request-retry: 3 # optional per-auth override; 0 disables additional rounds; omit or set < 0 to inherit global
 #     request-scoped-errors: # optional: custom rules to classify upstream errors by status and body patterns
 #       - status: 400
@@ -484,6 +578,22 @@ nonstream-keepalive-interval: 0
 #     excluded-models:
 #       - "grok-4.1"             # exclude specific models (exact match)
 #       - "grok-3-*"             # wildcard matching prefix
+#
+# Meta API keys (Muse Code)
+# Uses the native Meta executor targeting https://api.meta.ai/v1.
+# meta-api-key:
+#   - api-key: "..."
+#     weight: 5 # optional: weighted-round-robin share; omitted defaults to 1; maximum 1,000,000
+#     prefix: "meta" # optional: require calls like "meta/muse-spark-1.3" to target this credential
+#     disable-cooling: false # optional override: true disables cooling, false enables it; omit to inherit global
+#     request-retry: 3 # optional per-auth override; 0 disables additional rounds; omit or set < 0 to inherit global
+#     base-url: "https://api.meta.ai/v1" # optional: defaults to https://api.meta.ai/v1
+#     proxy-url: "socks5://proxy.example.com:1080" # optional: per-key proxy override
+#     models:
+#       - name: "muse-spark-1.3" # upstream model name
+#         alias: "muse-latest"   # client alias mapped to the upstream model
+#     excluded-models:
+#       - "muse-spark-1.1"
 
 # Claude API keys
 # claude-api-key:
@@ -596,9 +706,10 @@ nonstream-keepalive-interval: 0
 #                                     # only on api.anthropic.com; Vertex keeps provider-native signing
 
 # Anthropic-Beta is assembled per request rather than sent as a fixed list, matching
-# Claude Code 2.1.220: context-1m sits right after claude-code, mid-conversation-system
+# Claude Code: context-1m sits right after claude-code, mid-conversation-system
 # is added only for models that accept a role=system turn, advanced-tool-use only when
-# the request declares tools, and server-side-fallback / fallback-credit /
+# the request uses tool search (deferred tools) or another advanced tool-use feature,
+# afk-mode sits between fast-mode and extended-cache-ttl, and server-side-fallback / fallback-credit /
 # structured-outputs trail effort. On direct api.anthropic.com a caller may only ask for
 # betas real Claude Code also sends, and they are placed at their observed positions;
 # anything else is dropped so the outgoing set stays one a real client could produce.
@@ -614,8 +725,8 @@ nonstream-keepalive-interval: 0
 # enabled, OS/arch are pinned to the values below and cached profiles remain constrained to
 # the same exact software baseline rather than learning newer client versions.
 # claude-header-defaults:
-#   user-agent: "claude-cli/2.1.220 (external, cli)"
-#   package-version: "0.94.0"
+#   user-agent: "claude-cli/2.1.280 (external, cli)"
+#   package-version: "0.112.1"
 #   runtime-version: "v26.3.0"
 #   os: "MacOS"
 #   arch: "arm64"
@@ -630,33 +741,6 @@ nonstream-keepalive-interval: 0
 # codex-header-defaults:
 #   user-agent: "codex_cli_rs/0.114.0 (Mac OS 14.2.0; x86_64) vscode/1.111.0"
 #   beta-features: "multi_agent"
-
-# Kiro (AWS CodeWhisperer) configuration
-# Note: Kiro API currently only operates in us-east-1 region
-#kiro:
-#  - token-file: "~/.aws/sso/cache/kiro-auth-token.json" # path to Kiro token file
-#    agent-task-type: "" # optional: "vibe" or empty (API default)
-#    start-url: "https://your-company.awsapps.com/start" # optional: IDC start URL (preset for login)
-#    region: "us-east-1" # optional: OIDC region for IDC login and token refresh
-#  - access-token: "aoaAAAAA..." # or provide tokens directly
-#    refresh-token: "aorAAAAA..."
-#    profile-arn: "arn:aws:codewhisperer:us-east-1:..."
-#    proxy-url: "socks5://proxy.example.com:1080" # optional: proxy override
-
-# Kilocode (OAuth-based code assistant)
-# Note: Kilocode uses OAuth device flow authentication.
-# Use the CLI command: ./server --kilo-login
-# This will save credentials to the auth directory (default: ~/.cli-proxy-api/)
-# oauth-model-alias:
-#   kilo:
-#     - name: "minimax/minimax-m2.5:free"
-#       alias: "minimax-m2.5"
-#     - name: "z-ai/glm-5:free"
-#       alias: "glm-5"
-# oauth-excluded-models:
-#   kilo:
-#     - "kilo-claude-opus-4-6"  # exclude specific models (exact match)
-#     - "*:free"                # wildcard matching suffix (e.g. all free models)
 
 # OpenAI compatibility providers
 # openai-compatibility:
@@ -696,7 +780,8 @@ nonstream-keepalive-interval: 0
 #         input-modalities: [text, image] # optional: declare /v1/chat/completions and /v1/responses multimodal input for Codex clients. Use [text] for upstreams that reject multimodal tool result content.
 #         output-modalities: [text]       # optional: declare output modalities when known
 #         is-compat: false                # optional: preserve Claude thinking blocks for compatible upstreams
-#         thinking:                      # optional: omit to default to levels ["low","medium","high"]
+#         use-max-completion-tokens: false # optional: default false (uses max_tokens); set true to use max_completion_tokens
+#         thinking:                      # optional: omit to default to levels ["low","medium","high"]. Exceeding levels (e.g. "max", "xhigh") are clamped to "high"; explicitly declare levels here if the upstream supports them
 #           levels: ["low", "medium", "high"]
 #       # You may repeat the same alias to build an internal model pool.
 #       # The client still sees only one alias in the model list.
@@ -739,13 +824,8 @@ nonstream-keepalive-interval: 0
 
 # Global OAuth model name aliases (per channel)
 # These aliases rename model IDs for both model listing and request routing.
-<<<<<<< HEAD
-# Supported channels: gemini-cli, vertex, aistudio, antigravity, claude, codex, iflow, kiro, github-copilot, kimi, xai.
-# NOTE: Aliases do not apply to gemini-api-key, interactions-api-key, codex-api-key, claude-api-key, openai-compatibility, or vertex-api-key.
-=======
-# Supported channels: vertex, aistudio, antigravity, claude, codex, kimi, xai.
-# NOTE: Aliases do not apply to gemini-api-key, interactions-api-key, codex-api-key, xai-api-key, claude-api-key, openai-compatibility, or vertex-api-key.
->>>>>>> upstream/main
+# Supported channels: vertex, aistudio, antigravity, claude, codex, kimi, xai, meta.
+# NOTE: Aliases do not apply to gemini-api-key, interactions-api-key, codex-api-key, xai-api-key, meta-api-key, claude-api-key, openai-compatibility, or vertex-api-key.
 # NOTE: Because aliases affect the merged /v1 model list and merged request routing, overlapping
 # client-visible names can become ambiguous across providers. For strict backend pinning, use
 # unique aliases/prefixes or avoid overlapping names.
@@ -767,25 +847,6 @@ nonstream-keepalive-interval: 0
 #   ]
 # }
 # oauth-model-alias:
-#  antigravity:
-#    - name: "rev19-uic3-1p"
-#      alias: "gemini-2.5-computer-use-preview-10-2025"
-#    - name: "gemini-3-pro-image"
-#      alias: "gemini-3-pro-image-preview"
-#    - name: "gemini-3-pro-high"
-#      alias: "gemini-3-pro-preview"
-#    - name: "gemini-3-flash"
-#      alias: "gemini-3-flash-preview"
-#    - name: "claude-sonnet-4-5"
-#      alias: "gemini-claude-sonnet-4-5"
-#    - name: "claude-sonnet-4-5-thinking"
-#      alias: "gemini-claude-sonnet-4-5-thinking"
-#    - name: "claude-opus-4-5-thinking"
-#      alias: "gemini-claude-opus-4-5-thinking"
-#   gemini-cli:
-#     - name: "gemini-2.5-pro"          # original model name under this channel
-#       alias: "g2.5p"                  # client-visible alias
-#       fork: true                      # when true, keep original and also add the alias as an extra model (default: false)
 #   vertex:
 #     - name: "gemini-2.5-pro"
 #       alias: "g2.5p"
@@ -807,27 +868,18 @@ nonstream-keepalive-interval: 0
 #   kimi:
 #     - name: "kimi-k2.5"
 #       alias: "k2.5"
-#   kiro:
-#     - name: "kiro-claude-opus-4-5"
-#       alias: "op45"
-#   github-copilot:
-#     - name: "gpt-5"
-#       alias: "copilot-gpt5"
 #   xai:
 #     - name: "grok-4.3"
 #       alias: "grok-latest"
+#   meta:
+#     - name: "muse-spark-1.3"
+#       alias: "muse-latest"
 #   sample-provider:                  # plugin provider keys are supported for OAuth plugins
 #     - name: "sample-model-latest"
 #       alias: "sample-latest"
 
 # OAuth provider excluded models
-# Supported channels: gemini-cli, vertex, aistudio, antigravity, claude, codex, qwen, iflow, kiro, github-copilot.
 # oauth-excluded-models:
-#   gemini-cli:
-#     - "gemini-2.5-pro"     # exclude specific models (exact match)
-#     - "gemini-2.5-*"       # wildcard matching prefix (e.g. gemini-2.5-flash, gemini-2.5-pro)
-#     - "*-preview"          # wildcard matching suffix (e.g. gemini-3-pro-preview)
-#     - "*flash*"            # wildcard matching substring (e.g. gemini-2.5-flash-lite)
 #   vertex:
 #     - "gemini-3-pro-preview"
 #   aistudio:
@@ -840,12 +892,10 @@ nonstream-keepalive-interval: 0
 #     - "gpt-5-codex-mini"
 #   kimi:
 #     - "kimi-k2-thinking"
-#   kiro:
-#     - "kiro-claude-haiku-4-5"
-#   github-copilot:
-#     - "raptor-mini"
 #   xai:
 #     - "grok-3-mini"
+#   meta:
+#     - "muse-spark-1.1"
 
 # OAuth provider request-scoped error rules (custom error classification for OAuth credentials)
 # oauth-request-scoped-errors:
@@ -887,6 +937,11 @@ nonstream-keepalive-interval: 0
 #     - status: 400
 #       match:
 #         - "max_tokens_exceeded"
+#       action: "stop"
+#   meta:
+#     - status: 400
+#       match:
+#         - "context_length_exceeded"
 #       action: "stop"
 
 # Optional payload configuration
@@ -945,3 +1000,11 @@ nonstream-keepalive-interval: 0
 #       params: # JSON paths (gjson/sjson syntax) to remove from the payload
 #         - "generationConfig.thinkingConfig.thinkingBudget"
 #         - "generationConfig.responseJsonSchema"
+#     - models:
+#         - name: "gpt-*" # Supports wildcards (e.g., "gpt-*")
+#           protocol: "codex"
+#       params:
+#         # Flat tools array (standard OpenAI format or Codex CLI < 0.154):
+#         - 'tools.#(name=="apply_patch")'
+#         # Nested additional_tools structure in input[] (Codex CLI >= 0.154 "Responses Lite"):
+#         - 'input.#(type=="additional_tools")#.tools.#(name=="functions")#.tools.#(name=="apply_patch")#'
