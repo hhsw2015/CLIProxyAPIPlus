@@ -28,6 +28,11 @@ const (
 	typeSafeSystemOneHost = "api.typesafe.ai"
 	openRouterHost        = "openrouter.ai"
 	vercelGatewayHost     = "ai-gateway.vercel.sh"
+	// siliconFlowHost serves the Kev decision family on the same native /systemone
+	// schema (SiliconFlow's Kev-4B is a Jev-like structured-decision model built on
+	// Qwen3.5; /v1/systemone 200 verified, /chat/completions 400s). Keys are reused
+	// from the existing silicon-direct openai-compatibility entry by host match.
+	siliconFlowHost = "api.siliconflow.cn"
 	// openRouterDecisionsURL is OpenRouter's decisions endpoint proxying Jev.
 	openRouterDecisionsURL = "https://openrouter.ai/api/alpha/decisions"
 	// openRouterJevModel is the only Jev decisions model OpenRouter exposes.
@@ -35,6 +40,9 @@ const (
 	// vercelJevModel is the Jev id on Vercel's TypeSafe-compatible endpoint
 	// (jev-latest / jev / typesafe-ai/jev all 200; jev-1.13 is 404 there).
 	vercelJevModel = "jev-latest"
+	// siliconFlowKevModel is the canonical Kev id SiliconFlow's /v1/systemone wants
+	// (Kev-4B / kev-4b both 200; kev-latest 404 there — normalize to Kev-4B).
+	siliconFlowKevModel = "Kev-4B"
 )
 
 // systemOneChannel is one upstream that can serve a Jev decision request.
@@ -74,8 +82,9 @@ func (s *Server) systemOneChannels() []systemOneChannel {
 	if s.cfg == nil {
 		return nil
 	}
-	var vercelKeys, orKeys, tsKeys []string
-	var vercelBase, tsBase string
+	var vercelKeys, orKeys, tsKeys, sfKeys []string
+	var vercelBase, tsBase, sfBase string
+	sfSeen := make(map[string]bool)
 	for _, compat := range s.cfg.OpenAICompatibility {
 		b := strings.TrimSpace(compat.BaseURL)
 		switch {
@@ -101,6 +110,19 @@ func (s *Server) systemOneChannels() []systemOneChannel {
 			for _, e := range compat.APIKeyEntries {
 				if k := strings.TrimSpace(e.APIKey); k != "" {
 					tsKeys = append(tsKeys, k)
+				}
+			}
+		case strings.Contains(b, siliconFlowHost):
+			// Prefer a base-url ending in /v1 so endpoint = .../v1/systemone.
+			if sfBase == "" || strings.HasSuffix(strings.TrimRight(b, "/"), "/v1") {
+				sfBase = b
+			}
+			// Multiple SiliconFlow entries (silicon-direct + a dedicated Kev
+			// advertising entry) share one key; dedup so we don't retry it twice.
+			for _, e := range compat.APIKeyEntries {
+				if k := strings.TrimSpace(e.APIKey); k != "" && !sfSeen[k] {
+					sfSeen[k] = true
+					sfKeys = append(sfKeys, k)
 				}
 			}
 		}
@@ -136,6 +158,24 @@ func (s *Server) systemOneChannels() []systemOneChannel {
 				switch systemOneBasename(incoming) {
 				case "jev-1.13", "jev-latest", "jev":
 					return openRouterJevModel, true
+				default:
+					return "", false
+				}
+			},
+		})
+	}
+	// SiliconFlow Kev — inserted BEFORE the typesafe catch-all (which accepts any
+	// model id) so a kev request is not swallowed by the TypeSafe channel. Disjoint
+	// from the jev channels: kev ids match only here, jev ids skip this channel.
+	if len(sfKeys) > 0 && sfBase != "" {
+		channels = append(channels, systemOneChannel{
+			name:     "siliconflow",
+			endpoint: strings.TrimRight(sfBase, "/") + "/systemone",
+			keys:     sfKeys,
+			rewriteModel: func(incoming string) (string, bool) {
+				switch strings.ToLower(systemOneBasename(incoming)) {
+				case "kev-4b", "kev-latest", "kev":
+					return siliconFlowKevModel, true
 				default:
 					return "", false
 				}
