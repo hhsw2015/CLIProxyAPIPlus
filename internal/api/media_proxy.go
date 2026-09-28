@@ -196,6 +196,15 @@ func (s *Server) mediaProxyHandler(ep mediaEndpoint) gin.HandlerFunc {
 			}
 		}
 
+		// Vertex Lyria music (lyria-*): OpenAI /v1/music {prompt} → :predict + SA
+		// OAuth, return WAV. Falls through when no gemini-SA entry lists the model
+		// (e.g. ElevenLabs/fal music).
+		if ep.pathSuffix == "music" && strings.Contains(strings.ToLower(strings.TrimSpace(modelName)), "lyria") {
+			if s.handleVertexLyria(c, modelName, body) {
+				return
+			}
+		}
+
 		// Find provider config for this model + endpoint type.
 		provider := s.resolveMediaProvider(modelName, ep)
 		if provider == nil {
