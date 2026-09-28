@@ -178,6 +178,14 @@ func (s *Server) mediaProxyHandler(ep mediaEndpoint) gin.HandlerFunc {
 			}
 		}
 
+		// Azure Speech TTS (model contains "azure-tts"): STS token + SSML → mp3.
+		// Checked before the Vertex -tts hook ("azure-tts" also contains "-tts").
+		if ep.pathSuffix == "audio/speech" && strings.Contains(strings.ToLower(strings.TrimSpace(modelName)), "azure-tts") {
+			if s.handleAzureSpeechTTS(c, modelName, body) {
+				return
+			}
+		}
+
 		// AWS Polly TTS (model contains "polly"): synthesize via the AWS SDK, return
 		// mp3. Checked before the Vertex -tts hook. Falls through if no AWS creds.
 		if ep.pathSuffix == "audio/speech" && strings.Contains(strings.ToLower(strings.TrimSpace(modelName)), "polly") {
@@ -191,6 +199,14 @@ func (s *Server) mediaProxyHandler(ep mediaEndpoint) gin.HandlerFunc {
 		// gemini-SA entry lists the model → falls through to the generic resolver.
 		if ep.pathSuffix == "audio/speech" && strings.Contains(strings.ToLower(strings.TrimSpace(modelName)), "-tts") {
 			if s.handleVertexGeminiTTS(c, modelName, body) {
+				return
+			}
+		}
+
+		// Azure Speech STT (model contains "azure-transcribe"): short-audio REST +
+		// STS token, return {text}. Checked before the generic Vertex "transcribe" hook.
+		if ep.pathSuffix == "audio/transcriptions" && strings.Contains(strings.ToLower(strings.TrimSpace(modelName)), "azure-transcribe") {
+			if s.handleAzureSpeechSTT(c, modelName, body) {
 				return
 			}
 		}
