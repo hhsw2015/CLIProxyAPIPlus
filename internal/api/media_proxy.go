@@ -158,6 +158,16 @@ func (s *Server) mediaProxyHandler(ep mediaEndpoint) gin.HandlerFunc {
 			}
 		}
 
+		// Vertex embeddings (text-embedding-*, gemini-embedding-*, multilingual)
+		// require SA OAuth + :predict translation. handleVertexEmbeddings returns
+		// false when no gemini-SA entry lists the model, so non-Vertex embeddings
+		// (e.g. OpenAI text-embedding-3-*) fall through to the generic resolver.
+		if ep.pathSuffix == "embeddings" {
+			if s.handleVertexEmbeddings(c, modelName, body) {
+				return
+			}
+		}
+
 		// Find provider config for this model + endpoint type.
 		provider := s.resolveMediaProvider(modelName, ep)
 		if provider == nil {
