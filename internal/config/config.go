@@ -446,6 +446,8 @@ type RemoteManagement struct {
 	// PanelGitHubRepository overrides the GitHub repository used to fetch the management panel asset.
 	// Accepts either a repository URL (https://github.com/org/repo) or an API releases endpoint.
 	PanelGitHubRepository string `yaml:"panel-github-repository"`
+	// BaseURL is the remote management base URL for TUI client mode (from upstream v8 merge).
+	BaseURL string `yaml:"base-url"`
 }
 
 // QuotaExceeded defines the behavior when API quota limits are exceeded.

@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	internallogging "github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -397,9 +396,10 @@ func (m *Manager) Publish(ctx context.Context, record Record) {
 	if strings.TrimSpace(record.TraceID) == "" {
 		if trID := TraceIDFromContext(ctx); trID != "" {
 			record.TraceID = trID
-		} else if trID := internallogging.GetRequestID(ctx); trID != "" {
-			record.TraceID = trID
 		}
+		// ponytail: dropped internallogging.GetRequestID fallback -- it created an
+		// import cycle (logging->usage->cliproxy/usage->logging) after the v8 merge;
+		// TraceIDFromContext already covers the in-package path.
 	}
 	// ensure worker is running even if Start was not called explicitly
 	m.Start(context.Background())

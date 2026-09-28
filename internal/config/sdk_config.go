@@ -147,6 +147,15 @@ type ECHWorkerConfig struct {
 }
 
 type SDKConfig struct {
+	// v8 runtime metadata (from upstream v8 merge; yaml/json "-" = not serialized).
+	// OAuthOnlyFields records v8 provider settings that must wait for credential
+	// selection and must not affect API-key credentials.
+	OAuthOnlyFields map[string]bool `yaml:"-" json:"-"`
+	// CodexResponseSteering mirrors the provider-wide runtime setting for API handlers.
+	CodexResponseSteering bool `yaml:"-" json:"-"`
+	// CodexOrphanDelegationCompatibility mirrors the provider-wide runtime setting for API handlers.
+	CodexOrphanDelegationCompatibility bool `yaml:"-" json:"-"`
+
 	// ProxyURL is the URL of an optional proxy server to use for outbound requests.
 	ProxyURL string `yaml:"proxy-url" json:"proxy-url"`
 
