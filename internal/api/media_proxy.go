@@ -168,6 +168,16 @@ func (s *Server) mediaProxyHandler(ep mediaEndpoint) gin.HandlerFunc {
 			}
 		}
 
+		// Vertex Gemini image models (gemini-*-image "nano-banana"): generate via
+		// :generateContent (responseModalities:IMAGE) + SA OAuth. Imagen is retired
+		// so this is the text->image path. Returns false when no gemini-SA entry
+		// lists the model → falls through to the generic resolver.
+		if ep.pathSuffix == "images/generations" && strings.Contains(strings.ToLower(strings.TrimSpace(modelName)), "-image") {
+			if s.handleVertexGeminiImage(c, modelName, body) {
+				return
+			}
+		}
+
 		// Find provider config for this model + endpoint type.
 		provider := s.resolveMediaProvider(modelName, ep)
 		if provider == nil {
