@@ -42,6 +42,7 @@ func init() {
 	registerTaskAdaptor(&taijiaSoraAdaptor{})
 	registerTaskAdaptor(&atlasAdaptor{})
 	registerTaskAdaptor(&murekaAdaptor{})
+	registerTaskAdaptor(&zhipuAdaptor{})
 }
 
 // setupTaskRoutes registers async task API routes.
@@ -412,6 +413,8 @@ func platformForEntry(entryName, baseURL string) string {
 		return "dashscope"
 	case strings.HasPrefix(entryName, "minimaxh3"):
 		return "minimax-h3"
+	case strings.HasPrefix(entryName, "zhipu-cogvideo"):
+		return "zhipu"
 	case strings.HasPrefix(entryName, "skyreels") || strings.HasPrefix(entryName, "skywork"):
 		return "skyreels"
 	case strings.HasPrefix(entryName, "kling"):
