@@ -187,6 +187,15 @@ func (s *Server) mediaProxyHandler(ep mediaEndpoint) gin.HandlerFunc {
 			}
 		}
 
+		// Vertex Gemini STT (gemini-*-transcribe): pass audio as inlineData to
+		// :generateContent + SA OAuth, return {text}. Falls through when no
+		// gemini-SA entry lists the model.
+		if ep.pathSuffix == "audio/transcriptions" && strings.Contains(strings.ToLower(strings.TrimSpace(modelName)), "transcribe") {
+			if s.handleVertexGeminiSTT(c, modelName, body) {
+				return
+			}
+		}
+
 		// Find provider config for this model + endpoint type.
 		provider := s.resolveMediaProvider(modelName, ep)
 		if provider == nil {
