@@ -132,3 +132,60 @@ func (s *Server) handleDashScopeImage(c *gin.Context, modelName string, body []b
 	c.Data(http.StatusOK, "application/json", out)
 	return true
 }
+
+// handleDashScopeRerank serves /v1/rerank for DashScope rerank models (model
+// contains "rerank"). Translates the OpenAI/Cohere-style body to the DashScope
+// native rerank API and its output.results back to the standard rerank shape.
+func (s *Server) handleDashScopeRerank(c *gin.Context, modelName string, body []byte) bool {
+	key, ok := s.dashscopeKey()
+	if !ok {
+		return false
+	}
+	query := gjson.GetBytes(body, "query").String()
+	docs := gjson.GetBytes(body, "documents")
+	if strings.TrimSpace(query) == "" || !docs.IsArray() {
+		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"message": "query and documents are required", "type": "invalid_request_error"}})
+		return true
+	}
+	reqBody := []byte(`{"model":"","input":{"query":"","documents":[]},"parameters":{"return_documents":true}}`)
+	reqBody, _ = sjson.SetBytes(reqBody, "model", modelName)
+	reqBody, _ = sjson.SetBytes(reqBody, "input.query", query)
+	reqBody, _ = sjson.SetRawBytes(reqBody, "input.documents", []byte(docs.Raw))
+	if tn := gjson.GetBytes(body, "top_n").Int(); tn > 0 {
+		reqBody, _ = sjson.SetBytes(reqBody, "parameters.top_n", tn)
+	}
+
+	req, _ := http.NewRequestWithContext(c.Request.Context(), http.MethodPost,
+		dashscopeBase+"/api/v1/services/rerank/text-rerank/text-rerank", strings.NewReader(string(reqBody)))
+	req.Header.Set("Authorization", "Bearer "+key)
+	req.Header.Set("Content-Type", "application/json")
+	resp, doErr := (&http.Client{Timeout: 30 * time.Second}).Do(req)
+	if doErr != nil {
+		c.JSON(http.StatusBadGateway, gin.H{"error": gin.H{"message": fmt.Sprintf("dashscope-rerank: %v", doErr), "type": "server_error"}})
+		return true
+	}
+	defer func() { _ = resp.Body.Close() }()
+	rb, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != 200 {
+		c.Data(resp.StatusCode, "application/json", rb)
+		return true
+	}
+	out := []byte(`{"model":"","results":[]}`)
+	out, _ = sjson.SetBytes(out, "model", modelName)
+	i := 0
+	gjson.GetBytes(rb, "output.results").ForEach(func(_, r gjson.Result) bool {
+		out, _ = sjson.SetBytes(out, fmt.Sprintf("results.%d.index", i), r.Get("index").Int())
+		out, _ = sjson.SetBytes(out, fmt.Sprintf("results.%d.relevance_score", i), r.Get("relevance_score").Float())
+		if d := r.Get("document"); d.Exists() {
+			out, _ = sjson.SetRawBytes(out, fmt.Sprintf("results.%d.document", i), []byte(d.Raw))
+		}
+		i++
+		return true
+	})
+	if u := gjson.GetBytes(rb, "usage"); u.Exists() {
+		out, _ = sjson.SetRawBytes(out, "usage", []byte(u.Raw))
+	}
+	log.Debugf("[dashscope-rerank] model=%s results=%d", modelName, i)
+	c.Data(http.StatusOK, "application/json", out)
+	return true
+}

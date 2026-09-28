@@ -258,6 +258,18 @@ func (s *Server) mediaProxyHandler(ep mediaEndpoint) gin.HandlerFunc {
 			}
 		}
 
+		// DashScope (Qwen) first-party rerank (gte-rerank / qwen*-text-rerank): native
+		// rerank API on the P10 key. Specific model match so aggregator rerankers still
+		// use the generic passthrough.
+		if ep.pathSuffix == "rerank" {
+			lm := strings.ToLower(strings.TrimSpace(modelName))
+			if strings.Contains(lm, "gte-rerank") || strings.Contains(lm, "text-rerank") {
+				if s.handleDashScopeRerank(c, modelName, body) {
+					return
+				}
+			}
+		}
+
 		// Find provider config for this model + endpoint type.
 		provider := s.resolveMediaProvider(modelName, ep)
 		if provider == nil {
