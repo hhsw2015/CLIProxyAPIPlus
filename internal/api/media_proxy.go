@@ -178,11 +178,28 @@ func (s *Server) mediaProxyHandler(ep mediaEndpoint) gin.HandlerFunc {
 			}
 		}
 
+		// AWS Polly TTS (model contains "polly"): synthesize via the AWS SDK, return
+		// mp3. Checked before the Vertex -tts hook. Falls through if no AWS creds.
+		if ep.pathSuffix == "audio/speech" && strings.Contains(strings.ToLower(strings.TrimSpace(modelName)), "polly") {
+			if s.handleAWSPollyTTS(c, modelName, body) {
+				return
+			}
+		}
+
 		// Vertex Gemini TTS (gemini-*-tts): generate via :generateContent
 		// (responseModalities:AUDIO) + SA OAuth, return WAV. Returns false when no
 		// gemini-SA entry lists the model → falls through to the generic resolver.
 		if ep.pathSuffix == "audio/speech" && strings.Contains(strings.ToLower(strings.TrimSpace(modelName)), "-tts") {
 			if s.handleVertexGeminiTTS(c, modelName, body) {
+				return
+			}
+		}
+
+		// AWS Transcribe STT (model contains "aws-transcribe"): stream the uploaded
+		// WAV to Transcribe (no S3), return {text}. Checked before the generic Vertex
+		// "transcribe" hook (which matches "transcribe" too).
+		if ep.pathSuffix == "audio/transcriptions" && strings.Contains(strings.ToLower(strings.TrimSpace(modelName)), "aws-transcribe") {
+			if s.handleAWSTranscribeSTT(c, modelName, body) {
 				return
 			}
 		}
