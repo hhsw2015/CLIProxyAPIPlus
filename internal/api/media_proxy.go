@@ -178,6 +178,15 @@ func (s *Server) mediaProxyHandler(ep mediaEndpoint) gin.HandlerFunc {
 			}
 		}
 
+		// Vertex Gemini TTS (gemini-*-tts): generate via :generateContent
+		// (responseModalities:AUDIO) + SA OAuth, return WAV. Returns false when no
+		// gemini-SA entry lists the model → falls through to the generic resolver.
+		if ep.pathSuffix == "audio/speech" && strings.Contains(strings.ToLower(strings.TrimSpace(modelName)), "-tts") {
+			if s.handleVertexGeminiTTS(c, modelName, body) {
+				return
+			}
+		}
+
 		// Find provider config for this model + endpoint type.
 		provider := s.resolveMediaProvider(modelName, ep)
 		if provider == nil {
