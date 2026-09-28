@@ -194,6 +194,14 @@ func (s *Server) mediaProxyHandler(ep mediaEndpoint) gin.HandlerFunc {
 			}
 		}
 
+		// MiniMax first-party TTS (model contains "minimax"): T2A v2 on api.minimax.io
+		// (the P10 key, not fal), return mp3. Falls through if no MiniMax key.
+		if ep.pathSuffix == "audio/speech" && strings.Contains(strings.ToLower(strings.TrimSpace(modelName)), "minimax") {
+			if s.handleMiniMaxTTS(c, modelName, body) {
+				return
+			}
+		}
+
 		// Vertex Gemini TTS (gemini-*-tts): generate via :generateContent
 		// (responseModalities:AUDIO) + SA OAuth, return WAV. Returns false when no
 		// gemini-SA entry lists the model → falls through to the generic resolver.
