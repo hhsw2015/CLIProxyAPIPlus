@@ -10,7 +10,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	vertexauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/vertex"
+	vertexauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/vertex"
 
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"

@@ -13,7 +13,7 @@ import (
 	"time"
 
 	usqueapi "github.com/hhsw2015/usque/v3/api"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	log "github.com/sirupsen/logrus"
 	"golang.zx2c4.com/wireguard/tun/netstack"
 )

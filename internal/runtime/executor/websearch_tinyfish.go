@@ -9,7 +9,7 @@ import (
 	"net/url"
 	"strings"
 
-	kiroclaude "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/kiro/claude"
+	kiroclaude "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/kiro/claude"
 )
 
 type tinyfishSearchResponse struct {

@@ -17,8 +17,8 @@ import (
 	"github.com/tidwall/sjson"
 	"golang.org/x/oauth2/google"
 
-	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 )
 
 // aggregateClaudeSSEToMessage reconstructs a single Anthropic Messages JSON

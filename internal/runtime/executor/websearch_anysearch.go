@@ -11,7 +11,7 @@ import (
 	"strconv"
 	"strings"
 
-	kiroclaude "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/kiro/claude"
+	kiroclaude "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/kiro/claude"
 )
 
 // AnySearch is a unified search service that exposes a JSON-RPC 2.0 endpoint

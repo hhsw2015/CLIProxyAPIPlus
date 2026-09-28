@@ -4,10 +4,10 @@ import (
 	"encoding/json"
 	"strings"
 
-	sigcompat "github.com/router-for-me/CLIProxyAPI/v7/internal/signature"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
-	. "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/antigravity/gemini"
-	. "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/gemini/openai/responses"
+	sigcompat "github.com/router-for-me/CLIProxyAPI/v8/internal/signature"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
+	. "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/antigravity/gemini"
+	. "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/gemini/openai/responses"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 )
