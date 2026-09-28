@@ -98,6 +98,16 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 			if authKind == "apikey" {
 				excluded = entry.ExcludedModels
 			}
+		} else if gentry := s.resolveConfigGeminiKey(a); gentry != nil && len(gentry.Models) > 0 {
+			// Gemini-on-Vertex / Vertex-MaaS: a keyless gemini-api-key entry with
+			// credentials-b64 synthesized to Provider "vertex". Advertise its
+			// configured models (native Gemini + publisher-prefixed MaaS strings)
+			// so they register and route to this SA instead of the registry
+			// defaults — which don't know the MaaS ids.
+			models = buildGeminiConfigModels(gentry)
+			if authKind == "apikey" {
+				excluded = gentry.ExcludedModels
+			}
 		}
 		models = applyExcludedModels(models, excluded)
 	case "aistudio":

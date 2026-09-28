@@ -174,7 +174,16 @@ func convertToImagenRequest(payload []byte) ([]byte, error) {
 
 // GeminiVertexExecutor sends requests to Vertex AI Gemini endpoints using service account credentials.
 type GeminiVertexExecutor struct {
-	cfg *config.Config
+	cfg  *config.Config
+	maas *VertexMaaSExecutor
+}
+
+// isVertexMaaSModel reports whether a model routes to the Vertex OpenAI-compatible
+// MaaS endpoint rather than the native Gemini generateContent path. MaaS/partner
+// model IDs are publisher-prefixed (e.g. "deepseek-ai/deepseek-v3.2-maas",
+// "xai/grok-4.20-reasoning"); native Gemini IDs are not ("gemini-3.1-pro-preview").
+func isVertexMaaSModel(model string) bool {
+	return strings.Contains(model, "/")
 }
 
 // NewGeminiVertexExecutor creates a new Vertex AI Gemini executor instance.
@@ -185,7 +194,7 @@ type GeminiVertexExecutor struct {
 // Returns:
 //   - *GeminiVertexExecutor: A new Vertex AI Gemini executor instance
 func NewGeminiVertexExecutor(cfg *config.Config) *GeminiVertexExecutor {
-	return &GeminiVertexExecutor{cfg: cfg}
+	return &GeminiVertexExecutor{cfg: cfg, maas: NewVertexMaaSExecutor(cfg)}
 }
 
 // Identifier returns the executor identifier.
@@ -239,6 +248,10 @@ func (e *GeminiVertexExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	if opts.Alt == "responses/compact" {
 		return resp, statusErr{code: http.StatusNotImplemented, msg: "/responses/compact not supported"}
 	}
+	// MaaS/partner models (publisher-prefixed) go through the OpenAI-compat path.
+	if isVertexMaaSModel(thinking.ParseSuffix(req.Model).ModelName) {
+		return e.maas.Execute(ctx, auth, req, opts)
+	}
 	// Try API key authentication first
 	apiKey, baseURL := vertexAPICreds(auth)
 
@@ -260,6 +273,10 @@ func (e *GeminiVertexExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	if opts.Alt == "responses/compact" {
 		return nil, statusErr{code: http.StatusNotImplemented, msg: "/responses/compact not supported"}
 	}
+	// MaaS/partner models (publisher-prefixed) go through the OpenAI-compat path.
+	if isVertexMaaSModel(thinking.ParseSuffix(req.Model).ModelName) {
+		return e.maas.ExecuteStream(ctx, auth, req, opts)
+	}
 	// Try API key authentication first
 	apiKey, baseURL := vertexAPICreds(auth)
 
@@ -278,6 +295,10 @@ func (e *GeminiVertexExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 
 // CountTokens counts tokens for the given request using the Vertex AI API.
 func (e *GeminiVertexExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	// MaaS/partner models (publisher-prefixed) go through the OpenAI-compat path.
+	if isVertexMaaSModel(thinking.ParseSuffix(req.Model).ModelName) {
+		return e.maas.CountTokens(ctx, auth, req, opts)
+	}
 	// Try API key authentication first
 	apiKey, baseURL := vertexAPICreds(auth)
 
@@ -306,6 +327,13 @@ func (e *GeminiVertexExecutor) Refresh(ctx context.Context, auth *cliproxyauth.A
 // This method contains the original service account authentication logic.
 func (e *GeminiVertexExecutor) executeWithServiceAccount(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, projectID, location string, saJSON []byte) (resp cliproxyexecutor.Response, err error) {
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
+	// Vertex SA entries may carry a model-project-pool (e.g. Gemini-on-Vertex):
+	// the SA's own project (from creds) may not have aiplatform enabled, so route
+	// to a pooled project when configured. Reuses the Claude-vertex picker
+	// (provider-agnostic; reads model-project-pool from auth attributes).
+	if pooled := pickVertexClaudeProject(ctx, auth, baseModel); pooled != "" {
+		projectID = pooled
+	}
 
 	reporter := helps.NewExecutorUsageReporter(ctx, e, baseModel, auth)
 	defer reporter.TrackFailure(ctx, &err)
@@ -608,6 +636,10 @@ func (e *GeminiVertexExecutor) executeWithAPIKey(ctx context.Context, auth *clip
 // executeStreamWithServiceAccount handles streaming authentication using service account credentials.
 func (e *GeminiVertexExecutor) executeStreamWithServiceAccount(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, projectID, location string, saJSON []byte) (_ *cliproxyexecutor.StreamResult, err error) {
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
+	// Route to a pooled project when configured (see executeWithServiceAccount).
+	if pooled := pickVertexClaudeProject(ctx, auth, baseModel); pooled != "" {
+		projectID = pooled
+	}
 
 	reporter := helps.NewExecutorUsageReporter(ctx, e, baseModel, auth)
 	defer reporter.TrackFailure(ctx, &err)
@@ -906,6 +938,10 @@ func (e *GeminiVertexExecutor) executeStreamWithAPIKey(ctx context.Context, auth
 // countTokensWithServiceAccount counts tokens using service account credentials.
 func (e *GeminiVertexExecutor) countTokensWithServiceAccount(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, projectID, location string, saJSON []byte) (cliproxyexecutor.Response, error) {
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
+	// Route to a pooled project when configured (see executeWithServiceAccount).
+	if pooled := pickVertexClaudeProject(ctx, auth, baseModel); pooled != "" {
+		projectID = pooled
+	}
 
 	from := opts.SourceFormat
 	responseFormat := cliproxyexecutor.ResponseFormatOrSource(opts)

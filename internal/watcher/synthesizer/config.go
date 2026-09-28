@@ -1,6 +1,7 @@
 package synthesizer
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"strconv"
@@ -87,6 +88,15 @@ func (s *ConfigSynthesizer) synthesizeGeminiKeyEntries(ctx *SynthesisContext, en
 		entry := entries[i]
 		key := strings.TrimSpace(entry.APIKey)
 		if key == "" {
+			// Gemini-on-Vertex: a keyless entry with credentials-b64 is an SA
+			// (OAuth) entry served by GeminiVertexExecutor. Build a "vertex"
+			// provider auth instead of dropping it — decode the SA into Metadata
+			// (service_account/project_id/location) that vertexCreds reads, and
+			// flatten model-project-pool so the executor routes to an
+			// aiplatform-enabled project (the SA's own project may be disabled).
+			if a := s.buildGeminiVertexAuth(ctx, entry, i); a != nil {
+				out = append(out, a)
+			}
 			continue
 		}
 		prefix := strings.TrimSpace(entry.Prefix)
@@ -133,6 +143,84 @@ func (s *ConfigSynthesizer) synthesizeGeminiKeyEntries(ctx *SynthesisContext, en
 		out = append(out, a)
 	}
 	return out
+}
+
+// buildGeminiVertexAuth turns a keyless gemini-api-key entry that carries
+// credentials-b64 into a "vertex" provider Auth served by GeminiVertexExecutor.
+// It decodes the service account into Metadata (service_account/project_id/
+// location) that vertexCreds reads, and flattens model-project-pool into the
+// per-model attribute form pickVertexClaudeProject uses at runtime so requests
+// route to an aiplatform-enabled project (the SA's own project may be disabled).
+func (s *ConfigSynthesizer) buildGeminiVertexAuth(ctx *SynthesisContext, entry config.GeminiKey, index int) *coreauth.Auth {
+	if entry.Disabled {
+		return nil
+	}
+	credB64 := strings.TrimSpace(entry.CredentialsB64)
+	if credB64 == "" {
+		return nil
+	}
+	saBytes, errDec := base64.StdEncoding.DecodeString(credB64)
+	if errDec != nil {
+		log.Warnf("gemini-vertex synth: entry %d bad credentials-b64: %v", index, errDec)
+		return nil
+	}
+	var saMap map[string]any
+	if errJSON := json.Unmarshal(saBytes, &saMap); errJSON != nil {
+		log.Warnf("gemini-vertex synth: entry %d bad service-account json: %v", index, errJSON)
+		return nil
+	}
+	loc := strings.TrimSpace(entry.VertexLocation)
+	if loc == "" {
+		loc = "us-central1"
+	}
+	projectID, _ := saMap["project_id"].(string)
+	id, token := ctx.IDGenerator.Next("vertex:apikey", credB64, loc)
+	attrs := map[string]string{
+		"source":          fmt.Sprintf("config:gemini-vertex[%s]", token),
+		"config_index":    strconv.Itoa(index),
+		"vertex_location": loc,
+	}
+	if entry.Priority != 0 {
+		attrs["priority"] = strconv.Itoa(entry.Priority)
+	}
+	addWeightToAttrs(entry.Weight, attrs)
+	if hash := diff.ComputeGeminiModelsHash(entry.Models); hash != "" {
+		attrs["models_hash"] = hash
+	}
+	if v := strings.TrimSpace(entry.AuthStyle); v != "" {
+		attrs["auth_style"] = strings.ToLower(v)
+	}
+	for m, projects := range entry.ModelProjectPool {
+		if len(projects) == 0 {
+			continue
+		}
+		attrs["model-project-pool/"+m] = strings.Join(projects, ",")
+	}
+	addConfigHeadersToAttrs(entry.Headers, attrs)
+	metadata := map[string]any{
+		"service_account": saMap,
+		"project_id":      strings.TrimSpace(projectID),
+		"location":        loc,
+	}
+	// Provider stays "vertex" for both native Gemini and MaaS (publisher-prefixed)
+	// models — GeminiVertexExecutor dispatches "/"-prefixed models to the MaaS
+	// OpenAI-compat path internally. This reuses all the existing "vertex"
+	// provider plumbing (model registry, routing, usage) instead of introducing a
+	// new provider key that would need adding to ~8 enumeration sites.
+	a := &coreauth.Auth{
+		ID:         id,
+		Provider:   "vertex",
+		Label:      "gemini-vertex",
+		Prefix:     strings.TrimSpace(entry.Prefix),
+		Status:     coreauth.StatusActive,
+		ProxyURL:   strings.TrimSpace(entry.ProxyURL),
+		Attributes: attrs,
+		Metadata:   metadata,
+		CreatedAt:  ctx.Now,
+		UpdatedAt:  ctx.Now,
+	}
+	ApplyAuthExcludedModelsMeta(a, ctx.Config, entry.ExcludedModels, "apikey")
+	return a
 }
 
 // synthesizeClaudeKeys creates Auth entries for Claude API keys.

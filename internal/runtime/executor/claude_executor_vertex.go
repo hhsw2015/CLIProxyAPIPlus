@@ -381,6 +381,16 @@ func buildVertexClaudeURL(location, project, model string) string {
 			"https://aiplatform.googleapis.com/v1/projects/%s/locations/global/publishers/anthropic/models/%s:streamRawPredict",
 			project, model,
 		)
+	} else if location == "us" || location == "eu" {
+		// Multi-region endpoints (us / eu) live on the *.rep.googleapis.com host and
+		// carry their OWN quota pool, independent of global. Serving the newest
+		// models across global+us+eu multiplies usable throughput. This is distinct
+		// from single-region hosts (us-east5 etc.) whose tiny per-model quota 429s
+		// immediately for the latest models.
+		url = fmt.Sprintf(
+			"https://aiplatform.%s.rep.googleapis.com/v1/projects/%s/locations/%s/publishers/anthropic/models/%s:streamRawPredict",
+			location, project, location, model,
+		)
 	} else {
 		url = fmt.Sprintf(
 			"https://%s-aiplatform.googleapis.com/v1/projects/%s/locations/%s/publishers/anthropic/models/%s:streamRawPredict",
