@@ -672,7 +672,7 @@ func ssePayload(event []byte) []byte {
 	if idx < 0 {
 		return nil
 	}
-	return bytes.TrimRight(event[idx+len(prefix):], "\r\n")
+	return event[idx+len(prefix):]
 }
 
 func countInteractionsEventType(events [][]byte, eventType string) int {

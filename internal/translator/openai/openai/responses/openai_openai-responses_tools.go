@@ -344,7 +344,7 @@ func rawResponsesNamespaceQualifiedName(namespaceName, childName string) string 
 	if childName == "" || namespaceName == "" || strings.HasPrefix(childName, "mcp__") {
 		return childName
 	}
-	if childName == namespaceName || strings.HasPrefix(childName, namespaceName+"__") {
+	if strings.HasPrefix(childName, namespaceName) {
 		return childName
 	}
 	if strings.HasSuffix(namespaceName, "__") {
