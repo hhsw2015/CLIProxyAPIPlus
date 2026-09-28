@@ -134,3 +134,4 @@ scripts/build_cpa_linux.sh
 scripts/cpa-upgrade.sh
 scripts/cpa-upgrade-local.sh
 scripts/deploy-all.sh
+scripts/cpa
