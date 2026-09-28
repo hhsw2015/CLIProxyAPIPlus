@@ -168,6 +168,18 @@ func (s *Server) mediaProxyHandler(ep mediaEndpoint) gin.HandlerFunc {
 			}
 		}
 
+		// DashScope (Qwen/Wan) native image gen (model contains "qwen-image" or
+		// "wan"+"-image"): async task API on the P10 key (not fal). Falls through if
+		// no DashScope key.
+		if ep.pathSuffix == "images/generations" {
+			lm := strings.ToLower(strings.TrimSpace(modelName))
+			if strings.Contains(lm, "qwen-image") || (strings.HasPrefix(lm, "wan") && strings.Contains(lm, "image")) {
+				if s.handleDashScopeImage(c, modelName, body) {
+					return
+				}
+			}
+		}
+
 		// Vertex Gemini image models (gemini-*-image "nano-banana"): generate via
 		// :generateContent (responseModalities:IMAGE) + SA OAuth. Imagen is retired
 		// so this is the text->image path. Returns false when no gemini-SA entry
