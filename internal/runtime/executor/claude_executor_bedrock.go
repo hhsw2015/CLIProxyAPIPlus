@@ -753,8 +753,8 @@ func (e *ClaudeExecutor) executeBedrock(ctx context.Context, auth *cliproxyauth.
 		return e.handleBedrockWebSearch(ctx, auth, req, opts)
 	}
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
-	if isNovaModel(baseModel) {
-		return e.executeBedrockNova(ctx, auth, req.Payload, baseModel)
+	if isConverseModel(baseModel) {
+		return e.executeBedrockConverse(ctx, auth, req.Payload, baseModel)
 	}
 
 	reporter := newUsageReporter(ctx, e.Identifier(), baseModel, auth)
@@ -826,10 +826,10 @@ func (e *ClaudeExecutor) executeStreamBedrock(ctx context.Context, auth *cliprox
 	}
 
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
-	if isNovaModel(baseModel) {
-		ch, err := e.executeBedrockNovaStream(ctx, auth, req.Payload, baseModel)
-		if err != nil {
-			return nil, err
+	if isConverseModel(baseModel) {
+		ch, errConverse := e.executeBedrockConverseStream(ctx, auth, req.Payload, baseModel)
+		if errConverse != nil {
+			return nil, errConverse
 		}
 		return &cliproxyexecutor.StreamResult{Chunks: ch}, nil
 	}
