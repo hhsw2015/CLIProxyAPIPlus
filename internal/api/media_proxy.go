@@ -170,6 +170,14 @@ func (s *Server) mediaProxyHandler(ep mediaEndpoint) gin.HandlerFunc {
 			}
 		}
 
+		// Volcengine CV image-editing (model contains "volcengine-cv"): SigV4 →
+		// CVProcess, OpenAI b64_json. Falls through if no volcengine-cv creds.
+		if ep.pathSuffix == "images/generations" && strings.Contains(strings.ToLower(strings.TrimSpace(modelName)), "volcengine-cv") {
+			if s.handleVolcengineCV(c, modelName, body) {
+				return
+			}
+		}
+
 		// Stability image on Bedrock (model contains "stability"/"sd3"/"stable-image"):
 		// sync InvokeModel in us-west-2 → OpenAI b64_json. Falls through if no AWS key.
 		if ep.pathSuffix == "images/generations" {
