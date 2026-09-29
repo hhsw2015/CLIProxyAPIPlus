@@ -84,6 +84,8 @@ func (s *Server) setupMediaRoutes(v1 *gin.RouterGroup) {
 	v1.POST("/embeddings", s.mediaProxyHandler(mediaEmbeddings))
 	v1.POST("/rerank", s.mediaProxyHandler(mediaRerank))
 	v1.POST("/music", s.mediaProxyHandler(mediaMusic))
+	// OpenAI-style /v1/moderations backed by Azure Content Safety (same AIServices key).
+	v1.POST("/moderations", s.handleAzureModeration)
 	// OpenAI Live API session brokers (WebRTC/realtime session create, verbatim
 	// passthrough to api.openai.com). Per-method radix trees keep these clear of the
 	// codex POST /v1/live and GET /v1/live/:call_id routes.
@@ -165,6 +167,17 @@ func (s *Server) mediaProxyHandler(ep mediaEndpoint) gin.HandlerFunc {
 		if ep.pathSuffix == "embeddings" {
 			if s.handleVertexEmbeddings(c, modelName, body) {
 				return
+			}
+		}
+
+		// Stability image on Bedrock (model contains "stability"/"sd3"/"stable-image"):
+		// sync InvokeModel in us-west-2 → OpenAI b64_json. Falls through if no AWS key.
+		if ep.pathSuffix == "images/generations" {
+			lm := strings.ToLower(strings.TrimSpace(modelName))
+			if strings.Contains(lm, "stability") || strings.Contains(lm, "stable-image") || strings.HasPrefix(lm, "sd3") {
+				if s.handleBedrockStabilityImage(c, modelName, body) {
+					return
+				}
 			}
 		}
 

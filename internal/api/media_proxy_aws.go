@@ -10,6 +10,7 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/credentials"
+	"github.com/aws/aws-sdk-go-v2/service/bedrockruntime"
 	"github.com/aws/aws-sdk-go-v2/service/polly"
 	pollytypes "github.com/aws/aws-sdk-go-v2/service/polly/types"
 	"github.com/aws/aws-sdk-go-v2/service/transcribestreaming"
@@ -124,6 +125,70 @@ func (s *Server) handleAWSPollyTTS(c *gin.Context, modelName string, body []byte
 	audio, _ := io.ReadAll(out.AudioStream)
 	log.Debugf("[polly] region=%s voice=%s bytes=%d", region, pollyVoiceID(gjson.GetBytes(body, "voice").String()), len(audio))
 	c.Data(http.StatusOK, "audio/mpeg", audio)
+	return true
+}
+
+// handleBedrockStabilityImage serves /v1/images/generations for Stability models
+// on Bedrock (model contains "stability"/"sd3"/"stable-image"). Stability only serves
+// in us-west-2; sync InvokeModel returns base64 → OpenAI images {b64_json}.
+func (s *Server) handleBedrockStabilityImage(c *gin.Context, modelName string, body []byte) bool {
+	ak, sk, _, ok := s.awsMediaCreds()
+	if !ok {
+		return false
+	}
+	prompt := gjson.GetBytes(body, "prompt").String()
+	if strings.TrimSpace(prompt) == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"message": "prompt is required", "type": "invalid_request_error"}})
+		return true
+	}
+	reqBody := []byte(`{"prompt":"","output_format":"jpeg"}`)
+	reqBody, _ = sjson.SetBytes(reqBody, "prompt", prompt)
+	if strings.Contains(strings.ToLower(modelName), "sd3") {
+		reqBody, _ = sjson.SetBytes(reqBody, "mode", "text-to-image")
+	}
+	if ar := gjson.GetBytes(body, "aspect_ratio").String(); ar != "" {
+		reqBody, _ = sjson.SetBytes(reqBody, "aspect_ratio", ar)
+	}
+	client := bedrockruntime.New(bedrockruntime.Options{
+		Region:      "us-west-2", // Stability image only serves here
+		Credentials: aws.NewCredentialsCache(credentials.NewStaticCredentialsProvider(ak, sk, "")),
+	})
+	out, err := client.InvokeModel(c.Request.Context(), &bedrockruntime.InvokeModelInput{
+		ModelId:     aws.String(modelName),
+		Body:        reqBody,
+		ContentType: aws.String("application/json"),
+		Accept:      aws.String("application/json"),
+	})
+	if err != nil {
+		c.JSON(http.StatusBadGateway, gin.H{"error": gin.H{"message": fmt.Sprintf("bedrock-stability: %v", err), "type": "server_error"}})
+		return true
+	}
+	var b64s []string
+	gjson.GetBytes(out.Body, "images").ForEach(func(_, v gjson.Result) bool {
+		if v.String() != "" {
+			b64s = append(b64s, v.String())
+		}
+		return true
+	})
+	if len(b64s) == 0 { // sd3.5 uses artifacts[].base64
+		gjson.GetBytes(out.Body, "artifacts").ForEach(func(_, a gjson.Result) bool {
+			if b := a.Get("base64").String(); b != "" {
+				b64s = append(b64s, b)
+			}
+			return true
+		})
+	}
+	if len(b64s) == 0 {
+		c.Data(http.StatusOK, "application/json", out.Body) // no image — surface raw
+		return true
+	}
+	resp := []byte(`{"created":0,"data":[]}`)
+	resp, _ = sjson.SetBytes(resp, "created", time.Now().Unix())
+	for i, b := range b64s {
+		resp, _ = sjson.SetBytes(resp, fmt.Sprintf("data.%d.b64_json", i), b)
+	}
+	log.Debugf("[bedrock-stability] model=%s images=%d", modelName, len(b64s))
+	c.Data(http.StatusOK, "application/json", resp)
 	return true
 }
 
