@@ -1577,12 +1577,37 @@ func isAnthropicModelsRequest(c *gin.Context) bool {
 	return strings.HasPrefix(c.GetHeader("User-Agent"), "claude-cli")
 }
 
+// isEphRequest reports whether the request was authenticated with an ephemeral
+// capability token (cpa-eph). Such tokens may USE models but must not enumerate the
+// full catalog, so the /models endpoints return an empty list for them. The marker is
+// set by the config-access provider. See docs/cpa-ephemeral-token.md.
+func isEphRequest(c *gin.Context) bool {
+	v, ok := c.Get("accessMetadata")
+	if !ok {
+		return false
+	}
+	m, ok := v.(map[string]string)
+	if !ok {
+		return false
+	}
+	return m["eph"] == "1"
+}
+
 // unifiedModelsHandler creates a unified handler for the /v1/models endpoint
 // that routes to different handlers based on the request.
 // Anthropic API requests (Anthropic-Version header, or a claude-cli User-Agent)
 // route to the Claude handler, otherwise they route to the OpenAI handler.
 func (s *Server) unifiedModelsHandler(openaiHandler *openai.OpenAIAPIHandler, claudeHandler *claude.ClaudeCodeAPIHandler) gin.HandlerFunc {
 	return func(c *gin.Context) {
+		// Ephemeral (cpa-eph) tokens may use models but must not enumerate the catalog.
+		if isEphRequest(c) {
+			if isAnthropicModelsRequest(c) {
+				c.JSON(http.StatusOK, gin.H{"data": []any{}, "has_more": false})
+			} else {
+				c.JSON(http.StatusOK, gin.H{"object": "list", "data": []any{}})
+			}
+			return
+		}
 		if _, ok := c.Request.URL.Query()["client_version"]; ok {
 			if s != nil && s.cfg != nil && s.cfg.Home.Enabled {
 				s.handleHomeCodexClientModels(c)
@@ -1641,6 +1666,11 @@ func (s *Server) handleHomeCodexClientModels(c *gin.Context) {
 
 func (s *Server) geminiModelsHandler(geminiHandler *gemini.GeminiAPIHandler) gin.HandlerFunc {
 	return func(c *gin.Context) {
+		// Ephemeral (cpa-eph) tokens may use models but must not enumerate the catalog.
+		if isEphRequest(c) {
+			c.JSON(http.StatusOK, gin.H{"models": []any{}})
+			return
+		}
 		if s != nil && s.cfg != nil && s.cfg.Home.Enabled {
 			s.handleHomeGeminiModels(c)
 			return
