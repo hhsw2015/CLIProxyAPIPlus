@@ -1,0 +1,500 @@
+{
+  "endpoint": "https://headroom.geeker.indevs.in",
+  "token_source": "~/.commandcode/relay-token.sh",
+  "models": [
+    {
+      "id": "claude-opus-5",
+      "wire": "anthropic",
+      "context": 1000000,
+      "efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ]
+    },
+    {
+      "id": "claude-opus-5-5",
+      "wire": "anthropic",
+      "context": 1000000,
+      "efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ]
+    },
+    {
+      "id": "claude-sonnet-5",
+      "wire": "anthropic",
+      "context": 1000000,
+      "efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ]
+    },
+    {
+      "id": "claude-opus-4-8",
+      "wire": "anthropic",
+      "context": 1000000,
+      "efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ]
+    },
+    {
+      "id": "claude-opus-4-7",
+      "wire": "anthropic",
+      "context": 1000000,
+      "efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ]
+    },
+    {
+      "id": "claude-sonnet-4-6",
+      "wire": "anthropic",
+      "context": 1000000,
+      "efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ]
+    },
+    {
+      "id": "claude-fable-5-1",
+      "wire": "anthropic",
+      "context": 1000000,
+      "efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ]
+    },
+    {
+      "id": "claude-fable-5",
+      "wire": "anthropic",
+      "context": 1000000,
+      "efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ]
+    },
+    {
+      "id": "gemini-3.1-pro-preview",
+      "wire": "chat",
+      "context": 1048576,
+      "efforts": [
+        "low",
+        "medium",
+        "high"
+      ]
+    },
+    {
+      "id": "grok-4.7",
+      "wire": "chat",
+      "context": 500000,
+      "efforts": [
+        "low",
+        "medium",
+        "high"
+      ]
+    },
+    {
+      "id": "gpt-6-astra",
+      "wire": "responses",
+      "context": 1050000,
+      "efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ]
+    },
+    {
+      "id": "gpt-6.1-sol",
+      "wire": "responses",
+      "context": 1050000,
+      "efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ]
+    },
+    {
+      "id": "gpt-5.6-sol",
+      "wire": "responses",
+      "context": 1050000,
+      "efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ]
+    },
+    {
+      "id": "gpt-5.5-pro",
+      "wire": "responses",
+      "context": 1050000,
+      "efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ]
+    },
+    {
+      "id": "gpt-5.4-pro",
+      "wire": "responses",
+      "context": 1050000,
+      "efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ]
+    },
+    {
+      "id": "gpt-5.3-codex",
+      "wire": "responses",
+      "context": 400000,
+      "efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ]
+    },
+    {
+      "id": "gpt-5.2-codex",
+      "wire": "responses",
+      "context": 400000,
+      "efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ]
+    },
+    {
+      "id": "gpt-5.1-codex-max",
+      "wire": "responses",
+      "context": 400000,
+      "efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ]
+    },
+    {
+      "id": "step-5-preview",
+      "wire": "chat",
+      "context": 1000000,
+      "efforts": [
+        "low",
+        "medium",
+        "high"
+      ]
+    },
+    {
+      "id": "mimo-v2.6-pro",
+      "wire": "chat",
+      "context": 1048576,
+      "efforts": [
+        "low",
+        "medium",
+        "high"
+      ]
+    },
+    {
+      "id": "mimo-v2.6-pro-ultraspeed",
+      "wire": "chat",
+      "context": 1048576,
+      "efforts": [
+        "low",
+        "medium",
+        "high"
+      ]
+    },
+    {
+      "id": "mimo-v2.6-flash",
+      "wire": "chat",
+      "context": 1048576,
+      "efforts": [
+        "low",
+        "medium",
+        "high"
+      ]
+    },
+    {
+      "id": "deepseek-v4-pro",
+      "wire": "chat",
+      "context": 1000000,
+      "efforts": [
+        "low",
+        "medium",
+        "high"
+      ]
+    },
+    {
+      "id": "deepseek-v4.1-flash",
+      "wire": "chat",
+      "context": 1000000,
+      "efforts": [
+        "low",
+        "medium",
+        "high"
+      ]
+    },
+    {
+      "id": "glm-5.3",
+      "wire": "chat",
+      "context": 1000000,
+      "efforts": [
+        "low",
+        "medium",
+        "high"
+      ]
+    },
+    {
+      "id": "glm-5.3-flashx",
+      "wire": "chat",
+      "context": 1048576,
+      "efforts": [
+        "low",
+        "high",
+        "max"
+      ]
+    },
+    {
+      "id": "glm-5.3-prime",
+      "wire": "chat",
+      "context": 1310720,
+      "efforts": [
+        "low",
+        "high",
+        "max"
+      ]
+    },
+    {
+      "id": "kimi-k3",
+      "wire": "chat",
+      "context": 1048576,
+      "efforts": [
+        "low",
+        "medium",
+        "high"
+      ]
+    },
+    {
+      "id": "kimi-k2.8",
+      "wire": "chat",
+      "context": 262144,
+      "efforts": [
+        "low",
+        "medium",
+        "high"
+      ]
+    },
+    {
+      "id": "kimi-k2.7-code",
+      "wire": "chat",
+      "context": 262144,
+      "efforts": [
+        "low",
+        "medium",
+        "high"
+      ]
+    },
+    {
+      "id": "minimax-m3",
+      "wire": "chat",
+      "context": 1048576,
+      "efforts": [
+        "low",
+        "medium",
+        "high"
+      ]
+    },
+    {
+      "id": "qwen3.8-max",
+      "wire": "chat",
+      "context": 1000000,
+      "efforts": [
+        "low",
+        "medium",
+        "high"
+      ]
+    },
+    {
+      "id": "qwen3.8-2.4t-a95b",
+      "wire": "chat",
+      "context": 262144,
+      "efforts": [
+        "low",
+        "medium",
+        "high"
+      ]
+    },
+    {
+      "id": "qwen3.8-flash",
+      "wire": "chat",
+      "context": 1000000,
+      "efforts": [
+        "low",
+        "medium",
+        "high"
+      ]
+    },
+    {
+      "id": "qwen3-coder-next",
+      "wire": "chat",
+      "context": 262144,
+      "efforts": []
+    },
+    {
+      "id": "qwen3-coder-plus",
+      "wire": "chat",
+      "context": 1048576,
+      "efforts": []
+    },
+    {
+      "id": "qwen3-next-80b-a3b-thinking",
+      "wire": "chat",
+      "context": 131072,
+      "efforts": [
+        "low",
+        "medium",
+        "high"
+      ]
+    },
+    {
+      "id": "gpt-oss-120b",
+      "wire": "chat",
+      "context": 131072,
+      "efforts": [
+        "low",
+        "medium",
+        "high"
+      ]
+    },
+    {
+      "id": "mistralai/codestral-2508",
+      "wire": "chat",
+      "context": 256000,
+      "efforts": null
+    },
+    {
+      "id": "mistralai/devstral-2512",
+      "wire": "chat",
+      "context": 262144,
+      "efforts": []
+    },
+    {
+      "id": "bytedance-seed/seed-2.0-code",
+      "wire": "chat",
+      "context": 262144,
+      "efforts": [
+        "low",
+        "medium",
+        "high"
+      ]
+    },
+    {
+      "id": "meta-llama/llama-4-maverick",
+      "wire": "chat",
+      "context": 1048576,
+      "efforts": null
+    },
+    {
+      "id": "meta-llama/llama-4-scout",
+      "wire": "chat",
+      "context": 1310720,
+      "efforts": null
+    },
+    {
+      "id": "google/gemma-4-31b-it",
+      "wire": "chat",
+      "context": 262144,
+      "efforts": [
+        "low",
+        "medium",
+        "high"
+      ]
+    },
+    {
+      "id": "hunyuan-4-preview",
+      "wire": "chat",
+      "context": 1048576,
+      "efforts": [
+        "low",
+        "medium",
+        "high"
+      ]
+    },
+    {
+      "id": "tencent/hy4-preview",
+      "wire": "chat",
+      "context": 1024000,
+      "efforts": [
+        "low",
+        "medium",
+        "high"
+      ]
+    },
+    {
+      "id": "thinkingmachines/inkling",
+      "wire": "chat",
+      "context": 1048576,
+      "efforts": [
+        "low",
+        "medium",
+        "high"
+      ]
+    },
+    {
+      "id": "nvidia/nemotron-3-ultra-550b-a55b",
+      "wire": "chat",
+      "context": 1000000,
+      "efforts": [
+        "low",
+        "medium",
+        "high"
+      ]
+    }
+  ],
+  "local": {
+    "bonsai-2-27b": {
+      "baseUrl": "http://127.0.0.1:8091/v1",
+      "context": 65536
+    }
+  }
+}

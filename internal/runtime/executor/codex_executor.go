@@ -2562,3 +2562,6 @@ func (e *CodexExecutor) resolveCodexConfig(auth *cliproxyauth.Auth) *config.Code
 	}
 	return nil
 }
+
+// SupportsApplyPatch reports the actual executor contract, independent of its provider name.
+func (e *CodexExecutor) SupportsApplyPatch() bool { return e != nil }

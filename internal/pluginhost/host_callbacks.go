@@ -324,6 +324,10 @@ func modelExecutionRequestFromPlugin(req pluginapi.HostModelExecutionRequest, sk
 		Alt:                     req.Alt,
 		SkipInterceptorPluginID: skipPluginID,
 		SkipRouterPluginID:      skipPluginID,
+		ForcedProvider:          req.ForcedProvider,
+		AuthID:                  req.AuthID,
+		ProxyURL:                strings.TrimSpace(req.ProxyURL),
+		Path:                    strings.TrimSpace(req.Path),
 	}
 }
 

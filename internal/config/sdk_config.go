@@ -251,6 +251,22 @@ type SDKConfig struct {
 	NonStreamKeepAliveInterval int `yaml:"nonstream-keepalive-interval,omitempty" json:"nonstream-keepalive-interval,omitempty"`
 }
 
+// ClientConfig configures client-facing compatibility behavior.
+type ClientConfig struct {
+	Codex CodexClientConfig `yaml:"codex" json:"codex"`
+}
+
+// CodexClientConfig configures Codex client compatibility and the model catalog.
+type CodexClientConfig struct {
+	// OptimizeMultiAgentV2 optimizes official Codex multi-agent requests across providers.
+	// Default false leaves the client's multi-agent behavior unchanged.
+	OptimizeMultiAgentV2 bool `yaml:"optimize-multi-agent-v2" json:"optimize-multi-agent-v2"`
+
+	// EnableApplyPatch advertises freeform apply_patch only for supported models.
+	// Default false clears the capability regardless of template metadata.
+	EnableApplyPatch bool `yaml:"enable-apply-patch" json:"enable-apply-patch"`
+}
+
 // ClaudeCodeConfig configures Claude Code compatibility behavior.
 type ClaudeCodeConfig struct {
 	// DisableCloakingModelList disables model ID cloaking in Anthropic model list responses.

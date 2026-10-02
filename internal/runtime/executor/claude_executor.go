@@ -3643,3 +3643,6 @@ func ensureModelMaxTokens(body []byte, modelID string) []byte {
 
 	return body
 }
+
+// SupportsApplyPatch reports the actual executor contract, independent of its provider name.
+func (e *ClaudeExecutor) SupportsApplyPatch() bool { return e != nil }

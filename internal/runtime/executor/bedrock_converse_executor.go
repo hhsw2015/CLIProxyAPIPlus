@@ -31,7 +31,7 @@ func isConverseModel(model string) bool {
 	for _, p := range []string{
 		"amazon.", "nova-", "meta.", "deepseek", "mistral.", "nvidia.",
 		"minimax", "zai.", "ai21.", "cohere.", "openai.", "qwen.",
-		"writer.", "xai.", "moonshot", "google.", "luma.", "twelvelabs.",
+		"writer.", "xai.", "grok", "moonshot", "google.", "luma.", "twelvelabs.",
 	} {
 		if strings.HasPrefix(l, p) {
 			return true

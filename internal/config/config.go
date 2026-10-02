@@ -231,6 +231,9 @@ type Config struct {
 	// gemini-api-key, interactions-api-key, codex-api-key, xai-api-key, claude-api-key, openai-compatibility, and vertex-api-key.
 	OAuthModelAlias map[string][]OAuthModelAlias `yaml:"oauth-model-alias,omitempty" json:"oauth-model-alias,omitempty"`
 
+	// OAuthSettings defines per-channel model settings (such as max-context-length) applied to OAuth/file-backed auth entries.
+	OAuthSettings map[string][]OAuthModelSetting `yaml:"oauth-settings,omitempty" json:"oauth-settings,omitempty"`
+
 	// Payload defines default and override rules for provider payload parameters.
 	Payload PayloadConfig `yaml:"payload" json:"payload"`
 
@@ -2754,4 +2757,93 @@ func removeLegacyAuthBlock(root *yaml.Node) {
 		return
 	}
 	removeMapKey(root, "auth")
+}
+
+// ---- ported from upstream config_types.go / config_normalization.go (oauth-settings feature df2774ca; fork keeps monolith config.go) ----
+
+// OAuthModelSetting defines provider/channel model settings (such as context window overrides) for OAuth credentials.
+type OAuthModelSetting struct {
+	Name  string `yaml:"name" json:"name"`
+	Alias string `yaml:"alias,omitempty" json:"alias,omitempty"`
+
+	// MaxContextLength overrides the context window advertised to Codex clients.
+	MaxContextLength int `yaml:"max-context-length,omitempty" json:"max-context-length,omitempty"`
+}
+
+func (s OAuthModelSetting) GetMaxContextLength() int { return s.MaxContextLength }
+
+// ResolveOAuthModelSetting finds the best matching OAuthModelSetting for a given model.
+// An exact Alias match on the model ID takes precedence over a general Name match.
+// Within the same match specificity, later entries in the slice override earlier ones.
+func ResolveOAuthModelSetting(settings []OAuthModelSetting, modelID, metadataModelID, modelName string) *OAuthModelSetting {
+	if len(settings) == 0 {
+		return nil
+	}
+	id := strings.ToLower(strings.TrimSpace(modelID))
+	metaID := strings.ToLower(strings.TrimSpace(metadataModelID))
+	name := strings.ToLower(strings.TrimSpace(modelName))
+
+	var aliasMatch *OAuthModelSetting
+	var nameMatch *OAuthModelSetting
+
+	for i := range settings {
+		entry := &settings[i]
+		entryName := strings.ToLower(strings.TrimSpace(entry.Name))
+		if entryName == "" {
+			continue
+		}
+		entryAlias := strings.ToLower(strings.TrimSpace(entry.Alias))
+
+		if entryAlias != "" && id != "" && id == entryAlias {
+			aliasMatch = entry
+		} else if (entryAlias == "" || entryAlias == id) && (id == entryName || (metaID != "" && metaID == entryName) || (name != "" && name == entryName)) {
+			nameMatch = entry
+		}
+	}
+
+	if aliasMatch != nil {
+		return aliasMatch
+	}
+	return nameMatch
+}
+
+func (cfg *Config) SanitizeOAuthSettings() {
+	if cfg == nil || len(cfg.OAuthSettings) == 0 {
+		return
+	}
+	out := make(map[string][]OAuthModelSetting, len(cfg.OAuthSettings))
+	for rawChannel, settings := range cfg.OAuthSettings {
+		channel := strings.ToLower(strings.TrimSpace(rawChannel))
+		if channel == "" || len(settings) == 0 {
+			continue
+		}
+		seen := make(map[string]struct{}, len(settings))
+		reversed := make([]OAuthModelSetting, 0, len(settings))
+		for i := len(settings) - 1; i >= 0; i-- {
+			entry := settings[i]
+			name := strings.TrimSpace(entry.Name)
+			if name == "" {
+				continue
+			}
+			alias := strings.TrimSpace(entry.Alias)
+			key := strings.ToLower(name) + "->" + strings.ToLower(alias)
+			if _, ok := seen[key]; ok {
+				continue
+			}
+			seen[key] = struct{}{}
+			reversed = append(reversed, OAuthModelSetting{
+				Name:             name,
+				Alias:            alias,
+				MaxContextLength: entry.MaxContextLength,
+			})
+		}
+		if len(reversed) > 0 {
+			clean := make([]OAuthModelSetting, len(reversed))
+			for i := range reversed {
+				clean[len(reversed)-1-i] = reversed[i]
+			}
+			out[channel] = clean
+		}
+	}
+	cfg.OAuthSettings = out
 }

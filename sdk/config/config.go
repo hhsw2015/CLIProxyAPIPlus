@@ -10,11 +10,14 @@ type SDKConfig = internalconfig.SDKConfig
 
 type Config = internalconfig.Config
 
+type ClientConfig = internalconfig.ClientConfig
+type CodexClientConfig = internalconfig.CodexClientConfig
 type StreamingConfig = internalconfig.StreamingConfig
 type ClaudeCodeConfig = internalconfig.ClaudeCodeConfig
 type TLSConfig = internalconfig.TLSConfig
 type RemoteManagement = internalconfig.RemoteManagement
 type OAuthModelAlias = internalconfig.OAuthModelAlias
+type OAuthModelSetting = internalconfig.OAuthModelSetting
 type PayloadConfig = internalconfig.PayloadConfig
 type PayloadRule = internalconfig.PayloadRule
 type PayloadFilterRule = internalconfig.PayloadFilterRule
@@ -45,6 +48,10 @@ func LoadConfig(configFile string) (*Config, error) { return internalconfig.Load
 
 func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	return internalconfig.LoadConfigOptional(configFile, optional)
+}
+
+func ResolveOAuthModelSetting(settings []OAuthModelSetting, modelID, metadataModelID, modelName string) *OAuthModelSetting {
+	return internalconfig.ResolveOAuthModelSetting(settings, modelID, metadataModelID, modelName)
 }
 
 func ParseConfigBytes(data []byte) (*Config, error) { return internalconfig.ParseConfigBytes(data) }

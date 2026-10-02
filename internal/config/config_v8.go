@@ -21,6 +21,15 @@ var v8FieldIndexes = make(map[string][]int)
 var v8StructPaths []configPath
 var v8Paths = buildV8Paths()
 
+// Historical spellings are YAML-boundary aliases, not provider runtime fields.
+// The canonical client path wins by presence (including explicit false/null).
+// If it is absent, prefer the previous v8 OAuth path, then providers, then codex.
+var v8ClientPaths = []configPath{
+	{"oauth.providers.codex.optimize-multi-agent-v2", "client.codex.optimize-multi-agent-v2"},
+	{"providers.codex.optimize-multi-agent-v2", "client.codex.optimize-multi-agent-v2"},
+	{"codex.optimize-multi-agent-v2", "client.codex.optimize-multi-agent-v2"},
+}
+
 var v8KeyFamilies = []configPath{
 	{"gemini-api-key", "gemini"}, {"interactions-api-key", "interactions"},
 	{"vertex-api-key", "vertex"}, {"codex-api-key", "codex"},
@@ -43,7 +52,7 @@ func buildV8Paths() []configPath {
 		{"nonstream-keepalive-interval", "requests.nonstream-keepalive-interval"}, {"streaming", "requests.streaming"}, {"payload", "requests.payload"},
 		{"auth-dir", "oauth.auth-dir"}, {"auth-auto-refresh-workers", "oauth.auth-auto-refresh-workers"},
 		{"oauth-model-alias", "oauth.model-alias"}, {"oauth-excluded-models", "oauth.excluded-models"},
-		{"oauth-request-scoped-errors", "oauth.request-scoped-errors"}, {"ws-auth", "oauth.providers.aistudio.ws-auth"},
+		{"oauth-request-scoped-errors", "oauth.request-scoped-errors"}, {"oauth-settings", "oauth.settings"}, {"ws-auth", "oauth.providers.aistudio.ws-auth"},
 		{"codex", "oauth.providers.codex"}, {"codex-header-defaults", "oauth.providers.codex.header-defaults"},
 		{"claude", "oauth.providers.claude"}, {"claude-code", "oauth.providers.claude.claude-code"},
 		{"disable-claude-cloak-mode", "oauth.providers.claude.disable-claude-cloak-mode"},
@@ -122,6 +131,33 @@ func setYAMLPath(root *yaml.Node, path string, value *yaml.Node) {
 	*dst = *deepCopyNode(value)
 }
 
+// setYAMLPathWithComments attaches leading comments to the destination key;
+// yaml.v3 does not render a scalar value's HeadComment.
+func setYAMLPathWithComments(root *yaml.Node, path string, value *yaml.Node) {
+	setYAMLPath(root, path, value)
+	parts := strings.Split(path, ".")
+	parent := root
+	if len(parts) > 1 {
+		parent = yamlPath(root, strings.Join(parts[:len(parts)-1], "."))
+	}
+	parent.Content[findMapKeyIndex(parent, parts[len(parts)-1])].HeadComment = value.HeadComment
+	yamlPath(root, path).HeadComment = ""
+}
+
+// copyYAMLPathValue carries a field's key comment when moving its value.
+func copyYAMLPathValue(root *yaml.Node, path string) *yaml.Node {
+	copy := deepCopyNode(yamlPath(root, path))
+	parts := strings.Split(path, ".")
+	parent := root
+	if len(parts) > 1 {
+		parent = yamlPath(root, strings.Join(parts[:len(parts)-1], "."))
+	}
+	if idx := findMapKeyIndex(parent, parts[len(parts)-1]); idx >= 0 {
+		copy.HeadComment = strings.TrimSpace(parent.Content[idx].HeadComment + "\n" + copy.HeadComment)
+	}
+	return copy
+}
+
 func deleteYAMLPath(root *yaml.Node, path string) bool {
 	parts := strings.SplitN(path, ".", 2)
 	idx := findMapKeyIndex(root, parts[0])
@@ -188,7 +224,7 @@ func flattenV8(node *yaml.Node) (*yaml.Node, error) {
 	if _, err := normalizeV8PrivateIPAlias(node, true); err != nil {
 		return nil, err
 	}
-	for _, path := range v8Paths {
+	for _, path := range append(append([]configPath(nil), v8Paths...), v8ClientPaths...) {
 		parts := strings.Split(path.current, ".")
 		for i := 1; i < len(parts); i++ {
 			parent := yamlPath(node, strings.Join(parts[:i], "."))
@@ -205,6 +241,14 @@ func flattenV8(node *yaml.Node) (*yaml.Node, error) {
 		}
 	}
 	root := deepCopyNode(node)
+	for _, path := range v8ClientPaths {
+		if yamlPath(root, path.old) != nil {
+			if yamlPath(root, path.current) == nil {
+				setYAMLPathWithComments(root, path.current, copyYAMLPathValue(root, path.old))
+			}
+			deleteYAMLPath(root, path.old)
+		}
+	}
 	if version := yamlPath(root, "config-version"); version != nil && (version.Tag != "!!int" || version.Value != "8") {
 		return nil, fmt.Errorf("unsupported config-version (expected 8)")
 	}
@@ -346,7 +390,7 @@ func NormalizeConfigLayout(data []byte, migrate bool) ([]byte, bool, error) {
 	}
 	// Empty legacy structs have no leaf fields to move. Preserve them as empty v8
 	// mappings; null structs also mean defaults. User-owned maps are not included.
-	paths := append([]configPath(nil), v8Paths...)
+	paths := append(append([]configPath(nil), v8ClientPaths...), v8Paths...)
 	for _, path := range v8StructPaths {
 		old := yamlPath(root, path.old)
 		if old == nil || (!migrate && yamlPath(root, path.current) == nil) {
@@ -368,20 +412,10 @@ func NormalizeConfigLayout(data []byte, migrate bool) ([]byte, bool, error) {
 		if current == nil && !migrate {
 			continue
 		}
-		copy := deepCopyNode(old)
-		// A leading field comment belongs to its key node in yaml.v3. Carry it
-		// with the value when moving that key into a different mapping.
-		parts := strings.Split(path.old, ".")
-		parent := root
-		if len(parts) > 1 {
-			parent = yamlPath(root, strings.Join(parts[:len(parts)-1], "."))
-		}
-		if idx := findMapKeyIndex(parent, parts[len(parts)-1]); idx >= 0 {
-			copy.HeadComment = strings.TrimSpace(parent.Content[idx].HeadComment + "\n" + copy.HeadComment)
-		}
+		copy := copyYAMLPathValue(root, path.old)
 		deleteYAMLPath(root, path.old)
 		if current == nil {
-			setYAMLPath(root, path.current, copy)
+			setYAMLPathWithComments(root, path.current, copy)
 		}
 		changed = true
 	}
@@ -401,7 +435,7 @@ func NormalizeConfigLayout(data []byte, migrate bool) ([]byte, bool, error) {
 		changed = true
 	}
 	if migrate {
-		// Existing unknown sections are ignored by the runtime. Retain their
+		// Existing unknown fields are ignored by the runtime. Retain their
 		// contents as comments while keeping new v8 writes strictly validated.
 		if err := commentUnknownV8Sections(root); err != nil {
 			return nil, false, err
@@ -417,7 +451,7 @@ func NormalizeConfigLayout(data []byte, migrate bool) ([]byte, bool, error) {
 }
 
 func v8AllowedRoots() map[string]bool {
-	allowed := map[string]bool{"config-version": true, "api-keys": true, "plugins": true, "quota-exceeded": true}
+	allowed := map[string]bool{"config-version": true, "api-keys": true, "plugins": true, "quota-exceeded": true, "client": true}
 	for _, path := range v8Paths {
 		section, _, _ := strings.Cut(path.current, ".")
 		allowed[section] = true
@@ -450,27 +484,104 @@ func warnUnrecognizedV8Section(section string) {
 }
 
 func commentUnknownV8Sections(root *yaml.Node) error {
-	allowed := v8AllowedRoots()
+	if err := commentUnknownV8Fields(root, root, v8AllowedRoots(), ""); err != nil {
+		return err
+	}
+
+	children := make(map[string]map[string]bool)
+	for _, path := range append(append([]configPath(nil), v8Paths...), v8StructPaths...) {
+		parts := strings.Split(path.current, ".")
+		for i := 1; i < len(parts); i++ {
+			parent := strings.Join(parts[:i], ".")
+			if children[parent] == nil {
+				children[parent] = make(map[string]bool)
+			}
+			children[parent][parts[i]] = true
+		}
+	}
+	// Some structs already live at their v8 path and therefore have no remap entry.
+	allowedRoots := v8AllowedRoots()
+	var includeNative func(reflect.Type, string)
+	includeNative = func(t reflect.Type, path string) {
+		if t.Kind() != reflect.Struct {
+			return
+		}
+		for i := 0; i < t.NumField(); i++ {
+			field := t.Field(i)
+			tag := strings.Split(field.Tag.Get("yaml"), ",")[0]
+			if tag == "-" || field.PkgPath != "" {
+				continue
+			}
+			if field.Anonymous {
+				includeNative(field.Type, path)
+				continue
+			}
+			if path == "" && !allowedRoots[tag] {
+				continue
+			}
+			if children[path] == nil {
+				children[path] = make(map[string]bool)
+			}
+			children[path][tag] = true
+			child := tag
+			if path != "" {
+				child = path + "." + tag
+			}
+			includeNative(field.Type, child)
+		}
+	}
+	includeNative(reflect.TypeOf(Config{}), "")
+	var walk func(*yaml.Node, string) error
+	walk = func(node *yaml.Node, path string) error {
+		if node == nil || node.Kind != yaml.MappingNode || children[path] == nil {
+			return nil
+		}
+		if err := commentUnknownV8Fields(node, root, children[path], path); err != nil {
+			return err
+		}
+		for i := 0; i+1 < len(node.Content); i += 2 {
+			child := path + "." + node.Content[i].Value
+			if err := walk(node.Content[i+1], child); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	for i := 0; i+1 < len(root.Content); i += 2 {
+		if err := walk(root.Content[i+1], root.Content[i].Value); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func commentUnknownV8Fields(node *yaml.Node, archive *yaml.Node, allowed map[string]bool, path string) error {
 	var comments []string
-	for i := 0; i+1 < len(root.Content); {
-		if allowed[root.Content[i].Value] {
+	for i := 0; i+1 < len(node.Content); {
+		key := node.Content[i].Value
+		if allowed[key] {
 			i += 2
 			continue
 		}
-		key := root.Content[i].Value
-		warnUnrecognizedV8Section(key)
-		entry := &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map", Content: root.Content[i : i+2]}
+		section := key
+		if path != "" {
+			section = path + "." + key
+		}
+		warnUnrecognizedV8Section(section)
+		keyNode := *node.Content[i]
+		keyNode.Value = section
+		entry := &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map", Content: []*yaml.Node{&keyNode, node.Content[i+1]}}
 		data, errMarshal := yaml.Marshal(entry)
 		if errMarshal != nil {
 			return errMarshal
 		}
 		text := strings.TrimSuffix(string(data), "\n")
 		comments = append(comments, "# "+strings.ReplaceAll(text, "\n", "\n# "))
-		root.Content = append(root.Content[:i], root.Content[i+2:]...)
+		node.Content = append(node.Content[:i], node.Content[i+2:]...)
 	}
-	// A root-level comment survives later deletion of any neighboring setting.
+	// Archive at the root so deleting a neighboring nested field cannot drop it.
 	if len(comments) > 0 {
-		root.FootComment = strings.TrimSpace(root.FootComment + "\n" + strings.Join(comments, "\n"))
+		archive.FootComment = strings.TrimSpace(archive.FootComment + "\n" + strings.Join(comments, "\n"))
 	}
 	return nil
 }
@@ -634,7 +745,7 @@ func ValidateV8Config(data []byte) error {
 	}
 	root = expandConfigAliases(root)
 	allowedRoots := v8AllowedRoots()
-	for _, path := range v8Paths {
+	for _, path := range append(append([]configPath(nil), v8Paths...), v8ClientPaths...) {
 		if legacyPath(root, path.old) != nil {
 			return fmt.Errorf("legacy field %s is not accepted by v8; use %s", path.old, path.current)
 		}
