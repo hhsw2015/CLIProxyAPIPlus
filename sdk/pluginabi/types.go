@@ -98,6 +98,8 @@ const (
 	MethodHostAuthGetRuntime     = "host.auth.get_runtime"
 	MethodHostAuthSave           = "host.auth.save"
 	MethodHostAffinityLookup     = "host.affinity.lookup"
+
+	MethodHostRoutingResetCooldown = "host.routing.reset_cooldown"
 )
 
 type Envelope struct {
