@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
@@ -412,9 +413,12 @@ func (e *GeminiExecutor) executeInteractions(ctx context.Context, auth *cliproxy
 	if gjson.GetBytes(body, "model").Exists() && targetName != "" {
 		body = helps.SetStringIfDifferent(body, "model", targetName)
 	}
-	body, err = applyGeminiInteractionsThinking(body, req, opts)
-	if err != nil {
-		return resp, err
+	body, isBackground := helps.ApplyGeminiInteractionsAgentMode(body, targetName)
+	if !isBackground {
+		body, err = applyGeminiInteractionsThinking(body, req, opts)
+		if err != nil {
+			return resp, err
+		}
 	}
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	requestPath := helps.PayloadRequestPath(opts)
@@ -471,6 +475,15 @@ func (e *GeminiExecutor) executeInteractions(ctx context.Context, auth *cliproxy
 		err = statusErr{code: httpResp.StatusCode, msg: string(data)}
 		return resp, err
 	}
+	if isBackground {
+		// Background agent (e.g. deep-research): the POST only enqueues; poll the
+		// interaction until it leaves in_progress, then translate the final result.
+		data, err = e.pollInteractionResult(ctx, httpClient, baseURL, apiKey, gjson.GetBytes(data, "id").String())
+		if err != nil {
+			return resp, err
+		}
+		helps.AppendAPIResponseChunk(ctx, e.cfg, data)
+	}
 	reporter.Publish(ctx, helps.ParseInteractionsUsage(data))
 	targetFormat := cliproxyexecutor.ResponseFormatOrSource(opts)
 	var param any
@@ -492,15 +505,21 @@ func (e *GeminiExecutor) executeInteractionsStream(ctx context.Context, auth *cl
 	if gjson.GetBytes(body, "model").Exists() && targetName != "" {
 		body = helps.SetStringIfDifferent(body, "model", targetName)
 	}
-	body, err = applyGeminiInteractionsThinking(body, req, opts)
-	if err != nil {
-		return nil, err
+	body, isBackground := helps.ApplyGeminiInteractionsAgentMode(body, targetName)
+	if !isBackground {
+		body, err = applyGeminiInteractionsThinking(body, req, opts)
+		if err != nil {
+			return nil, err
+		}
 	}
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	requestPath := helps.PayloadRequestPath(opts)
 	fromProtocol := opts.SourceFormat.String()
 	body = helps.ApplyPayloadConfigWithRequest(e.cfg, targetName, "interactions", fromProtocol, "", body, originalTranslated, requestedModel, requestPath, opts.Headers)
-	body = helps.SetBoolIfDifferent(body, "stream", true)
+	if !isBackground {
+		// Background agents are submit+poll (no upstream SSE); never flag the submit as stream.
+		body = helps.SetBoolIfDifferent(body, "stream", true)
+	}
 	baseURL := resolveGeminiBaseURL(auth)
 	url := fmt.Sprintf("%s/%s/interactions", baseURL, glAPIVersion)
 	httpReq, errRequest := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
@@ -542,6 +561,55 @@ func (e *GeminiExecutor) executeInteractionsStream(ctx context.Context, auth *cl
 		}
 		helps.AppendAPIResponseChunk(ctx, e.cfg, data)
 		return nil, statusErr{code: httpResp.StatusCode, msg: string(data)}
+	}
+
+	if isBackground {
+		// Background agent (e.g. deep-research): the POST only enqueued the interaction.
+		// Read the submit ack, poll until it leaves in_progress, then replay the final
+		// interaction as synthetic SSE frames through the existing stream translators.
+		submitData, _ := io.ReadAll(httpResp.Body)
+		if errClose := httpResp.Body.Close(); errClose != nil {
+			log.Errorf("gemini executor: close interactions submit body error: %v", errClose)
+		}
+		helps.AppendAPIResponseChunk(ctx, e.cfg, submitData)
+		finalData, errPoll := e.pollInteractionResult(ctx, httpClient, baseURL, apiKey, gjson.GetBytes(submitData, "id").String())
+		if errPoll != nil {
+			return nil, errPoll
+		}
+		helps.AppendAPIResponseChunk(ctx, e.cfg, finalData)
+		reporter.Publish(ctx, helps.ParseInteractionsUsage(finalData))
+		respFormat := cliproxyexecutor.ResponseFormatOrSource(opts)
+		hdr := httpResp.Header.Clone()
+		originalRequest := opts.OriginalRequest
+		if len(originalRequest) == 0 {
+			originalRequest = req.Payload
+		}
+		bgOut := make(chan cliproxyexecutor.StreamChunk)
+		go func() {
+			defer close(bgOut)
+			claudeInputTokens := helps.NewClaudeInputTokenState(opts.SourceFormat, sdktranslator.FormatInteractions, respFormat, originalRequest)
+			var param any
+			for _, frame := range helps.BuildInteractionsStreamFramesFromFinal(finalData) {
+				if respFormat == sdktranslator.FormatInteractions {
+					visible := append(bytes.TrimRight(bytes.Clone(frame), "\r\n"), '\n', '\n')
+					select {
+					case bgOut <- cliproxyexecutor.StreamChunk{Payload: visible}:
+					case <-ctx.Done():
+						return
+					}
+					continue
+				}
+				lines := helps.TranslateStreamWithClaudeInputTokens(ctx, sdktranslator.FormatInteractions, respFormat, req.Model, opts.OriginalRequest, body, frame, &param, claudeInputTokens)
+				for i := range lines {
+					select {
+					case bgOut <- cliproxyexecutor.StreamChunk{Payload: lines[i]}:
+					case <-ctx.Done():
+						return
+					}
+				}
+			}
+		}()
+		return &cliproxyexecutor.StreamResult{Headers: hdr, Chunks: bgOut}, nil
 	}
 
 	out := make(chan cliproxyexecutor.StreamChunk)
@@ -733,6 +801,59 @@ func (e *GeminiExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (
 // geminiAPIKey returns just the api_key attribute (upstream helper used by
 // the Interactions execution path). Named separately from geminiCreds because
 // the interactions endpoint only ever authenticates via x-goog-api-key.
+// interactionsAgentPollInterval is the cadence for polling a background agent
+// interaction (deep-research etc.) until it leaves an in-flight status. This is a poll
+// cadence, NOT a request timeout: the overall wait is bounded only by client
+// cancellation via ctx, per the "no timeouts after an upstream connection" rule.
+var interactionsAgentPollInterval = 2 * time.Second
+
+// pollInteractionResult polls GET /v1beta/interactions/{id} until the interaction leaves
+// an in-flight status, then returns the final interaction JSON. It returns early if ctx
+// is cancelled (client disconnect) or an upstream poll returns a non-2xx status.
+func (e *GeminiExecutor) pollInteractionResult(ctx context.Context, httpClient *http.Client, baseURL, apiKey, id string) ([]byte, error) {
+	if id == "" {
+		return nil, statusErr{code: http.StatusBadGateway, msg: "interactions background submit returned no id"}
+	}
+	pollURL := fmt.Sprintf("%s/%s/interactions/%s", baseURL, glAPIVersion, id)
+	ticker := time.NewTicker(interactionsAgentPollInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-ticker.C:
+		}
+		httpReq, errRequest := http.NewRequestWithContext(ctx, http.MethodGet, pollURL, nil)
+		if errRequest != nil {
+			return nil, errRequest
+		}
+		if apiKey != "" {
+			httpReq.Header.Set("x-goog-api-key", apiKey)
+		}
+		applyGeminiInteractionsRevisionHeader(httpReq)
+		httpResp, errDo := httpClient.Do(httpReq)
+		if errDo != nil {
+			return nil, errDo
+		}
+		data, errRead := io.ReadAll(httpResp.Body)
+		if errClose := httpResp.Body.Close(); errClose != nil {
+			log.Errorf("gemini executor: close interactions poll body error: %v", errClose)
+		}
+		if errRead != nil {
+			return nil, errRead
+		}
+		if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
+			return nil, statusErr{code: httpResp.StatusCode, msg: string(data)}
+		}
+		switch gjson.GetBytes(data, "status").String() {
+		case "in_progress", "queued", "pending", "running":
+			continue
+		default:
+			return data, nil
+		}
+	}
+}
+
 func geminiAPIKey(a *cliproxyauth.Auth) string {
 	apiKey, _ := geminiCreds(a)
 	return apiKey

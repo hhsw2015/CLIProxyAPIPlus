@@ -65,11 +65,18 @@ func ConvertInteractionsResponseToOpenAINonStream(ctx context.Context, modelName
 	var reasoningBuilder strings.Builder
 	sawToolCall := false
 	var toolCalls [][]byte
+	var imageItems [][]byte
 	steps.ForEach(func(_, step gjson.Result) bool {
 		switch step.Get("type").String() {
 		case "model_output":
 			for _, text := range interactionsContentTextsForOpenAIChat(step.Get("content")) {
 				textBuilder.WriteString(text)
+			}
+			for _, url := range interactionsMediaDataURLsForOpenAIChat(step.Get("content")) {
+				item := []byte(`{"type":"image_url","image_url":{"url":""}}`)
+				item, _ = sjson.SetBytes(item, "index", len(imageItems))
+				item, _ = sjson.SetBytes(item, "image_url.url", url)
+				imageItems = append(imageItems, item)
 			}
 		case "thought":
 			for _, text := range interactionsContentTextsForOpenAIChat(step.Get("content")) {
@@ -84,6 +91,9 @@ func ConvertInteractionsResponseToOpenAINonStream(ctx context.Context, modelName
 	})
 	if textBuilder.Len() > 0 {
 		out, _ = sjson.SetBytes(out, "choices.0.message.content", textBuilder.String())
+	}
+	if len(imageItems) > 0 {
+		out = translatorcommon.SetRawArrayItems(out, "choices.0.message.images", imageItems)
 	}
 	if reasoningBuilder.Len() > 0 {
 		out, _ = sjson.SetBytes(out, "choices.0.message.reasoning_content", reasoningBuilder.String())
@@ -345,6 +355,35 @@ func interactionsContentTextsForOpenAIChat(content gjson.Result) []string {
 	content.ForEach(func(_, part gjson.Result) bool {
 		if text := firstNonEmpty(part.Get("text").String(), part.Get("content.text").String()); text != "" {
 			out = append(out, text)
+		}
+		return true
+	})
+	return out
+}
+
+// interactionsMediaDataURLsForOpenAIChat extracts inline media (image/video/audio/
+// document) content items from an interactions step as data: URLs. A model_output step
+// can carry e.g. {"type":"video","data":"<b64>","mime_type":"video/mp4"} (gemini-omni);
+// the text-only path would silently drop it. OpenAI clients receive these as
+// choices[].message.images[] data URLs, the same shape the Gemini->OpenAI converter
+// uses for image output.
+func interactionsMediaDataURLsForOpenAIChat(content gjson.Result) []string {
+	if !content.Exists() || content.Type == gjson.String {
+		return nil
+	}
+	var out []string
+	content.ForEach(func(_, part gjson.Result) bool {
+		switch strings.ToLower(strings.TrimSpace(part.Get("type").String())) {
+		case "image", "video", "audio", "document":
+			data := firstNonEmpty(part.Get("data").String(), part.Get("content.data").String())
+			if data == "" {
+				return true
+			}
+			mime := firstNonEmpty(part.Get("mime_type").String(), part.Get("mimeType").String())
+			if mime == "" {
+				mime = "application/octet-stream"
+			}
+			out = append(out, fmt.Sprintf("data:%s;base64,%s", mime, data))
 		}
 		return true
 	})
