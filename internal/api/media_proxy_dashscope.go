@@ -1,6 +1,7 @@
 package api
 
 import (
+	"encoding/base64"
 	"fmt"
 	"io"
 	"net/http"
@@ -187,5 +188,121 @@ func (s *Server) handleDashScopeRerank(c *gin.Context, modelName string, body []
 	}
 	log.Debugf("[dashscope-rerank] model=%s results=%d", modelName, i)
 	c.Data(http.StatusOK, "application/json", out)
+	return true
+}
+
+// isDashScopeEmbeddingModel reports whether an /v1/embeddings model should route to
+// the DashScope first-party handler: text-embedding-v* (native v3/v4) or a Qwen
+// *text-embedding* id. OpenAI text-embedding-3-* and siliconflow qwen3-embedding-8b
+// must NOT match (they keep the generic passthrough / their own channel).
+func isDashScopeEmbeddingModel(model string) bool {
+	lm := strings.ToLower(strings.TrimSpace(model))
+	return strings.Contains(lm, "text-embedding-v") ||
+		(strings.Contains(lm, "qwen") && strings.Contains(lm, "text-embedding"))
+}
+
+// isDashScopeTTSModel reports whether an /v1/audio/speech model should route to the
+// DashScope first-party TTS handler (qwen*-tts / cosyvoice). Other TTS providers
+// (MiniMax/Azure/Vertex/Polly) must not match.
+func isDashScopeTTSModel(model string) bool {
+	lm := strings.ToLower(strings.TrimSpace(model))
+	return (strings.Contains(lm, "qwen") && strings.Contains(lm, "tts")) ||
+		strings.Contains(lm, "cosyvoice")
+}
+
+// handleDashScopeEmbeddings serves /v1/embeddings for DashScope embedding models
+// (text-embedding-v* / qwen*-text-embedding). DashScope's /compatible-mode/v1
+// speaks the OpenAI embeddings shape, so the request body is forwarded verbatim on
+// the first-party key. Falls through if no DashScope key.
+func (s *Server) handleDashScopeEmbeddings(c *gin.Context, modelName string, body []byte) bool {
+	key, ok := s.dashscopeKey()
+	if !ok {
+		return false
+	}
+	req, _ := http.NewRequestWithContext(c.Request.Context(), http.MethodPost,
+		dashscopeBase+"/compatible-mode/v1/embeddings", strings.NewReader(string(body)))
+	req.Header.Set("Authorization", "Bearer "+key)
+	req.Header.Set("Content-Type", "application/json")
+	resp, doErr := (&http.Client{Timeout: 30 * time.Second}).Do(req)
+	if doErr != nil {
+		c.JSON(http.StatusBadGateway, gin.H{"error": gin.H{"message": fmt.Sprintf("dashscope-embeddings: %v", doErr), "type": "server_error"}})
+		return true
+	}
+	defer func() { _ = resp.Body.Close() }()
+	rb, _ := io.ReadAll(resp.Body)
+	log.Debugf("[dashscope-embeddings] model=%s status=%d", modelName, resp.StatusCode)
+	c.Data(resp.StatusCode, "application/json", rb) // already OpenAI embeddings shape
+	return true
+}
+
+// handleDashScopeTTS serves /v1/audio/speech for DashScope TTS models (qwen*-tts /
+// cosyvoice). DashScope has no OpenAI-compatible /audio/speech; it uses the native
+// multimodal-generation API which returns a (synchronous) audio URL. So: generate →
+// fetch the URL → return the raw audio bytes (OpenAI /v1/audio/speech returns audio,
+// not JSON). Falls through if no DashScope key.
+func (s *Server) handleDashScopeTTS(c *gin.Context, modelName string, body []byte) bool {
+	key, ok := s.dashscopeKey()
+	if !ok {
+		return false
+	}
+	text := gjson.GetBytes(body, "input").String()
+	if strings.TrimSpace(text) == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"message": "input is required", "type": "invalid_request_error"}})
+		return true
+	}
+	// OpenAI voices (alloy/echo/...) are not valid DashScope voices; default to a
+	// real one and pass through any explicit DashScope voice (Cherry/Ethan/Serena...).
+	voice := strings.TrimSpace(gjson.GetBytes(body, "voice").String())
+	switch voice {
+	case "", "alloy", "echo", "fable", "onyx", "nova", "shimmer":
+		voice = "Cherry"
+	}
+	reqBody := []byte(`{"model":"","input":{"text":"","voice":""}}`)
+	reqBody, _ = sjson.SetBytes(reqBody, "model", modelName)
+	reqBody, _ = sjson.SetBytes(reqBody, "input.text", text)
+	reqBody, _ = sjson.SetBytes(reqBody, "input.voice", voice)
+
+	client := &http.Client{Timeout: 60 * time.Second}
+	genReq, _ := http.NewRequestWithContext(c.Request.Context(), http.MethodPost,
+		dashscopeBase+"/api/v1/services/aigc/multimodal-generation/generation", strings.NewReader(string(reqBody)))
+	genReq.Header.Set("Authorization", "Bearer "+key)
+	genReq.Header.Set("Content-Type", "application/json")
+	genResp, doErr := client.Do(genReq)
+	if doErr != nil {
+		c.JSON(http.StatusBadGateway, gin.H{"error": gin.H{"message": fmt.Sprintf("dashscope-tts: %v", doErr), "type": "server_error"}})
+		return true
+	}
+	gb, _ := io.ReadAll(genResp.Body)
+	_ = genResp.Body.Close()
+	if genResp.StatusCode != 200 {
+		c.Data(genResp.StatusCode, "application/json", gb) // surface the upstream error
+		return true
+	}
+	// Inline base64 audio (some models) → return directly.
+	if dataB64 := gjson.GetBytes(gb, "output.audio.data").String(); dataB64 != "" {
+		if raw, decErr := base64.StdEncoding.DecodeString(dataB64); decErr == nil && len(raw) > 0 {
+			c.Data(http.StatusOK, "audio/wav", raw)
+			return true
+		}
+	}
+	audioURL := gjson.GetBytes(gb, "output.audio.url").String()
+	if audioURL == "" {
+		c.JSON(http.StatusBadGateway, gin.H{"error": gin.H{"message": "dashscope-tts: no audio in response", "type": "server_error"}})
+		return true
+	}
+	aReq, _ := http.NewRequestWithContext(c.Request.Context(), http.MethodGet, audioURL, nil)
+	aResp, aErr := client.Do(aReq)
+	if aErr != nil {
+		c.JSON(http.StatusBadGateway, gin.H{"error": gin.H{"message": fmt.Sprintf("dashscope-tts fetch: %v", aErr), "type": "server_error"}})
+		return true
+	}
+	defer func() { _ = aResp.Body.Close() }()
+	audio, _ := io.ReadAll(aResp.Body)
+	ct := aResp.Header.Get("Content-Type")
+	if ct == "" {
+		ct = "audio/wav"
+	}
+	log.Debugf("[dashscope-tts] model=%s voice=%s bytes=%d", modelName, voice, len(audio))
+	c.Data(http.StatusOK, ct, audio)
 	return true
 }

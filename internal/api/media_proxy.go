@@ -291,6 +291,24 @@ func (s *Server) mediaProxyHandler(ep mediaEndpoint) gin.HandlerFunc {
 			}
 		}
 
+		// DashScope (Qwen) first-party embeddings (text-embedding-v* / qwen*-text-
+		// embedding): OpenAI-compat endpoint on the P10 key. Specific match so OpenAI
+		// text-embedding-3-* and siliconflow qwen3-embedding-8b use the generic path.
+		if ep.pathSuffix == "embeddings" && isDashScopeEmbeddingModel(modelName) {
+			if s.handleDashScopeEmbeddings(c, modelName, body) {
+				return
+			}
+		}
+
+		// DashScope (Qwen) first-party TTS (qwen*-tts / cosyvoice): native multimodal
+		// generation on the P10 key → fetch the audio URL → raw audio. Specific match so
+		// other /audio/speech providers (MiniMax/Azure/Vertex/Polly) are unaffected.
+		if ep.pathSuffix == "audio/speech" && isDashScopeTTSModel(modelName) {
+			if s.handleDashScopeTTS(c, modelName, body) {
+				return
+			}
+		}
+
 		// Find provider config for this model + endpoint type.
 		provider := s.resolveMediaProvider(modelName, ep)
 		if provider == nil {
