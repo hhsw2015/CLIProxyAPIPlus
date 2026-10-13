@@ -194,7 +194,13 @@ func (s *Server) mediaProxyHandler(ep mediaEndpoint) gin.HandlerFunc {
 		// no DashScope key.
 		if ep.pathSuffix == "images/generations" {
 			lm := strings.ToLower(strings.TrimSpace(modelName))
-			if strings.Contains(lm, "qwen-image") || (strings.HasPrefix(lm, "wan") && strings.Contains(lm, "image")) {
+			if isDashScopeMultimodalImageModel(modelName) {
+				// Newer models (qwen-image-2.x / wan2.6|2.7): sync multimodal-generation
+				// endpoint (the old text2image path returns "url error" for these).
+				if s.handleDashScopeMultimodalImage(c, modelName, body) {
+					return
+				}
+			} else if strings.Contains(lm, "qwen-image") || (strings.HasPrefix(lm, "wan") && strings.Contains(lm, "image")) {
 				if s.handleDashScopeImage(c, modelName, body) {
 					return
 				}

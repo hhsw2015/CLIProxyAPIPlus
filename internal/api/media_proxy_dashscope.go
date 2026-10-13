@@ -191,6 +191,80 @@ func (s *Server) handleDashScopeRerank(c *gin.Context, modelName string, body []
 	return true
 }
 
+// isDashScopeMultimodalImageModel reports whether an /v1/images/generations model is
+// a newer DashScope image model served by the multimodal-generation endpoint
+// (qwen-image-2.x / qwen-image-3.x / wan2.6|2.7 *image*) rather than the older
+// text2image/image-synthesis async API. The old base qwen-image / earlier wan stay
+// on handleDashScopeImage.
+func isDashScopeMultimodalImageModel(model string) bool {
+	lm := strings.ToLower(strings.TrimSpace(model))
+	if strings.Contains(lm, "qwen-image-2") || strings.Contains(lm, "qwen-image-3") {
+		return true
+	}
+	return (strings.Contains(lm, "wan2.6") || strings.Contains(lm, "wan2.7")) &&
+		(strings.Contains(lm, "image") || strings.Contains(lm, "t2i"))
+}
+
+// handleDashScopeMultimodalImage serves /v1/images/generations for newer DashScope
+// image models via the SYNC multimodal-generation API (the old text2image endpoint
+// returns "url error" for these). Request is a chat-style messages body; the image
+// comes back as a URL at output.choices[0].message.content[].image. Returns the
+// OpenAI images shape. Falls through if no DashScope key.
+func (s *Server) handleDashScopeMultimodalImage(c *gin.Context, modelName string, body []byte) bool {
+	key, ok := s.dashscopeKey()
+	if !ok {
+		return false
+	}
+	prompt := gjson.GetBytes(body, "prompt").String()
+	if strings.TrimSpace(prompt) == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"message": "prompt is required", "type": "invalid_request_error"}})
+		return true
+	}
+	size := strings.ReplaceAll(gjson.GetBytes(body, "size").String(), "x", "*") // OpenAI 1024x1024 → 1024*1024
+
+	reqBody := []byte(`{"model":"","input":{"messages":[{"role":"user","content":[{"text":""}]}]},"parameters":{}}`)
+	reqBody, _ = sjson.SetBytes(reqBody, "model", modelName)
+	reqBody, _ = sjson.SetBytes(reqBody, "input.messages.0.content.0.text", prompt)
+	if size != "" {
+		reqBody, _ = sjson.SetBytes(reqBody, "parameters.size", size)
+	}
+
+	req, _ := http.NewRequestWithContext(c.Request.Context(), http.MethodPost,
+		dashscopeBase+"/api/v1/services/aigc/multimodal-generation/generation", strings.NewReader(string(reqBody)))
+	req.Header.Set("Authorization", "Bearer "+key)
+	req.Header.Set("Content-Type", "application/json")
+	resp, doErr := (&http.Client{Timeout: 120 * time.Second}).Do(req)
+	if doErr != nil {
+		c.JSON(http.StatusBadGateway, gin.H{"error": gin.H{"message": fmt.Sprintf("dashscope-mm-image: %v", doErr), "type": "server_error"}})
+		return true
+	}
+	defer func() { _ = resp.Body.Close() }()
+	rb, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != 200 {
+		c.Data(resp.StatusCode, "application/json", rb) // surface the upstream error
+		return true
+	}
+	var urls []string
+	gjson.GetBytes(rb, "output.choices.0.message.content").ForEach(func(_, item gjson.Result) bool {
+		if u := item.Get("image").String(); u != "" {
+			urls = append(urls, u)
+		}
+		return true
+	})
+	if len(urls) == 0 {
+		c.JSON(http.StatusBadGateway, gin.H{"error": gin.H{"message": "dashscope-mm-image: no image in response", "type": "server_error"}})
+		return true
+	}
+	out := []byte(`{"created":0,"data":[]}`)
+	out, _ = sjson.SetBytes(out, "created", time.Now().Unix())
+	for i, u := range urls {
+		out, _ = sjson.SetBytes(out, fmt.Sprintf("data.%d.url", i), u)
+	}
+	log.Debugf("[dashscope-mm-image] model=%s images=%d", modelName, len(urls))
+	c.Data(http.StatusOK, "application/json", out)
+	return true
+}
+
 // isDashScopeEmbeddingModel reports whether an /v1/embeddings model should route to
 // the DashScope first-party handler: text-embedding-v* (native v3/v4) or a Qwen
 // *text-embedding* id. OpenAI text-embedding-3-* and siliconflow qwen3-embedding-8b

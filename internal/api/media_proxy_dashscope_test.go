@@ -27,6 +27,33 @@ func TestIsDashScopeEmbeddingModel(t *testing.T) {
 	}
 }
 
+// Guards the /v1/images/generations dispatch: newer DashScope image models route to
+// the sync multimodal-generation handler; the older base qwen-image / earlier wan
+// stay on the text2image async handler.
+func TestIsDashScopeMultimodalImageModel(t *testing.T) {
+	cases := map[string]bool{
+		"qwen-image-2.1-pro":   true,
+		"qwen-image-2.1-turbo": true,
+		"qwen-image-3.0":       true,
+		"wan2.7-image":         true,
+		"wan2.7-image-pro":     true,
+		"wan2.6-t2i":           true,
+		"WAN2.7-IMAGE":         true, // case-insensitive
+		// Must NOT match (stay on the old text2image handler):
+		"qwen-image":      false, // base
+		"qwen-image-plus": false,
+		"wan2.2-t2v-a14b": false, // wan video, not 2.6/2.7 image
+		"wan2.1-14b-t2v":  false,
+		"dall-e-3":        false,
+		"":                false,
+	}
+	for model, want := range cases {
+		if got := isDashScopeMultimodalImageModel(model); got != want {
+			t.Errorf("isDashScopeMultimodalImageModel(%q) = %v, want %v", model, got, want)
+		}
+	}
+}
+
 // Guards the /v1/audio/speech dispatch: Qwen TTS / cosyvoice route to the DashScope
 // handler; other providers' TTS models do not.
 func TestIsDashScopeTTSModel(t *testing.T) {
