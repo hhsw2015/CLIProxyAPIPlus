@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+# cpa-stt — speech-to-text via CPA (M2-b, sync /v1/audio/transcriptions, multipart). Prints the transcript text.
+# Usage: cpa-stt <audio-file> [--model id] [--out transcript.txt] [--dry]
+set -euo pipefail
+. "$(cd "$(dirname "$0")" && pwd)/cpa-common.sh"
+cpa_load
+
+file=""; model="${CPA_DEFAULT_MODEL_STT:-}"; out=""; dry=0
+set_file() { [ -z "$file" ] || cpa_die "only one audio file allowed (extra: $1)"; file="$1"; }
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --model) opt_ok "${2:-}" || cpa_die "--model needs a value"; model="$2"; shift 2;;
+    --out)   opt_ok "${2:-}" || cpa_die "--out needs a value";   out="$2";   shift 2;;
+    --dry)   dry=1; shift;;
+    --)      shift; while [ $# -gt 0 ]; do set_file "$1"; shift; done; break;;
+    -*)      cpa_die "unknown flag: $1";;
+    *)       set_file "$1"; shift;;
+  esac
+done
+[ -n "$file" ] || cpa_die "usage: cpa-stt <audio-file> [--model id] [--out transcript.txt] [--dry]"
+[ -n "$model" ] || cpa_die "no default model — regenerate cli/cpa-defaults.env or pass --model"
+
+if [ "$dry" = 1 ]; then
+  cpa_dry_header POST /v1/audio/transcriptions
+  echo "[dry-run] Content-Type: multipart/form-data"
+  echo "[dry-run] -F file=@$file -F model=$model"
+  exit 0
+fi
+
+[ -f "$file" ] || cpa_die "audio file not found: $file"
+cpa_require_creds
+
+# CPA-STT-PATH: curl's `-F name=@filename` RE-PARSES the value (',' / ';' split parts; '\' and '"' are escapes). It is not
+# enough to copy to a temp path — the path handed to curl must itself contain ONLY controlled chars, and TWO entrances can
+# sneak a grammar char back in: (a) the inherited TMPDIR (e.g. `/tmp/cache;semi`) and (b) an arbitrary reattached
+# extension (e.g. `.wav,part`). So: copy into a 0700 mktemp dir under a plain name with a SANITIZED extension, then `cd`
+# into that dir and give curl a pure RELATIVE name — curl never sees the TMPDIR path at all. model goes via --form-string
+# (literal, no @/;/< interpretation).
+tmpdir=$(mktemp -d "${TMPDIR:-/tmp}/cpa-stt.XXXXXX"); chmod 700 "$tmpdir"
+trap 'rm -rf "$tmpdir"' EXIT
+base=$(basename -- "$file"); rawext=""; case "$base" in *.*) rawext="${base##*.}";; esac
+ext=$(printf '%s' "$rawext" | LC_ALL=C tr -cd 'A-Za-z0-9' | cut -c1-12)   # extension restricted to safe chars (or dropped)
+cname="audio"; [ -n "$ext" ] && cname="audio.$ext"
+cp -- "$file" "$tmpdir/$cname"
+resp=$(cd "$tmpdir" && curl -fsS "$(cpa_base)/v1/audio/transcriptions" -H "Authorization: Bearer $CPA_KEY_CLI" -F "file=@$cname" --form-string "model=$model")
+# CPA-STT-SCHEMA: require {text: <string>}. A missing/wrong-typed text (or non-object) is NOT a successful empty
+# transcript — fail non-zero and do NOT overwrite the prior transcript. `{"text":""}` is a legit empty result.
+text=$(printf '%s' "$resp" | python3 -c '
+import sys, json
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    sys.exit(5)
+if not isinstance(d, dict) or not isinstance(d.get("text"), str):
+    sys.exit(6)
+sys.stdout.write(d["text"])
+') || cpa_die "stt response is not {\"text\": <string>} (not overwriting): $resp"
+if [ -n "$out" ]; then printf '%s\n' "$text" > "$out"; echo "$out"; else printf '%s\n' "$text"; fi

@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+# cpa-tts — text-to-speech via CPA (M2-b, sync /v1/audio/speech → raw audio bytes). Writes the audio to a file.
+# Usage: cpa-tts <text> [--voice id] [--model id] [--out out.mp3] [--dry]
+set -euo pipefail
+. "$(cd "$(dirname "$0")" && pwd)/cpa-common.sh"
+cpa_load
+
+input=""; voice="${CPA_DEFAULT_VOICE_TTS:-}"; model="${CPA_DEFAULT_MODEL_TTS:-}"; out=""; dry=0
+add_word() { if [ -z "$input" ]; then input="$1"; else input="$input $1"; fi; }
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --voice) opt_ok "${2:-}" || cpa_die "--voice needs a value"; voice="$2"; shift 2;;
+    --model) opt_ok "${2:-}" || cpa_die "--model needs a value"; model="$2"; shift 2;;
+    --out)   opt_ok "${2:-}" || cpa_die "--out needs a value";   out="$2";   shift 2;;
+    --dry)   dry=1; shift;;
+    --)      shift; while [ $# -gt 0 ]; do add_word "$1"; shift; done; break;;
+    -*)      cpa_die "unknown flag: $1";;
+    *)       add_word "$1"; shift;;
+  esac
+done
+[ -n "$input" ] || cpa_die "usage: cpa-tts <text> [--voice id] [--model id] [--out out.mp3] [--dry]"
+[ -n "$model" ] || cpa_die "no default model — regenerate cli/cpa-defaults.env or pass --model"
+
+body=$(python3 -c 'import json,sys; print(json.dumps({"model":sys.argv[1],"input":sys.argv[2],"voice":sys.argv[3]}))' "$model" "$input" "$voice")
+
+if [ "$dry" = 1 ]; then
+  cpa_dry_header POST /v1/audio/speech
+  echo "[dry-run] Content-Type: application/json"
+  echo "[dry-run] body: $body"
+  echo "[dry-run] (response is RAW AUDIO BYTES → would be written to ${out:-cpa-tts-<ts>.mp3})"
+  exit 0
+fi
+
+cpa_require_creds
+[ -n "$out" ] || out="cpa-tts-$(date +%Y%m%d-%H%M%S).mp3"
+curl -fsSL "$(cpa_base)/v1/audio/speech" -H "Authorization: Bearer $CPA_KEY_CLI" -H "Content-Type: application/json" -d "$body" -o "$out"
+[ -s "$out" ] || { rm -f "$out"; cpa_die "tts produced an empty file"; }
+echo "$out"

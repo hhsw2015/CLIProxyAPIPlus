@@ -128,7 +128,9 @@ scripts/probe_model.py
 scripts/pulse_radar.py
 scripts/probe_state_vertex.json
 scripts/fal_drift.py
+scripts/catalog_drift.py
 scripts/generated_v2/fal_catalog_snapshot.json
+scripts/generated_v2/catalog_drift/
 
 # local build/deploy tooling (local paths + VPS-specific; not for the upstream fork)
 scripts/build_cpa_linux.sh
@@ -136,3 +138,8 @@ scripts/cpa-upgrade.sh
 scripts/cpa-upgrade-local.sh
 scripts/deploy-all.sh
 scripts/cpa
+
+# cpa-skills: generated swarm skins (swarm owns SKILL/snippets; we only track the CLI + cpa-defaults.env)
+scripts/cpa-skills/skills/
+scripts/cpa-skills/snippets/
+scripts/cpa-skills/**/__pycache__/
