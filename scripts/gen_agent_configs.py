@@ -86,6 +86,49 @@ def gen_command_code():
     write(CC_PATH, cfg)
 
 
+def _reconcile_pi_selection(provs):
+    """Pi keeps its default selection in a SEPARATE file: ~/.pi/agent/models.json holds the
+    providers (regenerated below); ~/.pi/agent/settings.json holds `defaultModel` ('<provider>/<id>')
+    and `defaultProvider`. Regenerating models.json can drop the provider the selection named
+    (e.g. a removed magpie / cpa-local provider) -> a dangling selection. Repoint the selection to a
+    rebuilt provider that serves the same model id; if none serves it, fail (the --wire gate:
+    after wiring the selection must resolve)."""
+    sp = Path.home() / ".pi/agent/settings.json"
+    if not sp.exists():
+        return
+    try:
+        s = json.loads(sp.read_text())
+    except json.JSONDecodeError:
+        return
+
+    def serves(p, mid):
+        return any(m.get("id") == mid for m in provs.get(p, {}).get("models", []))
+
+    changed = False
+    dm = s.get("defaultModel")
+    if isinstance(dm, str) and "/" in dm:
+        prov, _, mid = dm.partition("/")
+        if not (prov in provs and serves(prov, mid)):   # positive control: a valid cpa/<id> is left alone
+            newp = next((p for p in provs if serves(p, mid)), None)
+            if newp is None:
+                print(f"  ERROR pi settings.json: defaultModel '{dm}' has no rebuilt provider serving '{mid}'")
+                if not DRY:
+                    sys.exit(1)
+            else:
+                s["defaultModel"] = f"{newp}/{mid}"
+                changed = True
+    dp = s.get("defaultProvider")
+    if dp and dp not in provs:
+        s["defaultProvider"] = s.get("defaultModel", "").partition("/")[0] or next(iter(provs), "")
+        changed = True
+    if changed:
+        verb = "would repoint" if DRY else "repointed"
+        if not DRY:
+            sp.write_text(json.dumps(s, indent=2, ensure_ascii=False) + "\n")
+        print(f"  pi settings.json: {verb} selection -> defaultModel={s.get('defaultModel')} "
+              f"defaultProvider={s.get('defaultProvider')}")
+
+
 def gen_pi():
     tok = token()
     # Pi's anthropic-messages client sends `thinking.type.enabled`, which the relay's
@@ -117,6 +160,7 @@ def gen_pi():
                     "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0}}],
     }
     write(PI_PATH, {"providers": provs})
+    _reconcile_pi_selection(provs)
 
 
 def gen_opencode():
