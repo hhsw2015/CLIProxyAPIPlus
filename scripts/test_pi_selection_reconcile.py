@@ -6,12 +6,11 @@ defaultProvider (no 'provider/id' split), so the target form is {defaultModel:<b
 defaultProvider:<provider serving it>}.
 
 Contract:
-  - corrupt settings.json       -> ERROR + non-zero exit (NOT silently skipped)
-  - missing file / missing key  -> skip (nothing selected)
-  - non-string defaultModel     -> ERROR + non-zero exit (present but malformed)
-  - dangling selection (bare or legacy 'x/y') -> repoint to {bare id, serving provider}
-  - already-valid bare selection-> unchanged (positive control)
-  - unservable model id         -> ERROR + non-zero exit
+  - corrupt / non-object root ([], "...") / non-string defaultModel -> ERROR + non-zero exit
+  - missing file / missing key / empty object {}                    -> skip (nothing selected)
+  - native ids may contain '/': a valid namespaced id stays byte-unchanged
+  - dangling selection (bare, legacy 'x/y', or 'oldprovider/<ns id>') -> repoint, keeping the id
+  - unservable model id                                              -> ERROR + non-zero exit
 
 Self-contained: points HOME at a temp dir, so it only touches that sandbox. No network.
 Run: python3 scripts/test_pi_selection_reconcile.py
@@ -26,7 +25,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import gen_agent_configs as g  # noqa: E402
 
-PROVS = {"cpa": {"models": [{"id": "claude-opus-4-8"}]},
+PROVS = {"cpa": {"models": [{"id": "claude-opus-4-8"}, {"id": "mistralai/codestral-2508"}]},
          "cpa-codex": {"models": [{"id": "gpt-6-astra"}]},
          "bonsai-local": {"models": [{"id": "bonsai-2-27b"}]}}
 
@@ -78,6 +77,30 @@ def main():
     assert code not in (None, 0), f"non-string defaultModel: expected non-zero exit, got {code!r}"
     print(f"  non-string model    -> exit {code} (non-zero) OK")
 
+    code, _ = _reconcile("[]")                                                    # non-object root (list)
+    assert code not in (None, 0), f"list root: expected non-zero exit, got {code!r}"
+    print(f"  list root           -> exit {code} (non-zero) OK")
+
+    code, _ = _reconcile('"just a string"')                                       # non-object root (string)
+    assert code not in (None, 0), f"string root: expected non-zero exit, got {code!r}"
+    print(f"  string root         -> exit {code} (non-zero) OK")
+
+    code, _ = _reconcile("{}")                                                    # empty object -> missing key
+    assert code is None, f"empty object: expected skip, got exit {code!r}"
+    print("  empty object        -> skipped OK")
+
+    # Native ids may contain '/': a valid namespaced id must stay byte-unchanged (NOT stripped).
+    code, after = _reconcile(json.dumps({"defaultModel": "mistralai/codestral-2508", "defaultProvider": "cpa"}))
+    assert code is None and after["defaultModel"] == "mistralai/codestral-2508" and after["defaultProvider"] == "cpa", \
+        f"namespaced id not preserved: {code!r} {after!r}"
+    print("  namespaced valid    -> unchanged OK")
+
+    # Legacy 'oldprovider/<namespaced id>': only the stale prefix is stripped, keeping the '/' id.
+    code, after = _reconcile(json.dumps({"defaultModel": "magpie/mistralai/codestral-2508", "defaultProvider": "magpie"}))
+    assert code is None and after["defaultModel"] == "mistralai/codestral-2508" and after["defaultProvider"] == "cpa", \
+        f"legacy namespaced migration failed: {code!r} {after!r}"
+    print(f"  legacy ns prefix    -> defaultModel={after['defaultModel']} defaultProvider={after['defaultProvider']} OK")
+
     # Pi's resolvable form is BARE defaultModel + a serving defaultProvider (NOT 'provider/id').
     code, after = _reconcile(json.dumps({"defaultModel": "cpa-local/claude-opus-4-8", "defaultProvider": "magpie"}))
     assert code is None and after["defaultModel"] == "claude-opus-4-8" and after["defaultProvider"] == "cpa", \
@@ -98,7 +121,8 @@ def main():
     assert code not in (None, 0), f"unservable id: expected non-zero exit, got {code!r}"
     print(f"  unservable id       -> exit {code} (non-zero) OK")
 
-    print("PASS: corrupt/non-string=error, missing(file|key)=skip, dangling(bare|x/y)=repoint to bare+provider, valid=noop, unservable=error")
+    print("PASS: corrupt/non-object-root/non-string=error, missing(file|key|{})=skip, "
+          "dangling(bare|x/y|ns-prefix)=repoint, namespaced+valid=noop, unservable=error")
 
 
 if __name__ == "__main__":
