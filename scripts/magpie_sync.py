@@ -33,7 +33,7 @@ from pathlib import Path
 # External endpoints/binary are env-overridable so the regression harness can drive the real CLI
 # (python3 magpie_sync.py --wire ...) with no magpie mutation / no network. Defaults unchanged.
 M = os.environ.get("MAGPIE_BIN", "/Applications/magpie.app/Contents/MacOS/magpie")
-TOKEN_CMD = str(Path("~/.commandcode/relay-token.sh").expanduser())
+TOKEN_CMD = os.environ.get("MAGPIE_SYNC_TOKEN_CMD", str(Path("~/.commandcode/relay-token.sh").expanduser()))
 GW = os.environ.get("MAGPIE_SYNC_GW", "http://127.0.0.1:3425")
 LOCAL = os.environ.get("MAGPIE_SYNC_LOCAL", "http://127.0.0.1:8787")
 CLOUD = os.environ.get("MAGPIE_SYNC_CLOUD", "https://headroom.geeker.indevs.in")

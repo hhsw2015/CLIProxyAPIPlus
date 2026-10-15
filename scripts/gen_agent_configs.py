@@ -109,29 +109,30 @@ def _reconcile_pi_selection(provs):
     def serves(p, mid):
         return any(m.get("id") == mid for m in provs.get(p, {}).get("models", []))
 
-    changed = False
     dm = s.get("defaultModel")
-    if isinstance(dm, str) and "/" in dm:
-        prov, _, mid = dm.partition("/")
-        if not (prov in provs and serves(prov, mid)):   # positive control: a valid cpa/<id> is left alone
-            newp = next((p for p in provs if serves(p, mid)), None)
-            if newp is None:
-                print(f"  ERROR pi settings.json: defaultModel '{dm}' has no rebuilt provider serving '{mid}'")
-                if not DRY:
-                    sys.exit(1)
-            else:
-                s["defaultModel"] = f"{newp}/{mid}"
-                changed = True
-    dp = s.get("defaultProvider")
-    if dp and dp not in provs:
-        s["defaultProvider"] = s.get("defaultModel", "").partition("/")[0] or next(iter(provs), "")
-        changed = True
-    if changed:
-        verb = "would repoint" if DRY else "repointed"
+    if not isinstance(dm, str) or not dm:
+        return                                        # no selection to reconcile
+
+    # Accept both supported forms: '<provider>/<id>' and a bare '<id>' (Pi's curated ids are bare,
+    # so the first segment of a slashed value is the provider). Resolve to a provider in the REBUILT
+    # map that ACTUALLY serves the model id. Never fabricate a provider from an unverified string
+    # (the old defaultProvider fallback could write a bare model id in as the provider).
+    prov, mid = dm.split("/", 1) if "/" in dm else (None, dm)
+    resolved = prov if (prov in provs and serves(prov, mid)) else next((p for p in provs if serves(p, mid)), None)
+    if resolved is None:
+        print(f"  ERROR pi settings.json: no rebuilt provider serves model '{mid}' (defaultModel '{dm}')")
         if not DRY:
-            sp.write_text(json.dumps(s, indent=2, ensure_ascii=False) + "\n")
-        print(f"  pi settings.json: {verb} selection -> defaultModel={s.get('defaultModel')} "
-              f"defaultProvider={s.get('defaultProvider')}")
+            sys.exit(1)
+        return
+
+    new_dm, new_dp = f"{resolved}/{mid}", resolved
+    if s.get("defaultModel") == new_dm and s.get("defaultProvider") == new_dp:
+        return                                        # positive control: already resolves -> leave it
+    s["defaultModel"], s["defaultProvider"] = new_dm, new_dp
+    verb = "would repoint" if DRY else "repointed"
+    if not DRY:
+        sp.write_text(json.dumps(s, indent=2, ensure_ascii=False) + "\n")
+    print(f"  pi settings.json: {verb} selection -> defaultModel={new_dm} defaultProvider={new_dp}")
 
 
 def gen_pi():

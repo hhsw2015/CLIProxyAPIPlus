@@ -22,6 +22,7 @@ sys.path.insert(0, str(HERE))
 import gen_agent_configs as g  # noqa: E402
 
 PROVS = {"cpa": {"models": [{"id": "claude-opus-4-8"}]},
+         "cpa-codex": {"models": [{"id": "gpt-6-astra"}]},
          "bonsai-local": {"models": [{"id": "bonsai-2-27b"}]}}
 
 
@@ -66,7 +67,17 @@ def main():
 
     code, after = _reconcile(json.dumps({"defaultModel": "cpa-local/claude-opus-4-8", "defaultProvider": "magpie"}))
     assert code is None and after["defaultModel"] == "cpa/claude-opus-4-8", f"repoint failed: {code!r} {after!r}"
-    print(f"  dangling selection -> repointed to {after['defaultModel']} OK")
+    assert after["defaultProvider"] in PROVS, f"fabricated provider: {after['defaultProvider']!r}"
+    print(f"  dangling (prov/id) -> repointed to {after['defaultModel']} prov={after['defaultProvider']} OK")
+
+    # Second face: a BARE defaultModel (no slash) with a stale provider must NOT fabricate a
+    # provider from the bare model string; it resolves to the provider that serves the id.
+    code, after = _reconcile(json.dumps({"defaultModel": "gpt-6-astra", "defaultProvider": "magpie"}))
+    assert code is None, f"bare model: unexpected exit {code!r}"
+    assert after["defaultModel"] == "cpa-codex/gpt-6-astra", f"bare model not normalized: {after!r}"
+    assert after["defaultProvider"] == "cpa-codex" and after["defaultProvider"] in PROVS, \
+        f"bare model fabricated provider: {after['defaultProvider']!r}"
+    print(f"  bare model + stale -> repointed to {after['defaultModel']} prov={after['defaultProvider']} OK")
 
     code, after = _reconcile(json.dumps({"defaultModel": "cpa/claude-opus-4-8", "defaultProvider": "cpa"}))
     assert code is None and after["defaultModel"] == "cpa/claude-opus-4-8", f"valid changed: {code!r} {after!r}"
