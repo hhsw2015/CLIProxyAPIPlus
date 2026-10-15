@@ -1,12 +1,17 @@
 #!/usr/bin/env python3
 """Regression for gen_agent_configs._reconcile_pi_selection.
 
+Pi 0.85.1 resolves getModel(defaultProvider, defaultModel) with defaultModel as a BARE id under
+defaultProvider (no 'provider/id' split), so the target form is {defaultModel:<bare id>,
+defaultProvider:<provider serving it>}.
+
 Contract:
-  - corrupt settings.json  -> ERROR + non-zero exit (NOT silently skipped)   [MG-CO-PI-SETTINGS-UNREADABLE]
-  - missing settings.json  -> skip (nothing to reconcile)
-  - dangling selection     -> repoint to a provider serving the same model id
-  - already-valid selection-> unchanged (positive control)
-  - unservable model id    -> ERROR + non-zero exit
+  - corrupt settings.json       -> ERROR + non-zero exit (NOT silently skipped)
+  - missing file / missing key  -> skip (nothing selected)
+  - non-string defaultModel     -> ERROR + non-zero exit (present but malformed)
+  - dangling selection (bare or legacy 'x/y') -> repoint to {bare id, serving provider}
+  - already-valid bare selection-> unchanged (positive control)
+  - unservable model id         -> ERROR + non-zero exit
 
 Self-contained: points HOME at a temp dir, so it only touches that sandbox. No network.
 Run: python3 scripts/test_pi_selection_reconcile.py
@@ -59,35 +64,41 @@ def _reconcile(settings_text):
 def main():
     code, _ = _reconcile("{not valid json")
     assert code not in (None, 0), f"corrupt settings: expected non-zero exit, got {code!r}"
-    print(f"  corrupt settings   -> exit {code} (non-zero) OK")
+    print(f"  corrupt settings    -> exit {code} (non-zero) OK")
 
     code, _ = _reconcile(None)
-    assert code is None, f"missing settings: expected skip, got exit {code!r}"
-    print("  missing settings   -> skipped OK")
+    assert code is None, f"missing file: expected skip, got exit {code!r}"
+    print("  missing file        -> skipped OK")
 
+    code, _ = _reconcile(json.dumps({"defaultProvider": "cpa"}))                 # key absent
+    assert code is None, f"missing defaultModel key: expected skip, got exit {code!r}"
+    print("  missing key         -> skipped OK")
+
+    code, _ = _reconcile(json.dumps({"defaultModel": {"id": "x"}, "defaultProvider": "cpa"}))  # non-string
+    assert code not in (None, 0), f"non-string defaultModel: expected non-zero exit, got {code!r}"
+    print(f"  non-string model    -> exit {code} (non-zero) OK")
+
+    # Pi's resolvable form is BARE defaultModel + a serving defaultProvider (NOT 'provider/id').
     code, after = _reconcile(json.dumps({"defaultModel": "cpa-local/claude-opus-4-8", "defaultProvider": "magpie"}))
-    assert code is None and after["defaultModel"] == "cpa/claude-opus-4-8", f"repoint failed: {code!r} {after!r}"
-    assert after["defaultProvider"] in PROVS, f"fabricated provider: {after['defaultProvider']!r}"
-    print(f"  dangling (prov/id) -> repointed to {after['defaultModel']} prov={after['defaultProvider']} OK")
+    assert code is None and after["defaultModel"] == "claude-opus-4-8" and after["defaultProvider"] == "cpa", \
+        f"legacy x/y repoint failed: {code!r} {after!r}"
+    print(f"  legacy x/y + stale  -> defaultModel={after['defaultModel']} defaultProvider={after['defaultProvider']} OK")
 
-    # Second face: a BARE defaultModel (no slash) with a stale provider must NOT fabricate a
-    # provider from the bare model string; it resolves to the provider that serves the id.
     code, after = _reconcile(json.dumps({"defaultModel": "gpt-6-astra", "defaultProvider": "magpie"}))
-    assert code is None, f"bare model: unexpected exit {code!r}"
-    assert after["defaultModel"] == "cpa-codex/gpt-6-astra", f"bare model not normalized: {after!r}"
-    assert after["defaultProvider"] == "cpa-codex" and after["defaultProvider"] in PROVS, \
-        f"bare model fabricated provider: {after['defaultProvider']!r}"
-    print(f"  bare model + stale -> repointed to {after['defaultModel']} prov={after['defaultProvider']} OK")
+    assert code is None and after["defaultModel"] == "gpt-6-astra" and after["defaultProvider"] == "cpa-codex", \
+        f"bare id + stale repoint failed: {code!r} {after!r}"
+    print(f"  bare id + stale     -> defaultModel={after['defaultModel']} defaultProvider={after['defaultProvider']} OK")
 
-    code, after = _reconcile(json.dumps({"defaultModel": "cpa/claude-opus-4-8", "defaultProvider": "cpa"}))
-    assert code is None and after["defaultModel"] == "cpa/claude-opus-4-8", f"valid changed: {code!r} {after!r}"
-    print("  already valid      -> unchanged OK")
+    code, after = _reconcile(json.dumps({"defaultModel": "claude-opus-4-8", "defaultProvider": "cpa"}))
+    assert code is None and after["defaultModel"] == "claude-opus-4-8" and after["defaultProvider"] == "cpa", \
+        f"valid bare selection changed: {code!r} {after!r}"
+    print("  already valid (bare)-> unchanged OK")
 
-    code, _ = _reconcile(json.dumps({"defaultModel": "cpa/nonexistent-xyz", "defaultProvider": "cpa"}))
+    code, _ = _reconcile(json.dumps({"defaultModel": "nonexistent-xyz", "defaultProvider": "cpa"}))
     assert code not in (None, 0), f"unservable id: expected non-zero exit, got {code!r}"
-    print(f"  unservable id      -> exit {code} (non-zero) OK")
+    print(f"  unservable id       -> exit {code} (non-zero) OK")
 
-    print("PASS: corrupt=error, missing=skip, dangling=repoint, valid=noop, unservable=error")
+    print("PASS: corrupt/non-string=error, missing(file|key)=skip, dangling(bare|x/y)=repoint to bare+provider, valid=noop, unservable=error")
 
 
 if __name__ == "__main__":

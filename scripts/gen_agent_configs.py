@@ -87,12 +87,19 @@ def gen_command_code():
 
 
 def _reconcile_pi_selection(provs):
-    """Pi keeps its default selection in a SEPARATE file: ~/.pi/agent/models.json holds the
-    providers (regenerated below); ~/.pi/agent/settings.json holds `defaultModel` ('<provider>/<id>')
-    and `defaultProvider`. Regenerating models.json can drop the provider the selection named
-    (e.g. a removed magpie / cpa-local provider) -> a dangling selection. Repoint the selection to a
-    rebuilt provider that serves the same model id; if none serves it, fail (the --wire gate:
-    after wiring the selection must resolve)."""
+    """Pi keeps its default selection in a SEPARATE file (~/.pi/agent/settings.json). Pi 0.85.1
+    resolves it as modelRuntime.getModel(defaultProvider, defaultModel), where defaultModel is a
+    BARE model id looked up UNDER defaultProvider (model-resolver.js: m.provider == provider and
+    m.id == defaultId) — it does NOT split a 'provider/id' prefix. So the only resolvable form is
+    defaultModel=<bare id> + defaultProvider=<provider that serves it>. Regenerating models.json can
+    drop the provider the selection named, leaving it unresolvable (Pi falls back to
+    providerModels[0]). Reconcile to the correct form:
+      - a MISSING defaultModel key is a legitimate 'nothing selected' -> skip;
+      - a present non-string defaultModel is malformed -> ERROR + non-zero;
+      - a bare id (or a legacy 'x/y', taking y as the id) is resolved to a provider in the rebuilt
+        map that serves it (preferring the current defaultProvider if it does) and written as
+        {defaultModel: <bare id>, defaultProvider: <provider>}; if none serves it, ERROR + non-zero.
+    Verified with Pi's own semantics: defaultProvider in the map AND it serves the bare defaultModel."""
     sp = Path.home() / ".pi/agent/settings.json"
     if not sp.exists():
         return                                       # no selection to reconcile -> nothing to do
@@ -106,33 +113,40 @@ def _reconcile_pi_selection(provs):
             sys.exit(1)
         return
 
-    def serves(p, mid):
-        return any(m.get("id") == mid for m in provs.get(p, {}).get("models", []))
-
-    dm = s.get("defaultModel")
-    if not isinstance(dm, str) or not dm:
-        return                                        # no selection to reconcile
-
-    # Accept both supported forms: '<provider>/<id>' and a bare '<id>' (Pi's curated ids are bare,
-    # so the first segment of a slashed value is the provider). Resolve to a provider in the REBUILT
-    # map that ACTUALLY serves the model id. Never fabricate a provider from an unverified string
-    # (the old defaultProvider fallback could write a bare model id in as the provider).
-    prov, mid = dm.split("/", 1) if "/" in dm else (None, dm)
-    resolved = prov if (prov in provs and serves(prov, mid)) else next((p for p in provs if serves(p, mid)), None)
-    if resolved is None:
-        print(f"  ERROR pi settings.json: no rebuilt provider serves model '{mid}' (defaultModel '{dm}')")
+    if "defaultModel" not in s:
+        return                                        # legitimately absent -> nothing to reconcile
+    dm = s["defaultModel"]
+    if not isinstance(dm, str):
+        # present but malformed (e.g. an object/null/number) -> cannot verify; fail loudly.
+        print(f"  ERROR pi settings.json: defaultModel is not a string ({type(dm).__name__}: {dm!r})")
         if not DRY:
             sys.exit(1)
         return
 
-    new_dm, new_dp = f"{resolved}/{mid}", resolved
-    if s.get("defaultModel") == new_dm and s.get("defaultProvider") == new_dp:
-        return                                        # positive control: already resolves -> leave it
-    s["defaultModel"], s["defaultProvider"] = new_dm, new_dp
+    mid = dm.split("/", 1)[1] if "/" in dm else dm    # bare id, or y from a legacy 'x/y'
+    dp = s.get("defaultProvider")
+
+    def serves(p):
+        return any(m.get("id") == mid for m in provs.get(p, {}).get("models", []))
+
+    # Target form is a BARE defaultModel + a defaultProvider that serves it (Pi looks up
+    # getModel(defaultProvider, defaultModel) without splitting). Keep the current provider if it
+    # serves the id; else pick one in the rebuilt map that does. Never fabricate a provider.
+    resolved = dp if (isinstance(dp, str) and dp in provs and serves(dp)) else next((p for p in provs if serves(p)), None)
+    if resolved is None:
+        print(f"  ERROR pi settings.json: no rebuilt provider serves model '{mid}' "
+              f"(defaultModel '{dm}', defaultProvider '{dp}')")
+        if not DRY:
+            sys.exit(1)
+        return
+
+    if s.get("defaultModel") == mid and s.get("defaultProvider") == resolved:
+        return                                        # positive control: already {bare id, serving provider}
+    s["defaultModel"], s["defaultProvider"] = mid, resolved
     verb = "would repoint" if DRY else "repointed"
     if not DRY:
         sp.write_text(json.dumps(s, indent=2, ensure_ascii=False) + "\n")
-    print(f"  pi settings.json: {verb} selection -> defaultModel={new_dm} defaultProvider={new_dp}")
+    print(f"  pi settings.json: {verb} selection -> defaultModel={mid} defaultProvider={resolved}")
 
 
 def gen_pi():

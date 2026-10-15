@@ -5,11 +5,13 @@ A generator write failure during `magpie_sync.py --wire` must make the PROCESS e
 This drives magpie_sync.py as a SUBPROCESS through its `__main__` (`sys.exit(main() or 0)`), so
 reverting that line to a bare `main()` makes this test RED (exit would become 0).
 
-Fully isolated: a temp dir holds a COPY of magpie_sync.py next to a stub gen_agent_configs.py
+Isolated: a temp dir holds a COPY of magpie_sync.py next to a stub gen_agent_configs.py
 (chosen exit code), a stub magpie_mode.sh, and a no-op magpie binary via MAGPIE_BIN; the backend
-URLs are pointed at an unreachable port; and the relay-token command is overridden to a STUB via
-MAGPIE_SYNC_TOKEN_CMD that LOGS each call. So no magpie mutation, no network, no live write, and
-the real ~/.commandcode/relay-token.sh is never invoked (asserted via the stub's call log).
+URLs are pointed at an unreachable loopback port; and the relay-token command is overridden to a
+STUB via MAGPIE_SYNC_TOKEN_CMD that LOGS each call. So no magpie mutation, no real credential use,
+and no live-config write; the real ~/.commandcode/relay-token.sh is never invoked (asserted via
+the stub's call log). It DOES make loopback connection attempts to 127.0.0.1:1 (reachable()
+probes), which are immediately refused — no real gateway request / no network egress.
 
 Run: python3 scripts/test_magpie_wire_exit.py
 """
