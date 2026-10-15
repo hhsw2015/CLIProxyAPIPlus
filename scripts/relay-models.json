@@ -12,7 +12,8 @@
         "high",
         "xhigh",
         "max"
-      ]
+      ],
+      "defaultEffort": "xhigh"
     },
     {
       "id": "claude-opus-5-5",
@@ -24,7 +25,8 @@
         "high",
         "xhigh",
         "max"
-      ]
+      ],
+      "defaultEffort": "xhigh"
     },
     {
       "id": "claude-sonnet-5",
@@ -48,7 +50,8 @@
         "high",
         "xhigh",
         "max"
-      ]
+      ],
+      "defaultEffort": "xhigh"
     },
     {
       "id": "claude-opus-4-7",
@@ -84,7 +87,8 @@
         "high",
         "xhigh",
         "max"
-      ]
+      ],
+      "defaultEffort": "xhigh"
     },
     {
       "id": "claude-fable-5",
@@ -96,7 +100,8 @@
         "high",
         "xhigh",
         "max"
-      ]
+      ],
+      "defaultEffort": "xhigh"
     },
     {
       "id": "gemini-3.1-pro-preview",
@@ -409,8 +414,8 @@
     {
       "id": "mistralai/codestral-2508",
       "wire": "chat",
-      "context": 256000,
-      "efforts": null
+      "context": 128000,
+      "efforts": []
     },
     {
       "id": "mistralai/devstral-2512",
@@ -489,6 +494,19 @@
         "medium",
         "high"
       ]
+    },
+    {
+      "id": "claude-sonnet-5-5",
+      "wire": "anthropic",
+      "context": 1000000,
+      "efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "defaultEffort": "xhigh"
     }
   ],
   "local": {

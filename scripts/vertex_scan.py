@@ -32,12 +32,14 @@ sys.path.insert(0, str(REPO / "scripts"))
 
 # Curated frontier ids to always probe even if config/forward-window miss them.
 # Keep in sync with docs/upcoming-models-watchlist. Cheap (1 probe each).
+# Only REAL announced-but-not-served ids belong here. Bare next-major guesses
+# (claude-<fam>-6 etc.) are NOT listed — forward_window() already derives the next
+# major (max_a + 1) from any served family, so they get probed for free.
 UPCOMING_CLAUDE = [
     "claude-opus-5", "claude-opus-5-1", "claude-opus-5-2", "claude-opus-5-5",
-    "claude-opus-6",
-    "claude-sonnet-5-1", "claude-sonnet-5-2", "claude-sonnet-5-5", "claude-sonnet-6",
+    "claude-sonnet-5-1", "claude-sonnet-5-2", "claude-sonnet-5-5",
     "claude-haiku-4-6", "claude-haiku-5", "claude-haiku-5-1",
-    "claude-fable-5-1", "claude-fable-6",
+    "claude-fable-5-1", "claude-fable-5-5",
 ]
 # Gemini (google publisher, native generateContent). Empirically 2.5-pro/flash +
 # 3.8-flash serve on our SA with NO enablement; 3.x pro/flash ids drift, so probe
@@ -56,6 +58,7 @@ UPCOMING_GEMINI = [
     # Image-generation models (nano-banana family, via generateContent → image parts).
     # Reachable now; Imagen is retired so these are the image path.
     "gemini-3-pro-image", "gemini-2.5-flash-image", "gemini-3.1-flash-image",
+    "gemini-nano-banana-2.1",  # Nano Banana 2.1 launched 2026-10-07; AIza-verified, Vertex TBD by scan
 ]
 # MaaS open/partner models (OpenAI-compat endpoints/openapi/chat/completions).
 # Empirically these serve on our SA with NO per-project enablement (Llama is the

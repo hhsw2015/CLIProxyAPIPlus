@@ -113,7 +113,7 @@ def detect_mode():
         r = subprocess.run([M, "groups"], capture_output=True, text=True, timeout=30)
         out = (r.stdout or "") + (r.stderr or "")
     except Exception:  # noqa: BLE001
-        return "cloud"
+        return "local"
     for line in out.splitlines():
         if "group/auto-" in line or "cpa-local/" not in line or "cpa-cloud/" not in line:
             continue
@@ -121,13 +121,38 @@ def detect_mode():
             return "local"
         if "● cpa-cloud" in line:
             return "cloud"
-    return "cloud"
+    return "local"  # no groups / undetectable -> default to the reliable up backend (not cloud)
 
 
 def fetch_ids(base):
     req = urllib.request.Request(base + "/v1/models",
                                  headers={"Authorization": "Bearer " + token(), "User-Agent": "curl/8"})
     return [m["id"] for m in json.load(urllib.request.urlopen(req, timeout=25)).get("data", []) if m.get("id")]
+
+
+def current_exposed(pid):
+    """magpie's currently-exposed BARE ids for a provider, from the gateway catalog. Lets us
+    SKIP a `provider models` re-expose when nothing changed: that call makes magpie replace the
+    whole set and re-index/re-validate every model (~95% CPU for several seconds even when the
+    set is identical). Returns None on error -> caller re-exposes (safe default)."""
+    try:
+        pre = pid + "/"
+        return {i[len(pre):] for i in fetch_ids(GW) if i.startswith(pre)}
+    except Exception:
+        return None
+
+
+def reachable(base, timeout=6):
+    """Fast up/down check before we make magpie probe a backend. A down cloud (headroom
+    530 / connection hang) otherwise stalls `provider set ... models.url=<dead>` for up to
+    the 180s magpie CLI timeout, hanging the whole sync. False on ANY error (530/timeout/refused)."""
+    try:
+        req = urllib.request.Request(base + "/v1/models",
+                                     headers={"Authorization": "Bearer " + token(), "User-Agent": "curl/8"})
+        urllib.request.urlopen(req, timeout=timeout).read(1)
+        return True
+    except Exception:
+        return False
 
 
 def ensure_provider(pid, name, base):
@@ -233,6 +258,12 @@ def main():
     # existing name resets routing to `order` and drops the manual pick). Re-asserted at the end
     # via magpie_mode so `cpa agent-sync` never silently changes which backend is active.
     mode = detect_mode()
+    # Never re-assert 'cloud' when cloud is unreachable: magpie_mode.sh cloud runs
+    # `provider on cpa-cloud`, and magpie then SPINS (~155% CPU) trying to activate/probe the
+    # dead backend. Fall back to local (the up backend). (2026-10-15 CPU incident)
+    if mode == "cloud" and not reachable(CLOUD):
+        print("  mode was 'cloud' but cloud UNREACHABLE -> forcing 'local' (avoids magpie spinning on dead cloud)")
+        mode = "local"
     # Auto-group creation OFF (magpie >=0.1.607 `group auto off`): magpie no longer invents an
     # auto-<model> group per model that 2+ providers serve. That was the CPU bomb at the root
     # (~1096 auto-groups recomputed at 60fps = ~900% CPU); with it off, overlapping catalogs on
@@ -256,15 +287,34 @@ def main():
     # members; routing is route-any regardless of expose.
     anchors = list(dict.fromkeys(list(AGENT_MODELS.values()) + list(EXTRA_GROUP_MODELS)))
     for pid, name, base in (("cpa-cloud", "CPA Cloud", CLOUD), ("cpa-local", "CPA Local", LOCAL)):
+        if not reachable(base):
+            # A down backend (cloud headroom 530 / unreachable) stalls the magpie
+            # `provider set ... models.url=<dead>` probe for up to the 180s CLI timeout,
+            # hanging the whole sync. Skip it: leave its provider as-is (not re-probed);
+            # re-run when it recovers. Local mode is unaffected (cpa-local still syncs).
+            print(f"  provider {pid}: UNREACHABLE ({base}) — skipped, not re-probed (re-run when it recovers)")
+            continue
         ensure_provider(pid, name, base)
         run("provider", "on", pid)  # both ON: switch uses group pick, never off/on
         # Expose each backend's FULL chat catalog on BOTH providers so the picker lists every
         # model in local AND cloud. Safe now that `group auto off` (set above) stops overlapping
         # catalogs from spawning auto-<model> groups (the old ~900% CPU bomb). Fall back to the
         # anchors if a backend is unreachable so the explicit group members stay ready.
-        full = [i for i in fetch_ids(base) if ischat(i)] or anchors
-        run("provider", "models", pid, *full)
-        print(f"  provider {pid}: ensured + ON + {len(full)} models exposed (full catalog)")
+        # Drop mirage/ -prefixed ids: the mirage P1 free pool advertises duplicate
+        # `mirage/claude-*` chat ids (forced-mirage variants of real models). Exposing
+        # them clutters the magpie picker and makes `--model .../claude-fable-5-1` fuzzy-
+        # match the mirage variant (recurring modelPicker-mirage reinjection). The clean
+        # ids stay exposed; mirage still serves as CPA's internal P1 fallback via fill-
+        # first — it just isn't a pickable magpie id. (2026-10-15)
+        full = [i for i in fetch_ids(base) if ischat(i) and not i.startswith("mirage/")] or anchors
+        # Idempotence guard: a `provider models` call recomputes magpie's whole model index
+        # (~95% CPU for seconds) EVEN when the set is unchanged. Most re-syncs don't change the
+        # catalog, so skip the re-expose when the exposed set already matches.
+        if current_exposed(pid) == set(full):
+            print(f"  provider {pid}: {len(full)} models already exposed — skip re-expose (no CPU recompute)")
+        else:
+            run("provider", "models", pid, *full)
+            print(f"  provider {pid}: ensured + ON + {len(full)} models exposed (mirage/ filtered)")
 
     # NO groups: all agents use BARE model ids now. magpie_mode.sh makes a bare id follow the
     # switch by exposing the catalog ONE-SIDED (active full / standby a single throwaway), so each
