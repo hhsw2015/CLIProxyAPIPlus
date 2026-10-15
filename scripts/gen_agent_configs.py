@@ -95,10 +95,15 @@ def _reconcile_pi_selection(provs):
     after wiring the selection must resolve)."""
     sp = Path.home() / ".pi/agent/settings.json"
     if not sp.exists():
-        return
+        return                                       # no selection to reconcile -> nothing to do
     try:
         s = json.loads(sp.read_text())
-    except json.JSONDecodeError:
+    except json.JSONDecodeError as e:
+        # A corrupt settings.json is NOT skippable: we cannot verify the selection resolves after
+        # wiring, so fail loudly instead of silently reporting success.
+        print(f"  ERROR pi settings.json unreadable ({e}); cannot verify/repoint selection")
+        if not DRY:
+            sys.exit(1)
         return
 
     def serves(p, mid):
