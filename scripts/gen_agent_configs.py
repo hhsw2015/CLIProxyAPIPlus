@@ -30,8 +30,14 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 CANON = json.loads((HERE / "relay-models.json").read_text())
-ENDPOINT = CANON["endpoint"]                       # https://headroom.geeker.indevs.in
+ENDPOINT = CANON["endpoint"]                       # relay-models.json curated source, NOT an agent endpoint
 BASE_V1 = f"{ENDPOINT}/v1"
+# Agents reach CPA through the fixed LOCAL magpie gateway (:3425), which flips local/cloud
+# behind itself (magpie_mode.sh / cpa switch) so cached-config agents never break on a switch.
+# The JSON clients (and omp) point here, with BARE model ids — magpie route-any + one-sided
+# expose make a bare id follow the switch. ENDPOINT above stays the curated model/spec source.
+MAGPIE = "http://127.0.0.1:3425"
+MAGPIE_V1 = f"{MAGPIE}/v1"
 MODELS = CANON["models"]
 LOCAL = CANON.get("local", {})
 TOKEN_CMD = str(Path(CANON["token_source"]).expanduser())
@@ -62,7 +68,7 @@ def gen_command_code():
     for m in MODELS:
         entry = {"contextWindow": m["context"]}
         if m["wire"] == "anthropic":
-            entry = {"api": "anthropic-messages", "baseURL": ENDPOINT, **entry}
+            entry = {"api": "anthropic-messages", "baseURL": MAGPIE, **entry}
         elif m["wire"] == "responses":
             entry = {"api": "openai-responses", **entry}
         if m["efforts"]:
@@ -70,7 +76,7 @@ def gen_command_code():
         models[m["id"]] = entry
     cfg = {
         "providers": {
-            "cpa": {"baseURL": BASE_V1, "apiKey": f"!{TOKEN_CMD}", "models": models},
+            "cpa": {"baseURL": MAGPIE_V1, "apiKey": f"!{TOKEN_CMD}", "models": models},
             "bonsai-local": {
                 "baseURL": "http://127.0.0.1:8091/v1", "apiKey": False,
                 "models": {"bonsai-2-27b": {"contextWindow": 65536, "maxOutput": 8192}},
@@ -87,9 +93,9 @@ def gen_pi():
     # completions here (incl. reasoning_effort), so fold the anthropic wire into chat.
     # Only Command Code uses the native anthropic wire, where it is compatible.
     wire_to_prov = {
-        "anthropic": ("cpa", BASE_V1, "openai-completions"),
-        "responses": ("cpa-codex", BASE_V1, "openai-responses"),
-        "chat": ("cpa", BASE_V1, "openai-completions"),
+        "anthropic": ("cpa", MAGPIE_V1, "openai-completions"),
+        "responses": ("cpa-codex", MAGPIE_V1, "openai-responses"),
+        "chat": ("cpa", MAGPIE_V1, "openai-completions"),
     }
     provs = {}
     for m in MODELS:
@@ -132,11 +138,11 @@ def gen_opencode():
     cfg["provider"] = {
         "cpa": {
             "name": "CPA (relay, chat)", "npm": "@ai-sdk/openai-compatible",
-            "options": {"apiKey": tok, "baseURL": BASE_V1}, "models": chatish,
+            "options": {"apiKey": tok, "baseURL": MAGPIE_V1}, "models": chatish,
         },
         "cpa-codex": {
             "name": "CPA (relay, responses)", "npm": "@ai-sdk/openai",
-            "options": {"apiKey": tok, "baseURL": BASE_V1}, "models": responses,
+            "options": {"apiKey": tok, "baseURL": MAGPIE_V1}, "models": responses,
         },
         "bonsai-local": {
             "name": "Bonsai 2 27B (Local)", "npm": "@ai-sdk/openai-compatible",

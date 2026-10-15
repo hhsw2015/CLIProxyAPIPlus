@@ -164,17 +164,6 @@ def ensure_provider(pid, name, base):
         run("provider", "add", name, *kv, f"id={pid}"); print(f"  provider {pid}: added")
 
 
-def ensure_group(model):
-    gid = slug(model)
-    # Always `group add` — a name already in use REPLACES that group (idempotent per magpie).
-    # (Don't use `gid in run("groups")`: a bare-model-id gid like "claude-opus-4-8" is a
-    # substring of auto-claude-opus-4-8 / cpa-local/claude-opus-4-8, so that check false-matches
-    # and we'd `set` a group that doesn't exist.)
-    run("group", "add", f"CPA {model}", f"models=cpa-local/{model},cpa-cloud/{model}",
-        "routing=order", f"id={gid}")
-    return gid
-
-
 # ---- per-agent MINIMAL wirers (edit the agent's own config; magpie never manages it) ----
 
 def wire_codex(agent, gid):
@@ -232,20 +221,23 @@ def wire_codex(agent, gid):
     print(f"  codex -> group/{gid} (magpie structure: model_provider=magpie + openai_base_url)")
 
 
-def wire_managed(agent, gid):
-    """Simple JSON agents (OpenCode/Pi/Command Code/Claude): magpie wires these correctly, so
-    let it manage them. SAFE with the group-pick switch (magpie only reverts a managed config
-    when a group DEGRADES, which `provider off/on` causes but `magpie_mode.sh` group-pick never
-    does). Backs up the config first."""
-    paths = {
-        "opencode": "~/.config/opencode/opencode.json", "pi": "~/.pi/agent/settings.json",
-        "commandcode": "~/.commandcode/settings.json", "claude": "~/.claude/settings.json",
-    }
-    f = Path(paths.get(agent, "")).expanduser()
-    if f.exists() and not DRY:
-        shutil.copy2(f, f.with_suffix(f.suffix + ".magpie.bak"))
-    run(agent, f"group/{gid}")
-    print(f"  {agent} -> group/{gid} (magpie-managed JSON)")
+def wire_managed(agent, gid):  # gid unused; signature kept uniform with wire_codex for WIRERS
+    """JSON agents (OpenCode/Pi/Command Code): their magpie wiring — base_url -> :3425 with BARE
+    model ids — is produced by gen_agent_configs.py, the single source. Delegate to it. The old
+    `magpie <agent> group/<id>` path is gone: main() no longer creates groups (bare-id design +
+    `group auto off`), so it pointed at a non-existent group AND let magpie *manage* (and revert)
+    the config. Codex keeps its dedicated wirer (wire_codex)."""
+    gen = Path(__file__).resolve().parent / "gen_agent_configs.py"
+    if not gen.exists():
+        print(f"  {agent}: gen_agent_configs.py not found; skip"); return
+    if DRY:
+        print(f"  DRY  python3 gen_agent_configs.py --only {agent}"); return
+    r = subprocess.run([sys.executable, str(gen), "--only", agent], capture_output=True, text=True, timeout=120)
+    tail = ((r.stdout or "") + (r.stderr or "")).strip().splitlines()
+    print(f"  {agent} -> magpie :3425 via gen_agent_configs.py (bare ids)"
+          + (f"; {tail[-1]}" if tail else ""))
+    if r.returncode != 0:
+        print(f"    WARN gen_agent_configs.py {agent} failed (rc={r.returncode})")
 
 
 WIRERS = {"codex": wire_codex, "opencode": wire_managed, "pi": wire_managed,
@@ -254,9 +246,8 @@ WIRERS = {"codex": wire_codex, "opencode": wire_managed, "pi": wire_managed,
 
 def main():
     print(f"magpie_sync{' (dry-run)' if DRY else ''}")
-    # Capture the live backend mode BEFORE ensure_group replaces the groups (a `group add` on an
-    # existing name resets routing to `order` and drops the manual pick). Re-asserted at the end
-    # via magpie_mode so `cpa agent-sync` never silently changes which backend is active.
+    # Capture the live backend mode now so a re-sync preserves it (re-asserted at the end via
+    # magpie_mode so `cpa agent-sync` never silently changes which backend is active).
     mode = detect_mode()
     # Never re-assert 'cloud' when cloud is unreachable: magpie_mode.sh cloud runs
     # `provider on cpa-cloud`, and magpie then SPINS (~155% CPU) trying to activate/probe the
@@ -334,9 +325,8 @@ def main():
     else:
         print("(mirror + groups done; run with --wire [agent...] to point agents at magpie)")
 
-    # Re-assert the backend mode: ensure_group above reset each group to routing=order and dropped
-    # its manual pick, so re-point them to the live mode. magpie_mode now just group-picks (both
-    # providers already carry the full catalog from the loop above), so this step is fast.
+    # Re-assert the backend mode via magpie_mode (both providers already carry the full catalog
+    # from the loop above, so this just re-points / group-picks the live mode; fast).
     if not DRY:
         mm = Path(__file__).resolve().parent / "magpie_mode.sh"
         if mm.exists():
