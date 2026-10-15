@@ -166,14 +166,14 @@ def ensure_provider(pid, name, base):
 
 # ---- per-agent MINIMAL wirers (edit the agent's own config; magpie never manages it) ----
 
-def wire_codex(agent, gid):
+def wire_codex(agent, model):
     """Codex TOML: write magpie's OWN structure (captured verbatim from magpie wiring a clean
     config) so magpie recognizes Codex like the JSON agents. magpie's auto-wire botches heavy
     configs (it only writes when `model` already differs), so we apply the structure ourselves,
-    preserving everything else. Backs up first. Idempotent.
+    preserving everything else. Backs up first. Idempotent. Returns True on success.
 
     magpie's canonical Codex wiring = these top-level keys + a [model_providers.magpie] block:
-        model              = "group/<gid>"
+        model              = "<bare id>"   (bare, e.g. gpt-6-astra — NOT group/<id>; no groups)
         model_provider     = "magpie"
         model_catalog_json = "~/.codex/magpie-models.json"
         openai_base_url    = "<GW>/backend-api/codex"
@@ -181,7 +181,7 @@ def wire_codex(agent, gid):
     """
     p = Path("~/.codex/config.toml").expanduser()
     if not p.exists():
-        print("  codex: config.toml not found; skip"); return
+        print("  codex: config.toml not found; skip"); return False
     s = p.read_text()
     if not DRY:
         shutil.copy2(p, p.with_suffix(".toml.magpie.bak"))
@@ -190,9 +190,9 @@ def wire_codex(agent, gid):
     head = s.split("\n[", 1)[0]
     nh = head
     if re.search(r'^model\s*=\s*"', nh, re.M):
-        nh = re.sub(r'^model\s*=\s*"[^"]*"', f'model = "group/{gid}"', nh, count=1, flags=re.M)
+        nh = re.sub(r'^model\s*=\s*"[^"]*"', f'model = "{model}"', nh, count=1, flags=re.M)
     else:
-        nh = f'model = "group/{gid}"\n' + nh
+        nh = f'model = "{model}"\n' + nh
 
     def setkey(h, k, v):
         if re.search(rf'^{re.escape(k)}\s*=', h, re.M):
@@ -218,26 +218,30 @@ def wire_codex(agent, gid):
                               'requires_openai_auth = true\n')
     if not DRY:
         p.write_text(s)
-    print(f"  codex -> group/{gid} (magpie structure: model_provider=magpie + openai_base_url)")
+    print(f"  codex -> {model} (bare id; magpie structure: model_provider=magpie + openai_base_url)")
+    return True
 
 
-def wire_managed(agent, gid):  # gid unused; signature kept uniform with wire_codex for WIRERS
+def wire_managed(agent, model):  # model unused; signature kept uniform with wire_codex for WIRERS
     """JSON agents (OpenCode/Pi/Command Code): their magpie wiring — base_url -> :3425 with BARE
     model ids — is produced by gen_agent_configs.py, the single source. Delegate to it. The old
     `magpie <agent> group/<id>` path is gone: main() no longer creates groups (bare-id design +
     `group auto off`), so it pointed at a non-existent group AND let magpie *manage* (and revert)
-    the config. Codex keeps its dedicated wirer (wire_codex)."""
+    the config. Codex keeps its dedicated wirer (wire_codex). Returns True on success so --wire
+    can propagate a generator write failure to its exit status."""
     gen = Path(__file__).resolve().parent / "gen_agent_configs.py"
     if not gen.exists():
-        print(f"  {agent}: gen_agent_configs.py not found; skip"); return
+        print(f"  {agent}: gen_agent_configs.py not found; skip"); return False
     if DRY:
-        print(f"  DRY  python3 gen_agent_configs.py --only {agent}"); return
+        print(f"  DRY  python3 gen_agent_configs.py --only {agent}"); return True
     r = subprocess.run([sys.executable, str(gen), "--only", agent], capture_output=True, text=True, timeout=120)
     tail = ((r.stdout or "") + (r.stderr or "")).strip().splitlines()
     print(f"  {agent} -> magpie :3425 via gen_agent_configs.py (bare ids)"
           + (f"; {tail[-1]}" if tail else ""))
     if r.returncode != 0:
         print(f"    WARN gen_agent_configs.py {agent} failed (rc={r.returncode})")
+        return False
+    return True
 
 
 WIRERS = {"codex": wire_codex, "opencode": wire_managed, "pi": wire_managed,
@@ -313,15 +317,18 @@ def main():
     # recognized by Codex -> it compacted/called via chat, which 400s on responses-only gpt-6-astra.)
     print("no groups created (agents use bare ids; one-sided expose makes them follow the switch)")
 
+    wire_failed = []
     if WIRE:
         targets = [a for a in (WIRE_ONLY or AGENT_MODELS) if a in AGENT_MODELS]
         print(f"wiring agents (minimal edit, unmanaged by magpie): {', '.join(targets) or '(none)'}")
         for agent in targets:
-            gid = slug(AGENT_MODELS[agent])
+            model = AGENT_MODELS[agent]
             if agent in WIRERS:
-                WIRERS[agent](agent, gid)
+                if not WIRERS[agent](agent, model):
+                    wire_failed.append(agent)
             else:
-                print(f"  {agent}: no automated wirer yet — point its base_url at {GW} + model=group/{gid} manually")
+                print(f"  {agent}: no automated wirer yet — point its base_url at {GW} + model={model} manually")
+                wire_failed.append(agent)
     else:
         print("(mirror + groups done; run with --wire [agent...] to point agents at magpie)")
 
@@ -335,6 +342,11 @@ def main():
         else:
             print(f"  magpie_mode.sh not found; run it manually to set mode={mode} (picker + pick)")
 
+    if wire_failed:
+        print(f"wire FAILED for: {', '.join(wire_failed)} (configs for these were NOT updated)")
+        return 1
+    return 0
+
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main() or 0)
